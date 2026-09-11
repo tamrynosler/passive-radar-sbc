@@ -1,41 +1,121 @@
-cmake_minimum_required(VERSION 3.18)
-
-# ------------------------------------------------------------------------------
-# smartpol-pbr : FM passive bistatic radar processing on embedded GPU
+# passive-radar-sbc — top-level build
 #
-# Requires a CMake >= 3.18 for first-class CUDA + CUDAToolkit support.
-# The Ubuntu 18.04 (L4T R32.7) apt CMake is 3.10 and will NOT work. Get a modern
-# one on the Nano with:
-#     python3 -m pip install --user "cmake>=3.18"
-# and ensure ~/.local/bin is on PATH, or use the Kitware apt repository.
-#
-# If you would rather not touch CMake at all, the benchmark builds standalone:
-#     nvcc -O3 -arch=sm_53 bench/cufft_bench.cu -lcufft -o cufft_bench
-# ------------------------------------------------------------------------------
+# Target platform: Jetson Nano (Tegra X1, Maxwell sm_53), CUDA 10.2,
+# stock CMake 3.10 on L4T / Ubuntu 18.04. Everything below is written to
+# work on 3.10 but upgrades gracefully if a newer CMake (e.g. pip-installed)
+# is present.
 
-project(smartpol_pbr LANGUAGES CXX CUDA)
+cmake_minimum_required(VERSION 3.10)
 
-set(CMAKE_CXX_STANDARD 17)
+project(passive_radar_sbc LANGUAGES CXX CUDA)
+
+# ---------------------------------------------------------------------------
+# Standards — CUDA 10.2 tops out at C++14 for device code
+# ---------------------------------------------------------------------------
+set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 14)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-
-# Jetson Nano / Tegra X1 is compute capability 5.3 (sm_53). Override on the
-# command line for other targets, e.g. -DCMAKE_CUDA_ARCHITECTURES=87 for Orin.
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 53)
-endif()
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-find_package(CUDAToolkit REQUIRED)
+# ---------------------------------------------------------------------------
+# GPU architecture: sm_53 only (Jetson Nano)
+# CMAKE_CUDA_ARCHITECTURES exists from CMake 3.18; fall back to raw
+# -gencode flags on the Nano's stock 3.10.
+# ---------------------------------------------------------------------------
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.18")
+  if(NOT CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES 53)
+  endif()
+else()
+  string(APPEND CMAKE_CUDA_FLAGS " -gencode arch=compute_53,code=sm_53")
+endif()
 
-# --- benchmark harness --------------------------------------------------------
+string(APPEND CMAKE_CUDA_FLAGS_RELEASE " -O3")
+string(APPEND CMAKE_CXX_FLAGS_RELEASE " -O3")
+
+# ---------------------------------------------------------------------------
+# CUDA math libraries (cuFFT, cuBLAS)
+# CMake 3.10 has no CUDA::cufft imported targets, so locate them manually.
+# ---------------------------------------------------------------------------
+find_library(CUFFT_LIBRARY cufft
+  HINTS ${CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES}
+        /usr/local/cuda-10.2/lib64
+        /usr/local/cuda/lib64)
+
+find_library(CUBLAS_LIBRARY cublas
+  HINTS ${CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES}
+        /usr/local/cuda-10.2/lib64
+        /usr/local/cuda/lib64)
+
+if(NOT CUFFT_LIBRARY OR NOT CUBLAS_LIBRARY)
+  message(FATAL_ERROR
+    "cuFFT/cuBLAS not found. Check CUDA 10.2 is installed at /usr/local/cuda-10.2.")
+endif()
+
+set(PBR_CUDA_LIBS ${CUFFT_LIBRARY} ${CUBLAS_LIBRARY})
+
+# Project-wide public headers
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# Optional helper modules in cmake/ (kept non-fatal while that dir evolves)
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+
+# ---------------------------------------------------------------------------
+# Core library: everything under src/ except src/app/
+# NOTE: file(GLOB) means CMake must be re-run after adding new source files
+# ("make build" from the Mac always re-runs cmake, so this is handled).
+# Once the source set stabilises, replace the glob with an explicit list.
+# ---------------------------------------------------------------------------
+file(GLOB_RECURSE PBR_SOURCES
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cu
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
+list(FILTER PBR_SOURCES EXCLUDE REGEX "/src/app/")
+
+if(PBR_SOURCES)
+  add_library(pbr STATIC ${PBR_SOURCES})
+  target_link_libraries(pbr ${PBR_CUDA_LIBS})
+  set(PBR_LIB pbr)
+else()
+  # src/ is still empty scaffolding — build benchmarks standalone for now.
+  set(PBR_LIB "")
+endif()
+
+# ---------------------------------------------------------------------------
+# Standalone benchmarks (bench/)
+# ---------------------------------------------------------------------------
 add_executable(cufft_bench bench/cufft_bench.cu)
-target_link_libraries(cufft_bench PRIVATE CUDA::cufft CUDA::cudart)
+target_link_libraries(cufft_bench ${PBR_LIB} ${PBR_CUDA_LIBS})
 
-# Processing-chain libraries (ingest, dsp, fft, linalg) get added here as the
-# port proceeds, e.g.:
-#   add_subdirectory(src)
+# ---------------------------------------------------------------------------
+# Application executables: one per source file in src/app/
+# ---------------------------------------------------------------------------
+file(GLOB APP_SOURCES
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/app/*.cu
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/app/*.cpp)
+
+foreach(app_src ${APP_SOURCES})
+  get_filename_component(app_name ${app_src} NAME_WE)
+  add_executable(${app_name} ${app_src})
+  target_link_libraries(${app_name} ${PBR_LIB} ${PBR_CUDA_LIBS})
+endforeach()
+
+# ---------------------------------------------------------------------------
+# Tests (MATLAB-vs-CUDA validation) — enabled once tests/ gains sources
+# ---------------------------------------------------------------------------
+file(GLOB TEST_SOURCES
+  ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cu
+  ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp)
+
+if(TEST_SOURCES)
+  enable_testing()
+  foreach(test_src ${TEST_SOURCES})
+    get_filename_component(test_name ${test_src} NAME_WE)
+    add_executable(${test_name} ${test_src})
+    target_link_libraries(${test_name} ${PBR_LIB} ${PBR_CUDA_LIBS})
+    add_test(NAME ${test_name} COMMAND ${test_name})
+  endforeach()
+endif()

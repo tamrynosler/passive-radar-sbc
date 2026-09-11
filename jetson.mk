@@ -1,24 +1,24 @@
-CUDA_PATH ?= /usr/local/cuda-10.2
-NVCC      := $(CUDA_PATH)/bin/nvcc
-ARCH      := -gencode arch=compute_53,code=sm_53
-CXXFLAGS  := -O3 -std=c++14
-LIBS      := -lcufft -lcublas
+# passive-radar-sbc — convenience wrapper for interactive use ON the Jetson.
+#
+# The real build system is CMake (see CMakeLists.txt); the Mac-side
+# Makefile drives it over SSH. This file exists only so that, when
+# SSH'd in directly, you can type `make -f jetson.mk` instead of
+# remembering the cmake incantation. It contains NO build rules of
+# its own — do not add compiler flags here; they belong in CMakeLists.txt.
 
 BUILD_DIR := build
-TARGET    := $(BUILD_DIR)/cufft_harness
 
-all: $(TARGET)
+all:
+	cmake -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=Release
+	cmake --build $(BUILD_DIR) -j2
 
-$(TARGET): src/cufft_harness.cu | $(BUILD_DIR)
-	$(NVCC) $(ARCH) $(CXXFLAGS) $< -o $@ $(LIBS)
+run: all
+	./$(BUILD_DIR)/cufft_bench
 
-$(BUILD_DIR):
-	mkdir -p $(BUILD_DIR)
-
-run: $(TARGET)
-	./$(TARGET)
+bench: all
+	bash scripts/run_cufft_bench.sh
 
 clean:
 	rm -rf $(BUILD_DIR)
 
-.PHONY: all run clean
+.PHONY: all run bench clean
