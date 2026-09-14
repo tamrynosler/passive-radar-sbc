@@ -1,4 +1,4 @@
-# smartpol-pbr
+# passive-radar-sbc
 
 FM-based passive bistatic radar (PBR) processing on embedded GPU hardware.
 
@@ -9,7 +9,6 @@ CUDA 10.2). Signal source is the FERS radar simulator streaming VITA 49.2 over
 UDP, decoupled from the processing platform so the same ingest interface later
 accepts a live receiver front end.
 
-> Rename this repo to match your thesis / lab naming before publishing.
 
 ## Status
 
@@ -24,13 +23,13 @@ accepts a live receiver front end.
 ## Repository layout
 
 ```
-smartpol-pbr/
+passive-radar-sbc/
 ├── CMakeLists.txt        top-level build (needs CMake >= 3.18)
 ├── README.md
 ├── .gitignore
 ├── bench/                standalone benchmarking harnesses
 │   └── cufft_bench.cu    cuFFT timing + memory-ceiling tool
-├── include/smartpol/     public headers for the processing library
+├── include/pbr/          public headers for the processing library
 ├── src/
 │   ├── ingest/           VITA 49.2 UDP receiver + lock-free circular buffer
 │   ├── dsp/              DSI cancellation, CAF, CFAR kernels
@@ -123,5 +122,4 @@ Two design signals to watch:
 
 ## Licence
 
-Confirm your institution's IP policy for thesis code before choosing a licence.
-If you are free to open-source, MIT or BSD-3-Clause are common for academic work.
+TODO: Confirm UCT's IP policy for thesis code before choosing a licence.
