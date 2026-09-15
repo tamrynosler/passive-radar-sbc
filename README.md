@@ -14,17 +14,26 @@ accepts a live receiver front end.
 
 - [x] Jetson Nano bring-up, CUDA 10.2 verified (`deviceQuery` PASS)
 - [x] MATLAB reference chain (FERS → ECA-B → CAF range–Doppler → 2D CA-CFAR)
-- [x] cuFFT timing + capacity harness (`bench/`)
-- [ ] C++/CUDA VITA 49.2 ingest + circular buffer
+- [x] cuFFT timing + capacity harness (`bench/`) — built and running on-hardware
+- [x] Remote build workflow (edit on laptop → build + run on Jetson over SSH)
+- [ ] C++/CUDA VITA 49.2 ingest + circular buffer  ← next
 - [ ] DSI cancellation kernels: ECA-S, ECA-B, ECA-CD, CGLS, batches
 - [ ] CAF range–Doppler + 2D CA-CFAR
 - [ ] Algorithm benchmarking study (suppression vs latency)
+
+> The cuFFT harness compiles, runs, times cleanly and emits valid CSV on the
+> Nano. Latency numbers captured so far are **provisional** — taken on Micro-USB
+> power with DVFS active (see the measurement note below). Citable figures await
+> a stable barrel-jack supply with clocks pinned.
+
 
 ## Repository layout
 
 ```
 passive-radar-sbc/
-├── CMakeLists.txt        top-level build (needs CMake >= 3.18)
+├── CMakeLists.txt        top-level build (CMake >= 3.10; see Build)
+├── Makefile              laptop-side driver: sync + remote build/run over SSH
+├── jetson.mk             thin on-board wrapper around CMake (for direct use)
 ├── README.md
 ├── .gitignore
 ├── bench/                standalone benchmarking harnesses
@@ -51,24 +60,47 @@ and is regenerated from the FERS scenarios in `config/`. See `.gitignore`.
 ## Requirements
 
 - Jetson Nano, L4T R32.7.x, CUDA 10.2 (cuFFT, cuBLAS; cuSOLVER on Orin)
-- CMake >= 3.18 (the 3.10 from apt will not build CUDA targets — see below)
-- A C++17 host compiler (the g++ shipped with L4T is fine)
+- CMake >= 3.10 — the stock version from L4T apt works. The CMakeLists uses
+  explicit `-gencode arch=compute_53,code=sm_53` below CMake 3.18 and the modern
+  `CMAKE_CUDA_ARCHITECTURES` path at/above it, so a newer CMake is optional.
+- A C++14-capable host compiler (g++ 7.5 shipped with L4T is fine). CUDA 10.2
+  device code is limited to C++14; do not use C++17 features in `.cu` files.
 
 ## Build
 
-Modern CMake, once (`~/.local/bin` on PATH):
+Development happens on a laptop; the Jetson is the build/run target. Editing is
+done on the laptop and synced to the board over SSH — the top-level `Makefile`
+drives a remote CMake build, so you never edit on the Jetson directly (an rsync
+with `--delete` mirrors the tree and will clobber on-board edits).
+
+### Everyday workflow (from the laptop)
+
+Requires a `Host jetson` entry in `~/.ssh/config` with key-based auth.
 
 ```bash
-python3 -m pip install --user "cmake>=3.18"
+make build     # rsync tree to the Jetson, then configure + compile there
+make test      # build, then run the default cuFFT harness config
+make bench     # build, run scripts/run_cufft_bench.sh, pull CSV/logs back
+make shell     # interactive shell in the remote repo
+make clean-remote
 ```
 
-Then:
+### Directly on the Jetson
+
+Stock CMake 3.10 is sufficient. nvcc is pinned by absolute path so the build
+does not depend on the shell PATH (a non-interactive SSH shell does not source
+the interactive part of `~/.bashrc`):
 
 ```bash
-cmake -S . -B build -DCMAKE_CUDA_ARCHITECTURES=53
-cmake --build build -j4
+mkdir -p build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_CUDA_COMPILER=/usr/local/cuda-10.2/bin/nvcc ..
+make -j2
 # -> build/cufft_bench
 ```
+
+`-j2` (not `-j4`) is deliberate: the 4 GB is shared with the GPU, so a
+lower job count avoids OOM on heavier template-heavy translation units later.
 
 No-CMake fallback for the harness alone:
 
@@ -104,6 +136,17 @@ chmod +x scripts/run_cufft_bench.sh
 scripts/run_cufft_bench.sh -- --sweep-size --min-size 1024 --max-size 33554432 --batch 1 --csv
 # results + tegrastats.log land in /data/bench/<timestamp>/
 ```
+
+> **Measurement note.** Latency figures are only meaningful on a stable 5 V/4 A
+> barrel-jack supply (J48 jumper fitted) with the desktop stopped
+> (`sudo systemctl set-default multi-user.target`) and clocks pinned
+> (`sudo nvpmodel -m 0 && sudo jetson_clocks`). On Micro-USB power or with DVFS
+> active, per-run *means* vary several-fold and can even be misleadingly
+> *consistent* while the GPU sits throttled; the per-run *minimum* tracks the
+> true kernel time but is not citable on its own. Always record the nvpmodel
+> mode alongside results. The sweeps push allocation/compute to the ceiling and
+> should only be run on the barrel jack — rail sag under load corrupts the
+> microSD rather than failing cleanly.
 
 ### Reading the output
 

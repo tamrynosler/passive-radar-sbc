@@ -34,8 +34,7 @@ else()
   string(APPEND CMAKE_CUDA_FLAGS " -gencode arch=compute_53,code=sm_53")
 endif()
 
-string(APPEND CMAKE_CUDA_FLAGS_RELEASE " -O3")
-string(APPEND CMAKE_CXX_FLAGS_RELEASE " -O3")
+
 
 # ---------------------------------------------------------------------------
 # CUDA math libraries (cuFFT, cuBLAS)
