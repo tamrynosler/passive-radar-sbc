@@ -8,6 +8,7 @@
 
 JETSON  ?= jetson
 REMOTE  ?= ~/passive-radar-sbc
+NVCC := /usr/local/cuda-10.2/bin/nvcc
 
 RSYNC := rsync -av --delete \
          --exclude '.git' \
@@ -23,11 +24,10 @@ sync:
 
 ## configure: run CMake configure step only (useful when debugging CMake)
 configure: sync
-	ssh $(JETSON) 'cd $(REMOTE) && cmake -B build -DCMAKE_BUILD_TYPE=Release'
-
-## build: sync + configure + compile on the Jetson
+		ssh $(JETSON) 'cd $(REMOTE) && mkdir -p build && cd build && cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_COMPILER=$(NVCC) ..'
+	
 build: sync
-	ssh $(JETSON) 'cd $(REMOTE) && cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j2'
+		ssh $(JETSON) 'cd $(REMOTE) && mkdir -p build && cd build && cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_COMPILER=$(NVCC) .. && make -j2'
 
 ## test: build then run the cuFFT harness interactively (output to terminal)
 test: build

@@ -9,8 +9,9 @@
 BUILD_DIR := build
 
 all:
-	cmake -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=Release
-	cmake --build $(BUILD_DIR) -j2
+	mkdir -p $(BUILD_DIR)
+	cd $(BUILD_DIR) && cmake -DCMAKE_BUILD_TYPE=Release \
+	    -DCMAKE_CUDA_COMPILER=/usr/local/cuda-10.2/bin/nvcc .. && make -j2
 
 run: all
 	./$(BUILD_DIR)/cufft_bench
