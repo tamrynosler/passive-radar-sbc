@@ -20,7 +20,57 @@ RSYNC := rsync -av --delete \
          --exclude 'results' \
          --exclude '.DS_Store'
 
-.PHONY: sync configure build test bench pull-results shell clean-remote
+.PHONY: sync configure build test bench pull-results shell clean-remote \
+        host-probe host-replay host-test host-clean
+
+# ---------------------------------------------------------------------------
+# Host-only builds — run on the Mac, no Jetson and no CUDA involved.
+#
+# The ingest layer (VITA 49 decode, UDP socket, circular buffer) is plain
+# C++14 and POSIX sockets, so it builds and runs locally. CMake cannot be
+# used for this: CMakeLists.txt declares CUDA as a project language, so
+# `cmake ..` fails outright on a machine without a CUDA toolkit. These
+# targets therefore call the compiler directly.
+#
+# Local runs prove FUNCTION only. All timing and performance numbers must
+# come from the Jetson via `make bench`.
+# ---------------------------------------------------------------------------
+HOST_CXX      ?= c++
+HOST_CXXFLAGS := -std=c++14 -O2 -Wall -Wextra -Iinclude -pthread
+HOST_BIN      := bin
+INGEST_SRC    := src/ingest/CircularBuffer.cpp \
+                 src/ingest/Vita49Packet.cpp \
+                 src/ingest/UdpReceiver.cpp \
+                 src/ingest/ChannelIngest.cpp \
+                 src/ingest/CaptureFile.cpp
+HOST_TESTS    := tests/test_circular_buffer.cpp tests/test_vita49_packet.cpp
+
+## host-probe: build the live FERS ingest checkpoint locally -> bin/ingest_probe
+host-probe:
+	@mkdir -p $(HOST_BIN)
+	$(HOST_CXX) $(HOST_CXXFLAGS) src/app/ingest_probe.cpp $(INGEST_SRC) \
+	    -o $(HOST_BIN)/ingest_probe
+	@echo "built $(HOST_BIN)/ingest_probe  —  run it BEFORE starting fers-cli"
+
+## host-replay: build the capture replay tool locally -> bin/ingest_replay
+host-replay:
+	@mkdir -p $(HOST_BIN)
+	$(HOST_CXX) $(HOST_CXXFLAGS) src/app/ingest_replay.cpp $(INGEST_SRC) \
+	    -o $(HOST_BIN)/ingest_replay
+	@echo "built $(HOST_BIN)/ingest_replay"
+
+## host-test: build and run every unattended unit test locally
+host-test:
+	@mkdir -p $(HOST_BIN)
+	@for t in $(HOST_TESTS); do \
+	    n=$$(basename $$t .cpp); \
+	    $(HOST_CXX) $(HOST_CXXFLAGS) $$t $(INGEST_SRC) -o $(HOST_BIN)/$$n || exit 1; \
+	    ./$(HOST_BIN)/$$n || exit 1; \
+	done
+
+## host-clean: remove locally built binaries
+host-clean:
+	rm -rf $(HOST_BIN)
 
 ## sync: mirror the local tree to the Jetson (build/ and results survive)
 sync:

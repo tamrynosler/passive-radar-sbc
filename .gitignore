@@ -20,6 +20,8 @@ nvprof.*
 *.iq
 *.dat
 *.mat
+*.h5
+*.pbrcap
 tegrastats*.log
 data/
 results/

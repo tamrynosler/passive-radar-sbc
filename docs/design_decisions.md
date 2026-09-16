@@ -267,10 +267,83 @@ conversion step into the read path.
 | Check | Status |
 |---|---|
 | 13 unit tests (`tests/test_circular_buffer.cpp`) | Pass |
-| `-Wall -Wextra`, Release flags (`-O2 -DNDEBUG`) | Clean, clang 14, host |
+| `-Wall -Wextra`, Release flags (`-O2 -DNDEBUG`) | Clean, clang 14 host and gcc 7.5 aarch64 |
 | AddressSanitizer + UndefinedBehaviorSanitizer | Clean |
-| Build and run on Jetson Nano (gcc 7, CUDA 10.2) | **Not yet done** |
+| Build and unit tests on Jetson Nano (gcc 7.5, CUDA 10.2) | Pass |
+| Live ingest against FERS, 30 s, Jetson over LAN | Pass — see §5.1 |
 | Validation against MATLAB golden files | Not applicable — buffer is a data structure, not a processing stage |
+
+### 5.1 Live ingest results, 2026-09-16
+
+FERS on the development Mac streaming VITA 49.2 UDP to the Jetson Nano over a
+LAN link; 30 s run, `--vita49-fullscale 0.005`, scenario
+`SingleTargetCleanNativeFileCw.fersxml`.
+
+| Measure | Reference | Surveillance |
+|---|---|---|
+| Data packets | 18,000 | 17,999 |
+| Index continuity (exact / ahead / behind) | 17,999 / 0 / 0 | 17,998 / 0 / 0 |
+| Immediate read-back verified | 18,000 | 17,999 |
+| Lag check windows verified | 30 | 29 |
+| Declared packet size matched | 18,000 | 17,999 |
+| Raw ADC code peak | 27.8% of full scale | 0.9% of full scale |
+
+Totals: 36,059 datagrams, 0 parse failures, 0 rejected writes, 0 packet-count
+gaps, 0 data packets arriving before their context packet, 12,287,666 samples
+buffered, buffer fill steady at 2.00 s throughout.
+
+### 5.2 Full-length run and ADC scaling, 2026-09-16
+
+A 172 s run (the full 180 s scenario, loopback) measured the true peak through
+the UDP path rather than a 30 s sample:
+
+| Measure | Reference | Surveillance |
+|---|---|---|
+| Data packets | 103,201 | 103,201 |
+| Index continuity (exact / ahead / behind) | 103,200 / 0 / 0 | 103,200 / 0 / 0 |
+| Lag check windows verified | 172 | 172 |
+| Raw ADC code peak at `fullscale` 0.005 | 11,381 (34.7%) | 326 (1.0%) |
+
+206,748 datagrams, 0 parse failures, 0 rejected writes, 0 packet-count gaps.
+
+The reference peak grew from 8,964 over 30 s to 11,381 over the full run,
+which is why calibration needs a full-length measurement.
+
+**Recommended `--vita49-fullscale` = 0.0022**, derived as
+`0.005 x 11381 / (0.8 x 32767)`, putting the reference at about 79% of full
+scale. At that setting surveillance reaches ~741 codes, roughly 9.5 effective
+bits, up from ~8.3.
+
+**The limitation is structural, not a misconfiguration.** The direct path sits
+about 31 dB above the bistatic echo, and FERS applies one global full-scale
+value to every receiver. Whatever headroom the reference channel needs is
+taken out of the surveillance channel's dynamic range. A real passive radar
+receiver applies independent gain control per channel, so this simulator
+constraint *understates* the surveillance dynamic range a physical system
+would achieve. The resulting quantisation floor is worth stating explicitly
+when reporting cancellation depth, since after 30-40 dB of direct-path
+suppression the residual is measured against it.
+
+### 5.1 Live ingest results (continued)
+
+Four facts established by the 30 s Jetson run, each previously unverified:
+
+1. **FERS timestamps land exactly on sample boundaries.** Index continuity was
+   exact on every one of 36,000 packets, across two independent derivations
+   (timestamp arithmetic versus accumulated sample counts). The truncation /
+   rounding hazard in the picosecond-to-sample conversion does not arise, so
+   `absoluteIndex()` needs no rounding term.
+2. **FERS populates the header's declared packet-size field correctly.** Zero
+   mismatches over two runs and ~72,000 packets, so the parser now enforces it
+   as a free corruption and truncation check.
+3. **The mod-16 packet counter advances for every packet in a stream, context
+   packets included.** An earlier implementation tracked it only on data
+   packets and reported one spurious gap per second, exactly matching FERS's
+   1 Hz context heartbeat.
+4. **No packet loss over the LAN link** at ~1.7 MB/s, despite the Jetson's
+   `SO_RCVBUF` being clamped to 426 KB (0.25 s of slack) by the stock
+   `net.core.rmem_max`. That margin is thin and should be raised before the
+   DSP stages start competing for CPU.
 
 Test coverage: construction and invalid construction; zero-length operations;
 in-order round-trip; writes straddling the wrap; out-of-order writes; wholly
