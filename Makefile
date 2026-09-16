@@ -10,7 +10,11 @@ JETSON  ?= jetson
 REMOTE  ?= ~/passive-radar-sbc
 NVCC := /usr/local/cuda-10.2/bin/nvcc
 
+# Exclusions are driven by .gitignore (per-directory merge), so anything
+# ignored by git is also kept off the Jetson. The explicit excludes below
+# are belt-and-braces for paths that must never sync regardless.
 RSYNC := rsync -av --delete \
+         --filter=':- .gitignore' \
          --exclude '.git' \
          --exclude 'build' \
          --exclude 'results' \

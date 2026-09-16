@@ -1,0 +1,45 @@
+# Build output
+build/
+*.o
+*.obj
+*.so
+*.a
+cufft_bench
+bin/
+
+# CUDA / profiler artefacts
+*.nvvp
+*.qdrep
+*.nsys-rep
+*.ncu-rep
+nvprof.*
+
+# Benchmark + capture data (lives on /data, regenerated from FERS — never commit)
+*.csv
+*.bin
+*.iq
+*.dat
+*.mat
+tegrastats*.log
+data/
+results/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Python (if a plotting/analysis venv is used)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Legacy code
+legacy/
+
+# Agent standards + session records (local only, not for the repo or Jetson)
+CLAUDE.md
+PROGRESS.md
+PLAN.md
