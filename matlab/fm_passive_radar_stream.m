@@ -124,9 +124,20 @@ while ishandle(fig)
             % First 20 packets, in full detail -- confirms datagrams are
             % arriving at all, and that parse_vita49_packet is reading a
             % sane type/streamId/time out of them (not all 'other', not a
-            % constant streamId, timestamps increasing).
-            fprintf('[pkt %2d] bytes=%-5d type=%-7s streamId=%.0f time=%.6f\n', ...
-                nPktTotal, numel(dgrams(k).Data), pkt.type, pkt.streamId, pkt.time);
+            % constant streamId, timestamps increasing). Also surfaces
+            % whether packetCount increments (cheap drop detector, if
+            % real) and whether declaredWords matches the datagram FERS
+            % actually sent (validates the header's own size field).
+            actualWords = numel(dgrams(k).Data) / 4;
+            if pkt.declaredWords == actualWords
+                sizeCheck = 'OK';
+            else
+                sizeCheck = 'MISMATCH';
+            end
+            fprintf(['[pkt %2d] bytes=%-5d type=%-7s streamId=%.0f time=%.6f ' ...
+                     'count=%d declaredWords=%d actualWords=%g %s\n'], ...
+                nPktTotal, numel(dgrams(k).Data), pkt.type, pkt.streamId, pkt.time, ...
+                pkt.packetCount, pkt.declaredWords, actualWords, sizeCheck);
         end
         if strcmp(pkt.type, 'data')
             nDataTotal = nDataTotal + 1;

@@ -22,6 +22,17 @@ function pkt = parse_vita49_packet(raw)
 %     pkt.time      - double, absolute timestamp in seconds
 %                     (UTC-int-seconds + picoseconds/1e12). For data
 %                     packets this is the time of the FIRST sample.
+%     pkt.packetCount   - double, 0-15. Header bits [19:16], a mod-16
+%                         rolling counter per VRT convention. NOT
+%                         previously decoded or validated against real
+%                         FERS traffic -- confirm it actually increments
+%                         (and by how much) before relying on it for drop
+%                         detection.
+%     pkt.declaredWords - double. Header bits [15:0], the packet size
+%                         FERS claims for itself in 32-bit words. Compare
+%                         against numel(raw)/4 to check whether FERS sets
+%                         this field consistently with the datagram it
+%                         actually sent -- also not previously verified.
 %
 %   Data packets ('data') additionally have:
 %     pkt.iq         - 1xM complex double row vector of raw ADC codes.
@@ -41,7 +52,8 @@ function pkt = parse_vita49_packet(raw)
 %                      with fields like meta.receiver.name, .mode, .id
 
 raw = uint8(raw(:)).';
-pkt = struct('type', 'other', 'streamId', 0, 'classId', uint64(0), 'time', NaN);
+pkt = struct('type', 'other', 'streamId', 0, 'classId', uint64(0), 'time', NaN, ...
+             'packetCount', NaN, 'declaredWords', NaN);
 
 if numel(raw) < 28
     return
@@ -50,6 +62,10 @@ end
 pktType = bitshift(raw(1), -4);      % top nibble of the first header byte
 pkt.streamId = double(bytes2uint(raw(5:8)));
 pkt.classId  = bytes2uint(raw(9:16));
+
+hdrWord = bytes2uint(raw(1:4));                       % full 32-bit header word
+pkt.packetCount   = double(bitand(bitshift(hdrWord, -16), 15));  % bits [19:16]
+pkt.declaredWords = double(bitand(hdrWord, 65535));              % bits [15:0]
 
 tsInt  = double(bytes2uint(raw(17:20)));
 tsFrac = double(bytes2uint(raw(21:28)));   % picoseconds

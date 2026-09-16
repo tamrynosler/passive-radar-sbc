@@ -33,9 +33,9 @@ configure: sync
 build: sync
 		ssh $(JETSON) 'cd $(REMOTE) && mkdir -p build && cd build && cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_COMPILER=$(NVCC) .. && make -j2'
 
-## test: build then run the cuFFT harness interactively (output to terminal)
+## test: build then run every unit test in tests/ via ctest
 test: build
-	ssh $(JETSON) 'cd $(REMOTE) && ./build/cufft_bench'
+	ssh $(JETSON) 'cd $(REMOTE)/build && ctest --output-on-failure'
 
 ## bench: full benchmark run via scripts/run_cufft_bench.sh
 ##        (pins clocks, logs tegrastats, writes CSV to /data/results),
