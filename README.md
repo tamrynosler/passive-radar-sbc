@@ -16,8 +16,10 @@ accepts a live receiver front end.
 - [x] MATLAB reference chain (FERS → ECA-B → CAF range–Doppler → 2D CA-CFAR)
 - [x] cuFFT timing + capacity harness (`bench/`) — built and running on-hardware
 - [x] Remote build workflow (edit on laptop → build + run on Jetson over SSH)
-- [ ] C++/CUDA VITA 49.2 ingest + circular buffer  ← next
-- [ ] DSI cancellation kernels: ECA-S, ECA-B, ECA-CD, CGLS, batches
+- [x] C++/CUDA VITA 49.2 ingest + absolute-index circular buffer
+- [x] CPI extraction: aligned 1 s windows handed to the DSP chain
+- [x] Configuration file (`config/prb.conf`) driving the whole chain
+- [ ] DSI cancellation kernels: ECA-S, ECA-B, ECA-CD, CGLS, batches  ← next
 - [ ] CAF range–Doppler + 2D CA-CFAR
 - [ ] Algorithm benchmarking study (suppression vs latency)
 
@@ -47,7 +49,8 @@ passive-radar-sbc/
 │   └── app/              executables (offline runner, live pipeline)
 ├── tests/                unit + integration tests, MATLAB-vs-CUDA validation
 ├── matlab/               the reference implementation (validation ground truth)
-├── config/               FERS scenarios (.fersxml), geometry + processing params
+├── config/               prb.conf — processing parameters for the whole chain
+├── third_party/          approved external headers (currently none)
 ├── scripts/              run wrappers, tegrastats logging, profiling helpers
 ├── docs/                 architecture notes, benchmarking methodology, results
 └── cmake/                helper modules
@@ -79,7 +82,7 @@ Requires a `Host jetson` entry in `~/.ssh/config` with key-based auth.
 
 ```bash
 make build     # rsync tree to the Jetson, then configure + compile there
-make test      # build, then run the default cuFFT harness config
+make test      # build, then run every unit test on the Jetson via ctest
 make bench     # build, run scripts/run_cufft_bench.sh, pull CSV/logs back
 make shell     # interactive shell in the remote repo
 make clean-remote
@@ -107,6 +110,45 @@ No-CMake fallback for the harness alone:
 ```bash
 nvcc -O3 -arch=sm_53 bench/cufft_bench.cu -lcufft -o cufft_bench
 ```
+
+## Ingest and CPI extraction
+
+The ingest layer is plain C++14 and POSIX sockets with no CUDA in it, so it
+builds and runs on the laptop as well as the Jetson. Local runs prove
+function; all timing numbers must come from the Jetson.
+
+```bash
+make host-test     # build and run every unit test locally (seconds)
+make host-probe    # -> bin/ingest_probe, the live FERS checkpoint
+make host-replay   # -> bin/ingest_replay, replays a recorded capture
+```
+
+`ingest_probe` is the live checkpoint. Start it **before** `fers-cli`, since it
+binds the UDP port:
+
+```bash
+./bin/ingest_probe --seconds 30 --capture data/fers_capture.pbrcap
+# then, in another terminal:
+fers-cli <scenario>.fersxml --out-dir=/tmp/out \
+         --vita49 127.0.0.1:4991 --vita49-fullscale 0.0022 -n=6
+```
+
+It verifies, against the live stream, that every sample lands at the absolute
+index its VITA 49 timestamp implies, reads back identically, and survives in
+the ring buffer while being overwritten — then reports how many CPIs it
+extracted. Exit status is 0 on PASS.
+
+`ingest_replay` runs a recorded capture through the identical path, so every
+stage stays testable without live FERS:
+
+```bash
+./bin/ingest_replay --file data/fers_capture.pbrcap --csv data/cpp_decode.csv
+```
+
+The `--csv` output feeds `matlab/compare_vita49_capture.m`, which decodes the
+same bytes with `parse_vita49_packet.m` and compares field by field. A capture
+recorded at a different `--vita49-fullscale` than the config needs
+`--fullscale` to override it.
 
 ## Running the benchmark
 

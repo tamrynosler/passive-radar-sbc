@@ -153,6 +153,75 @@ regions except during overwrite).
 
 ---
 
+## 1b. Configuration file (`config/prb.conf`)
+
+**Decision.** One `KEY = VALUE` text file, in the legacy Commensal Radar
+ProcServer format, loaded into a typed struct at startup. No dependency, no
+sections, `#` to end of line for comments.
+
+**Why a file rather than compiled-in constants.** Every parameter in it is one
+that has to agree with something outside the program: the `.fersxml` scenario,
+the `fers-cli` command line, or the MATLAB reference chain. Compiled-in
+constants drift silently. That already happened once —
+`fm_passive_radar_stream.m` still carried `fullscale = 1.0` long after runs
+moved to 0.005, which would make any amplitude comparison meaningless. A
+config file also makes a result traceable: the file is tracked in git, so a
+thesis figure can be tied to the parameters that produced it.
+
+**Two policies that matter more than the parsing.**
+
+*A required key that is absent is a fatal startup error, naming the key.*
+Never a silent default. A silent default is exactly how a 200x amplitude error
+survives unnoticed.
+
+*An unrecognised key is ignored.* One file then serves tools that read
+different subsets of it, and adding a parameter for one tool cannot break
+another. Same instinct as skipping unknown VITA 49 packet types.
+
+**Derived values are computed, never stored.** Samples per CPI, samples per
+hop, buffer capacity in samples and the Doppler bin count all come from the
+values they depend on, so they cannot fall out of step with them.
+
+**Validation at load** catches three mistakes that are otherwise painful to
+diagnose: `N_CLUTTER_TAPS < N_RANGE_BINS` (the ECA formulation requires at
+least as many taps as bins); a `DOPPLER_DECIMATION` that does not divide the
+CPI exactly, which leaves a remainder and a subtly wrong Doppler axis; and a
+buffer shorter than one CPI, which makes extraction impossible rather than
+merely tight.
+
+**Rejected: making the file valid MATLAB** so both chains could read it
+directly. MATLAB cannot `run()` a file that does not end in `.m`, so the
+MATLAB side would need a reader either way, and the author preferred to leave
+the MATLAB chain untouched.
+
+## 1c. CPI extraction (`ChannelIngest::tryExtractCpi`)
+
+**Decision.** CPI extraction is a method on `ChannelIngest`, not a separate
+class. It already owns both channel buffers and knows the sample rate, so a
+separate extractor would only pass references around. "Packets in, CPIs out"
+is one job.
+
+**One shared start pointer, not one per channel.** Both channels are addressed
+on a single absolute timeline, so a single `muCpiStart` serves both and
+inter-channel alignment needs no separate step. This is the payoff from the
+absolute-index addressing decision in section 1.1.
+
+**Ready requires all three of:** both channels have written past the end of the
+window; neither has yet overwritten its start; and the window is at least
+`MIN_CPI_COVERAGE` non-zero. The coverage test is trustworthy here in a way it
+is not for the MATLAB reference, because the zero-fill of section 1.5
+guarantees a gap really is zeros rather than stale samples from the previous
+lap.
+
+**An overtaken window advances by whole hops, not by snapping** to the oldest
+resident index. That keeps CPI starts on a fixed lattice, so an index still
+maps predictably back to a time, and the number of hops skipped is itself the
+count of CPIs lost.
+
+**Three-way return rather than a bool.** `Ready`, `NotYet` and `Skipped` are
+genuinely different situations for the caller: wait, versus a window that is
+gone and will not come back. Collapsing them would hide data loss.
+
 ## 2. Memory layout on the Jetson Nano
 
 One contiguous heap allocation per channel, made once at construction and never

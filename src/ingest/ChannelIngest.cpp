@@ -99,6 +99,12 @@ ChannelIngest::ChannelIngest(const ChannelIngestConfig& oConfig)
       mdCodeToVolts(0.0),
       mRefBuffer(oConfig.uBufferCapacity),
       mSurBuffer(oConfig.uBufferCapacity),
+      mbRefSeen(false),
+      muRefFirstIndex(0),
+      mbSurSeen(false),
+      muSurFirstIndex(0),
+      mbCpiAnchored(false),
+      muCpiStart(0),
       mbValid(false)
 {
     std::memset(&mStats, 0, sizeof(mStats));
@@ -117,6 +123,21 @@ ChannelIngest::ChannelIngest(const ChannelIngestConfig& oConfig)
     }
     if (oConfig.sReferenceName == oConfig.sSurveillanceName) {
         std::fprintf(stderr, "ChannelIngest: reference and surveillance names are identical\n");
+        return;
+    }
+    if (oConfig.uCpiSamples == 0 || oConfig.uHopSamples == 0) {
+        std::fprintf(stderr, "ChannelIngest: CPI and hop lengths must be non-zero\n");
+        return;
+    }
+    if (oConfig.uCpiSamples > oConfig.uBufferCapacity) {
+        std::fprintf(stderr, "ChannelIngest: a CPI of %llu samples does not fit in a "
+                             "%llu sample buffer\n",
+                     static_cast<unsigned long long>(oConfig.uCpiSamples),
+                     static_cast<unsigned long long>(oConfig.uBufferCapacity));
+        return;
+    }
+    if (oConfig.dMinCpiCoverage <= 0.0 || oConfig.dMinCpiCoverage > 1.0) {
+        std::fprintf(stderr, "ChannelIngest: minimum CPI coverage must be in (0, 1]\n");
         return;
     }
 
@@ -365,8 +386,107 @@ bool ChannelIngest::handleData(const Vita49Packet& oPacket)
         return true;   // already logged by the buffer; not a fault here
     }
 
+    // Remember the lowest index seen on this channel, for the CPI anchor.
+    // Minimum rather than first-written, since packets can arrive reordered.
+    bool&     bSeen  = bIsSurveillance ? mbSurSeen        : mbRefSeen;
+    uint64_t& uFirst = bIsSurveillance ? muSurFirstIndex  : muRefFirstIndex;
+    if (!bSeen || uAbsIndex < uFirst) {
+        bSeen  = true;
+        uFirst = uAbsIndex;
+    }
+
     mStats.uSamplesWritten += oPacket.uSampleCount;
     return true;
+}
+
+double ChannelIngest::coverage(const ComplexF* pcSamples, uint64_t uCount)
+{
+    if (uCount == 0)
+        return 0.0;
+
+    uint64_t uNonZero = 0;
+    for (uint64_t u = 0; u < uCount; ++u) {
+        if (pcSamples[u].real() != 0.0f || pcSamples[u].imag() != 0.0f)
+            ++uNonZero;
+    }
+    return static_cast<double>(uNonZero) / static_cast<double>(uCount);
+}
+
+CpiStatus ChannelIngest::tryExtractCpi(ComplexF* pcRef, ComplexF* pcSur,
+                                       uint64_t uCount, uint64_t& uCpiStartOut)
+{
+    uCpiStartOut = 0;
+
+    if (!mbValid || pcRef == nullptr || pcSur == nullptr) {
+        std::fprintf(stderr, "tryExtractCpi: invalid ingest or null destination\n");
+        return CpiStatus::NotYet;
+    }
+    if (uCount != mConfig.uCpiSamples) {
+        std::fprintf(stderr, "tryExtractCpi: asked for %llu samples, configured "
+                             "CPI is %llu\n",
+                     static_cast<unsigned long long>(uCount),
+                     static_cast<unsigned long long>(mConfig.uCpiSamples));
+        return CpiStatus::NotYet;
+    }
+
+    // Nothing to anchor to until both channels have delivered something.
+    if (!mbRefSeen || !mbSurSeen)
+        return CpiStatus::NotYet;
+
+    // Anchor on the earliest index both channels can cover. Both live on one
+    // absolute timeline, so a single start pointer serves both.
+    if (!mbCpiAnchored) {
+        muCpiStart = (muRefFirstIndex > muSurFirstIndex) ? muRefFirstIndex
+                                                         : muSurFirstIndex;
+        mbCpiAnchored = true;
+    }
+
+    // Has the window we wanted already been overwritten? Step forward by whole
+    // hops rather than snapping, so CPI starts stay on the same lattice and an
+    // index still maps predictably back to a time.
+    const uint64_t uRefOldest = mRefBuffer.oldestValid();
+    const uint64_t uSurOldest = mSurBuffer.oldestValid();
+    const uint64_t uOldest    = (uRefOldest > uSurOldest) ? uRefOldest : uSurOldest;
+
+    if (muCpiStart < uOldest) {
+        const uint64_t uBehind = uOldest - muCpiStart;
+        const uint64_t uHops   = (uBehind + mConfig.uHopSamples - 1) / mConfig.uHopSamples;
+        muCpiStart += uHops * mConfig.uHopSamples;
+        mStats.uCpisOvertaken += uHops;
+        return CpiStatus::Skipped;
+    }
+
+    // Both channels must have written past the end of the window.
+    const uint64_t uNeededEnd = muCpiStart + uCount;
+    if (mRefBuffer.writeEnd() < uNeededEnd || mSurBuffer.writeEnd() < uNeededEnd)
+        return CpiStatus::NotYet;
+
+    if (!mRefBuffer.read(muCpiStart, pcRef, uCount) ||
+        !mSurBuffer.read(muCpiStart, pcSur, uCount)) {
+        // The window passed the tests above, so a refusal here means the
+        // buffer's view of what is resident disagrees with ours.
+        std::fprintf(stderr, "tryExtractCpi: buffer refused a window at %llu that "
+                             "should have been resident\n",
+                     static_cast<unsigned long long>(muCpiStart));
+        muCpiStart += mConfig.uHopSamples;
+        return CpiStatus::Skipped;
+    }
+
+    const uint64_t uStart = muCpiStart;
+    muCpiStart += mConfig.uHopSamples;
+
+    // A gap reads back as exact zeros, because CircularBuffer zero-fills on a
+    // forward jump. That is what makes this count trustworthy -- without it,
+    // stale samples from the previous lap would look like valid data.
+    if (coverage(pcRef, uCount) < mConfig.dMinCpiCoverage ||
+        coverage(pcSur, uCount) < mConfig.dMinCpiCoverage) {
+        ++mStats.uCpisSkippedCoverage;
+        return CpiStatus::Skipped;
+    }
+
+    ++mStats.uCpisEmitted;
+    uCpiStartOut = uStart;
+    return CpiStatus::Ready;
 }
 
 } // namespace pbr

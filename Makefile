@@ -39,11 +39,13 @@ HOST_CXX      ?= c++
 HOST_CXXFLAGS := -std=c++14 -O2 -Wall -Wextra -Iinclude -pthread
 HOST_BIN      := bin
 INGEST_SRC    := src/ingest/CircularBuffer.cpp \
+                 src/ingest/Config.cpp \
                  src/ingest/Vita49Packet.cpp \
                  src/ingest/UdpReceiver.cpp \
                  src/ingest/ChannelIngest.cpp \
                  src/ingest/CaptureFile.cpp
-HOST_TESTS    := tests/test_circular_buffer.cpp tests/test_vita49_packet.cpp
+HOST_TESTS    := tests/test_circular_buffer.cpp tests/test_vita49_packet.cpp \
+                 tests/test_config.cpp tests/test_cpi_extraction.cpp
 
 ## host-probe: build the live FERS ingest checkpoint locally -> bin/ingest_probe
 host-probe:

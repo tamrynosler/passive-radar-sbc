@@ -22,6 +22,19 @@ struct ChannelIngestConfig {
     uint64_t    uBufferCapacity;      // samples per channel (bufSeconds * fs)
     std::string sReferenceName;       // must match <receiver name="..."> exactly
     std::string sSurveillanceName;
+
+    // CPI extraction. Deliberately a narrow interface rather than taking the
+    // whole PbrConfig, so ChannelIngest stays testable without a config file.
+    uint64_t    uCpiSamples;          // window length handed to the DSP chain
+    uint64_t    uHopSamples;          // step between consecutive CPI starts
+    double      dMinCpiCoverage;      // fraction that must be non-zero, e.g. 0.99
+};
+
+// Outcome of one CPI extraction attempt.
+enum class CpiStatus {
+    Ready,     // a window was written to the caller's buffers
+    NotYet,    // not enough data has arrived; try again after more packets
+    Skipped    // a window was lost or too gappy to use; the start has advanced
 };
 
 // Largest packet we will accept. FERS's default packetisation is 342 samples
@@ -55,6 +68,20 @@ public:
     // return true and are recorded in stats().
     bool handlePacket(const Vita49Packet& oPacket);
 
+    // Try to hand over the next coherent processing interval.
+    //
+    // On Ready, pcRef and pcSur each hold uCount samples covering the same
+    // absolute index range, starting at uCpiStartOut, and the internal start
+    // pointer has advanced by one hop. On NotYet nothing was written. On
+    // Skipped the buffers MAY have been written but must not be used: either
+    // the window fell out of the buffer before both channels completed it, or
+    // it contained too many gaps to trust.
+    //
+    // uCount must equal uCpiSamples from the config. The caller owns both
+    // buffers. Drain in a loop until NotYet.
+    CpiStatus tryExtractCpi(ComplexF* pcRef, ComplexF* pcSur, uint64_t uCount,
+                            uint64_t& uCpiStartOut);
+
     // True once both reference and surveillance stream IDs are known.
     bool rolesResolved() const;
 
@@ -73,6 +100,11 @@ public:
         uint64_t uUnresolvedData;     // data arrived before its context packet
         uint64_t uPacketCountGaps;    // mod-16 header counter skipped
         uint64_t uOversizePackets;    // more samples than kMaxSamplesPerPacket
+
+        uint64_t uCpisEmitted;          // handed over as Ready
+        uint64_t uCpisSkippedCoverage;  // too many zero samples to trust
+        uint64_t uCpisOvertaken;        // overwritten before both channels
+                                        // completed them
     };
     const Stats& stats() const { return mStats; }
 
@@ -97,6 +129,9 @@ private:
     StreamState* findStream(uint32_t uStreamId);
     StreamState& findOrAddStream(uint32_t uStreamId);
 
+    // Fraction of a window that is non-zero.
+    static double coverage(const ComplexF* pcSamples, uint64_t uCount);
+
     ChannelIngestConfig mConfig;
     double              mdCodeToVolts;   // dFullScale / 32767
 
@@ -104,6 +139,18 @@ private:
     CircularBuffer mSurBuffer;
 
     std::vector<StreamState> mvStreams;
+
+    // Lowest absolute index ever written on each channel. The CPI anchor needs
+    // this, and it must be the MINIMUM rather than the first one written,
+    // because packets can arrive out of order.
+    bool     mbRefSeen;
+    uint64_t muRefFirstIndex;
+    bool     mbSurSeen;
+    uint64_t muSurFirstIndex;
+
+    // Absolute index of the next CPI to hand over.
+    bool     mbCpiAnchored;
+    uint64_t muCpiStart;
 
     Stats mStats;
     bool  mbValid;

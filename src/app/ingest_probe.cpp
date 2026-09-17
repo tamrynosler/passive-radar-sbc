@@ -9,7 +9,8 @@
 // so it lives in src/app/ rather than tests/, where ctest would run it
 // unattended and hang.
 //
-// Usage:  ingest_probe [run_seconds] [port] [fullscale]
+// Usage:  ingest_probe [--seconds N] [--config FILE] [--capture FILE]
+//                      [--port P] [--fullscale F]
 //
 // Start this first, then in another terminal:
 //
@@ -35,6 +36,7 @@
 //      proves data survives in a buffer that is being overwritten.
 
 #include "pbr/CaptureFile.hpp"
+#include "pbr/Config.hpp"
 #include "pbr/ChannelIngest.hpp"
 #include "pbr/CircularBuffer.hpp"
 #include "pbr/UdpReceiver.hpp"
@@ -53,19 +55,12 @@ using namespace pbr;
 
 namespace {
 
-// Defaults, matching SingleTargetCleanNativeFileCw.fersxml and the MATLAB
-// reference chain.
-constexpr uint16_t    kDefaultPort       = 4991;
-constexpr double      kDefaultFullScale  = 0.005;
-constexpr uint64_t    kSampleRateHz      = 204800;
-constexpr uint64_t    kBufferSeconds     = 2;
-constexpr uint64_t    kCpiSamples        = kSampleRateHz;   // Tcpi = 1.0 s
+// Chain parameters all come from the config file. Only the run length,
+// the wait timeout and the datagram buffer are properties of this tool.
+const char* const     kDefaultConfigPath = "config/prb.conf";
 constexpr int         kDefaultRunSeconds = 30;
 constexpr int         kStreamWaitSeconds = 20;
 constexpr size_t      kDatagramCapacity  = 2048;            // FERS sends 1400
-
-const char* const kReferenceName    = "ArmasuisseRefRxClean";
-const char* const kSurveillanceName = "ArmasuisseSurRxClean";
 
 // Per-stream verification state.
 struct StreamCheck {
@@ -129,10 +124,10 @@ int32_t readBe16Signed(const uint8_t* p)
 
 // Independent reimplementation of the index arithmetic, so check 1 is not
 // just comparing ChannelIngest against itself.
-uint64_t expectedAbsoluteIndex(uint64_t uSeconds, uint64_t uPicoseconds)
+uint64_t expectedAbsoluteIndex(uint64_t uSeconds, uint64_t uPicoseconds, uint64_t uFs)
 {
     constexpr uint64_t kPsPerSecond = 1000000000000ULL;
-    return uSeconds * kSampleRateHz + (uPicoseconds * kSampleRateHz) / kPsPerSecond;
+    return uSeconds * uFs + (uPicoseconds * uFs) / kPsPerSecond;
 }
 
 // Independent reimplementation of the sample conversion, for the same reason.
@@ -173,9 +168,10 @@ const char* roleName(ChannelRole eRole)
 
 struct Options {
     int         iRunSeconds = kDefaultRunSeconds;
-    uint16_t    uPort       = kDefaultPort;
-    double      dFullScale  = kDefaultFullScale;
+    std::string sConfigPath = kDefaultConfigPath;
     std::string sCapturePath;
+    uint16_t    uPort      = 0;     // 0 means "take it from the config"
+    double      dFullScale = 0.0;   // 0 means "take it from the config"
 };
 
 void printUsage(const char* pProgram)
@@ -183,10 +179,9 @@ void printUsage(const char* pProgram)
     std::printf("usage: %s [options]\n", pProgram);
     std::printf("  --seconds N     run checks for N seconds after both receivers\n");
     std::printf("                  identify themselves (default %d)\n", kDefaultRunSeconds);
-    std::printf("  --port P        UDP port to listen on (default %u)\n",
-                static_cast<unsigned>(kDefaultPort));
-    std::printf("  --fullscale F   must match --vita49-fullscale (default %g)\n",
-                kDefaultFullScale);
+    std::printf("  --config FILE   configuration (default %s)\n", kDefaultConfigPath);
+    std::printf("  --port P        override the config's UDP port\n");
+    std::printf("  --fullscale F   override the config's --vita49-fullscale\n");
     std::printf("  --capture FILE  also record every datagram to FILE for replay\n");
 }
 
@@ -204,6 +199,8 @@ bool parseArgs(int argc, char* argv[], Options& oOptions)
             oOptions.uPort = static_cast<uint16_t>(std::atoi(argv[++i]));
         } else if (sArg == "--fullscale" && bHasValue) {
             oOptions.dFullScale = std::atof(argv[++i]);
+        } else if (sArg == "--config" && bHasValue) {
+            oOptions.sConfigPath = argv[++i];
         } else if (sArg == "--capture" && bHasValue) {
             oOptions.sCapturePath = argv[++i];
         } else {
@@ -212,8 +209,8 @@ bool parseArgs(int argc, char* argv[], Options& oOptions)
         }
     }
 
-    if (oOptions.iRunSeconds <= 0 || oOptions.uPort == 0 || oOptions.dFullScale <= 0.0) {
-        std::fprintf(stderr, "seconds, port and fullscale must all be positive\n");
+    if (oOptions.iRunSeconds <= 0 || oOptions.dFullScale < 0.0) {
+        std::fprintf(stderr, "seconds must be positive and fullscale non-negative\n");
         return false;
     }
     return true;
@@ -226,18 +223,19 @@ double secondsSince(const std::chrono::steady_clock::time_point& tStart)
 }
 
 // Compare a completed shadow window against the ring.
-void verifyShadow(StreamCheck& oCheck, const CircularBuffer& oBuffer)
+void verifyShadow(StreamCheck& oCheck, const CircularBuffer& oBuffer,
+                  uint64_t uCpiSamples)
 {
-    std::vector<ComplexF> vcFromRing(kCpiSamples);
+    std::vector<ComplexF> vcFromRing(uCpiSamples);
 
-    if (!oBuffer.read(oCheck.uShadowBase, vcFromRing.data(), kCpiSamples)) {
+    if (!oBuffer.read(oCheck.uShadowBase, vcFromRing.data(), uCpiSamples)) {
         // The window fell out of the buffer before we could check it, which
         // means processing fell more than one CPI behind.
         ++oCheck.uShadowAbandoned;
         return;
     }
 
-    for (uint64_t u = 0; u < kCpiSamples; ++u) {
+    for (uint64_t u = 0; u < uCpiSamples; ++u) {
         if (vcFromRing[u] != oCheck.vShadow[u]) {
             ++oCheck.uShadowBad;
             std::fprintf(stderr,
@@ -260,16 +258,23 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    const int      iRunSeconds = oOptions.iRunSeconds;
-    const uint16_t uPort       = oOptions.uPort;
-    const double   dFullScale  = oOptions.dFullScale;
+    PbrConfig oCfg;
+    if (!loadPbrConfig(oOptions.sConfigPath.c_str(), oCfg))
+        return 1;
 
-    std::printf("ingest_probe\n");
-    std::printf("  port             %u\n", static_cast<unsigned>(uPort));
-    std::printf("  sample rate      %llu Hz\n", (unsigned long long)kSampleRateHz);
-    std::printf("  fullscale        %g   (must match --vita49-fullscale)\n", dFullScale);
-    std::printf("  buffer           %llu s per channel\n", (unsigned long long)kBufferSeconds);
+    const int      iRunSeconds = oOptions.iRunSeconds;
+    const uint16_t uPort       = (oOptions.uPort != 0) ? oOptions.uPort : oCfg.uUdpPort;
+    const double   dFullScale  = (oOptions.dFullScale > 0.0) ? oOptions.dFullScale
+                                                             : oCfg.dFullScale;
+    const uint64_t uCpiSamples = oCfg.uCpiSamples;
+
+    printPbrConfig(oCfg);
+    std::printf("\ningest_probe\n");
     std::printf("  run duration     %d s\n", iRunSeconds);
+    if (uPort != oCfg.uUdpPort)
+        std::printf("  port             %u   (override)\n", static_cast<unsigned>(uPort));
+    if (dFullScale != oCfg.dFullScale)
+        std::printf("  fullscale        %g   (override)\n", dFullScale);
 
     CaptureWriter oCapture;
     if (!oOptions.sCapturePath.empty()) {
@@ -280,11 +285,14 @@ int main(int argc, char* argv[])
     std::printf("\n");
 
     ChannelIngestConfig oConfig;
-    oConfig.uSampleRateHz     = kSampleRateHz;
+    oConfig.uSampleRateHz     = oCfg.uSampleRateHz;
     oConfig.dFullScale        = dFullScale;
-    oConfig.uBufferCapacity   = kBufferSeconds * kSampleRateHz;
-    oConfig.sReferenceName    = kReferenceName;
-    oConfig.sSurveillanceName = kSurveillanceName;
+    oConfig.uBufferCapacity   = oCfg.uBufferCapacity;
+    oConfig.sReferenceName    = oCfg.sReferenceName;
+    oConfig.sSurveillanceName = oCfg.sSurveillanceName;
+    oConfig.uCpiSamples       = oCfg.uCpiSamples;
+    oConfig.uHopSamples       = oCfg.uHopSamples;
+    oConfig.dMinCpiCoverage   = oCfg.dMinCpiCoverage;
 
     ChannelIngest oIngest(oConfig);
     if (!oIngest.isValid()) {
@@ -315,6 +323,12 @@ int main(int argc, char* argv[])
 
     std::vector<uint8_t>  vDatagram(kDatagramCapacity);
     std::vector<StreamCheck> vChecks;
+
+    std::vector<ComplexF> vcCpiRef(uCpiSamples);
+    std::vector<ComplexF> vcCpiSur(uCpiSamples);
+    bool     bFirstCpi     = true;
+    uint64_t uPrevCpiStart = 0;
+    uint64_t uCpiHopErrors = 0;
     std::vector<ComplexF> vcExpected;
     std::vector<ComplexF> vcReadback;
 
@@ -394,6 +408,22 @@ int main(int argc, char* argv[])
         if (!oIngest.handlePacket(oPacket))
             return 1;
 
+        // Drain whatever CPIs the new data completed. This is the handover
+        // point: on Ready, vcCpiRef/vcCpiSur hold what the DSP chain consumes.
+        for (;;) {
+            uint64_t uCpiStart = 0;
+            const CpiStatus eCpi = oIngest.tryExtractCpi(
+                vcCpiRef.data(), vcCpiSur.data(), uCpiSamples, uCpiStart);
+            if (eCpi == CpiStatus::NotYet)
+                break;
+            if (eCpi == CpiStatus::Skipped)
+                continue;
+            if (!bFirstCpi && uCpiStart - uPrevCpiStart != oCfg.uHopSamples)
+                ++uCpiHopErrors;
+            bFirstCpi     = false;
+            uPrevCpiStart = uCpiStart;
+        }
+
         if (oIngest.rolesResolved() && !bRolesLogged) {
             bRolesLogged = true;
             dRunStart    = secondsSince(tStart);
@@ -420,7 +450,8 @@ int main(int argc, char* argv[])
         // packet types, and reported through stats().uPacketCountGaps.
 
         const uint64_t uIndex =
-            expectedAbsoluteIndex(oPacket.uTimestampSec, oPacket.uTimestampPs);
+            expectedAbsoluteIndex(oPacket.uTimestampSec, oPacket.uTimestampPs,
+                                  oCfg.uSampleRateHz);
 
         // CHECK 1: index continuity.
         if (!oCheck.bHaveExpected) {
@@ -469,21 +500,21 @@ int main(int argc, char* argv[])
         // CHECK 3: accumulate into the non-circular shadow, and verify the
         // window against the ring once it is complete.
         if (!oCheck.bShadowActive) {
-            oCheck.vShadow.assign(kCpiSamples, ComplexF(0.0f, 0.0f));
+            oCheck.vShadow.assign(uCpiSamples, ComplexF(0.0f, 0.0f));
             oCheck.uShadowBase   = uIndex;
             oCheck.uShadowFilled = 0;
             oCheck.bShadowActive = true;
         }
 
         if (uIndex >= oCheck.uShadowBase &&
-            uIndex < oCheck.uShadowBase + kCpiSamples) {
+            uIndex < oCheck.uShadowBase + uCpiSamples) {
 
             // Copy only the part of the packet that lands inside the window.
             // The CPI is not a whole number of packets (204800 / 342 = 598.8),
             // so the last packet of every window straddles the boundary and
             // must be clipped rather than skipped.
             const uint64_t uOffset = uIndex - oCheck.uShadowBase;
-            const uint64_t uRoom   = kCpiSamples - uOffset;
+            const uint64_t uRoom   = uCpiSamples - uOffset;
             const uint64_t uCopy   = (oPacket.uSampleCount < uRoom)
                                    ? oPacket.uSampleCount : uRoom;
 
@@ -491,12 +522,12 @@ int main(int argc, char* argv[])
                 oCheck.vShadow[uOffset + u] = vcExpected[u];
             oCheck.uShadowFilled += uCopy;
 
-            if (oCheck.uShadowFilled >= kCpiSamples) {
-                verifyShadow(oCheck, oBuffer);
+            if (oCheck.uShadowFilled >= uCpiSamples) {
+                verifyShadow(oCheck, oBuffer, uCpiSamples);
                 oCheck.bShadowActive = false;
             }
 
-        } else if (uIndex >= oCheck.uShadowBase + kCpiSamples) {
+        } else if (uIndex >= oCheck.uShadowBase + uCpiSamples) {
             // A gap left the window incomplete and the stream has moved past
             // it. Abandon and re-anchor rather than verifying partial data.
             ++oCheck.uShadowAbandoned;
@@ -510,8 +541,8 @@ int main(int argc, char* argv[])
 
             const CircularBuffer& oRef = oIngest.buffer(ChannelRole::Reference);
             const CircularBuffer& oSur = oIngest.buffer(ChannelRole::Surveillance);
-            const double dRefFill = double(oRef.writeEnd() - oRef.oldestValid()) / kSampleRateHz;
-            const double dSurFill = double(oSur.writeEnd() - oSur.oldestValid()) / kSampleRateHz;
+            const double dRefFill = double(oRef.writeEnd() - oRef.oldestValid()) / oCfg.uSampleRateHz;
+            const double dSurFill = double(oSur.writeEnd() - oSur.oldestValid()) / oCfg.uSampleRateHz;
 
             std::printf("  t=%5.1fs  data %llu  ctx %llu  samples %llu  "
                         "fill ref %.2fs sur %.2fs  rejected %llu  gaps %llu\n",
@@ -550,6 +581,14 @@ int main(int argc, char* argv[])
     std::printf("oversize packets        %llu\n", (unsigned long long)oStats.uOversizePackets);
     std::printf("packet-count gaps       %llu   (mod-16 header counter, all packet types)\n",
                 (unsigned long long)oStats.uPacketCountGaps);
+
+    std::printf("\n-- CPI extraction (the DSP chain's input)\n");
+    std::printf("   CPIs emitted           %llu\n", (unsigned long long)oStats.uCpisEmitted);
+    std::printf("   skipped, poor coverage %llu\n", (unsigned long long)oStats.uCpisSkippedCoverage);
+    std::printf("   skipped, overtaken     %llu\n", (unsigned long long)oStats.uCpisOvertaken);
+    std::printf("   hop-spacing errors     %llu\n", (unsigned long long)uCpiHopErrors);
+    if (uCpiHopErrors > 0 || oStats.uCpisEmitted == 0)
+        bPass = false;
 
     // A packet-count gap, and the matching "ahead" in index continuity, mean
     // the network or the kernel dropped a datagram. That is an environment

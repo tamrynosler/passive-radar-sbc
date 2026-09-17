@@ -22,6 +22,7 @@
 #include "pbr/CaptureFile.hpp"
 #include "pbr/ChannelIngest.hpp"
 #include "pbr/CircularBuffer.hpp"
+#include "pbr/Config.hpp"
 #include "pbr/Vita49Packet.hpp"
 #include "pbr/types.hpp"
 
@@ -35,26 +36,23 @@ using namespace pbr;
 
 namespace {
 
-constexpr double   kDefaultFullScale = 0.005;
-constexpr uint64_t kSampleRateHz     = 204800;
-constexpr uint64_t kBufferSeconds    = 2;
-constexpr size_t   kDatagramCapacity = 2048;
-
-const char* const kReferenceName    = "ArmasuisseRefRxClean";
-const char* const kSurveillanceName = "ArmasuisseSurRxClean";
+constexpr size_t      kDatagramCapacity = 2048;
+const char* const     kDefaultConfigPath = "config/prb.conf";
 
 struct Options {
     std::string sCapturePath;
     std::string sCsvPath;
-    double      dFullScale = kDefaultFullScale;
+    std::string sConfigPath = kDefaultConfigPath;
+    double      dFullScale  = 0.0;   // 0 means "take it from the config"
 };
 
 void printUsage(const char* pProgram)
 {
     std::printf("usage: %s --file CAPTURE [options]\n", pProgram);
     std::printf("  --file FILE      .pbrcap capture to replay (required)\n");
-    std::printf("  --fullscale F    must match the --vita49-fullscale used to\n");
-    std::printf("                   record the capture (default %g)\n", kDefaultFullScale);
+    std::printf("  --config FILE    configuration (default %s)\n", kDefaultConfigPath);
+    std::printf("  --fullscale F    override the config, for a capture recorded\n");
+    std::printf("                   with a different --vita49-fullscale\n");
     std::printf("  --csv FILE       write decoded data-packet fields for the\n");
     std::printf("                   MATLAB cross-check\n");
 }
@@ -71,6 +69,8 @@ bool parseArgs(int argc, char* argv[], Options& oOptions)
             oOptions.sCapturePath = argv[++i];
         } else if (sArg == "--csv" && bHasValue) {
             oOptions.sCsvPath = argv[++i];
+        } else if (sArg == "--config" && bHasValue) {
+            oOptions.sConfigPath = argv[++i];
         } else if (sArg == "--fullscale" && bHasValue) {
             oOptions.dFullScale = std::atof(argv[++i]);
         } else {
@@ -83,7 +83,7 @@ bool parseArgs(int argc, char* argv[], Options& oOptions)
         std::fprintf(stderr, "--file is required\n");
         return false;
     }
-    if (oOptions.dFullScale <= 0.0) {
+    if (oOptions.dFullScale < 0.0) {
         std::fprintf(stderr, "fullscale must be positive\n");
         return false;
     }
@@ -99,10 +99,10 @@ int32_t readBe16Signed(const uint8_t* p)
 
 // Same arithmetic as ChannelIngest::absoluteIndex, restated here so the CSV
 // carries an index the MATLAB side can check independently.
-uint64_t absoluteIndex(uint64_t uSeconds, uint64_t uPicoseconds)
+uint64_t absoluteIndex(uint64_t uSeconds, uint64_t uPicoseconds, uint64_t uFs)
 {
     constexpr uint64_t kPsPerSecond = 1000000000000ULL;
-    return uSeconds * kSampleRateHz + (uPicoseconds * kSampleRateHz) / kPsPerSecond;
+    return uSeconds * uFs + (uPicoseconds * uFs) / kPsPerSecond;
 }
 
 // Per-stream index continuity, the same check the live probe runs.
@@ -141,22 +141,45 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    PbrConfig oCfg;
+    if (!loadPbrConfig(oOptions.sConfigPath.c_str(), oCfg))
+        return 1;
+
+    // A capture recorded with a different --vita49-fullscale needs that value,
+    // not the one the config currently carries.
+    const double dFullScale = (oOptions.dFullScale > 0.0) ? oOptions.dFullScale
+                                                          : oCfg.dFullScale;
+
     CaptureReader oReader;
     if (!oReader.open(oOptions.sCapturePath.c_str()))
         return 1;
 
     ChannelIngestConfig oConfig;
-    oConfig.uSampleRateHz     = kSampleRateHz;
-    oConfig.dFullScale        = oOptions.dFullScale;
-    oConfig.uBufferCapacity   = kBufferSeconds * kSampleRateHz;
-    oConfig.sReferenceName    = kReferenceName;
-    oConfig.sSurveillanceName = kSurveillanceName;
+    oConfig.uSampleRateHz     = oCfg.uSampleRateHz;
+    oConfig.dFullScale        = dFullScale;
+    oConfig.uBufferCapacity   = oCfg.uBufferCapacity;
+    oConfig.sReferenceName    = oCfg.sReferenceName;
+    oConfig.sSurveillanceName = oCfg.sSurveillanceName;
+    oConfig.uCpiSamples       = oCfg.uCpiSamples;
+    oConfig.uHopSamples       = oCfg.uHopSamples;
+    oConfig.dMinCpiCoverage   = oCfg.dMinCpiCoverage;
 
     ChannelIngest oIngest(oConfig);
     if (!oIngest.isValid()) {
         std::fprintf(stderr, "ingest_replay: ChannelIngest failed to initialise\n");
         return 1;
     }
+
+    // Destination for extracted CPIs. This is exactly what the DSP chain will
+    // be handed.
+    std::vector<ComplexF> vcCpiRef(oCfg.uCpiSamples);
+    std::vector<ComplexF> vcCpiSur(oCfg.uCpiSamples);
+
+    bool     bFirstCpi      = true;
+    uint64_t uFirstCpiStart = 0;
+    uint64_t uPrevCpiStart  = 0;
+    uint64_t uCpiHopErrors  = 0;
+    uint64_t uCpiZeroRef    = 0;   // Ready windows that were entirely zero
 
     std::FILE* pCsv = nullptr;
     if (!oOptions.sCsvPath.empty()) {
@@ -170,9 +193,12 @@ int main(int argc, char* argv[])
                            "tsSec,tsPs,absIndex,nSamples,i0,q0,i1,q1,i2,q2\n");
     }
 
-    std::printf("ingest_replay\n");
+    printPbrConfig(oCfg);
+    std::printf("\ningest_replay\n");
     std::printf("  capture     %s\n", oOptions.sCapturePath.c_str());
-    std::printf("  fullscale   %g\n", oOptions.dFullScale);
+    if (dFullScale != oCfg.dFullScale)
+        std::printf("  fullscale   %g   (override; config says %g)\n",
+                    dFullScale, oCfg.dFullScale);
     if (pCsv != nullptr)
         std::printf("  csv         %s\n", oOptions.sCsvPath.c_str());
     std::printf("\n");
@@ -204,6 +230,41 @@ int main(int argc, char* argv[])
         if (!oIngest.handlePacket(oPacket))
             return 1;
 
+        // Drain whatever CPIs the new data completed. This is the loop the DSP
+        // chain will sit in.
+        for (;;) {
+            uint64_t uCpiStart = 0;
+            const CpiStatus eCpi = oIngest.tryExtractCpi(
+                vcCpiRef.data(), vcCpiSur.data(), oCfg.uCpiSamples, uCpiStart);
+
+            if (eCpi == CpiStatus::NotYet)
+                break;
+            if (eCpi == CpiStatus::Skipped)
+                continue;   // start already advanced; try the next window
+
+            // Consecutive CPI starts must sit exactly one hop apart.
+            if (bFirstCpi) {
+                bFirstCpi      = false;
+                uFirstCpiStart = uCpiStart;
+            } else if (uCpiStart - uPrevCpiStart != oCfg.uHopSamples) {
+                ++uCpiHopErrors;
+                std::fprintf(stderr,
+                             "CPI start jumped by %llu, expected %llu\n",
+                             (unsigned long long)(uCpiStart - uPrevCpiStart),
+                             (unsigned long long)oCfg.uHopSamples);
+            }
+            uPrevCpiStart = uCpiStart;
+
+            // A window that passed the coverage test cannot be all zeros.
+            bool bAnyNonZero = false;
+            for (uint64_t u = 0; u < oCfg.uCpiSamples && !bAnyNonZero; ++u) {
+                if (vcCpiRef[u].real() != 0.0f || vcCpiRef[u].imag() != 0.0f)
+                    bAnyNonZero = true;
+            }
+            if (!bAnyNonZero)
+                ++uCpiZeroRef;
+        }
+
         if (oPacket.eType != Vita49Type::Data)
             continue;
 
@@ -211,7 +272,8 @@ int main(int argc, char* argv[])
         ++oCheck.uDataPackets;
 
         const uint64_t uIndex =
-            absoluteIndex(oPacket.uTimestampSec, oPacket.uTimestampPs);
+            absoluteIndex(oPacket.uTimestampSec, oPacket.uTimestampPs,
+                          oCfg.uSampleRateHz);
 
         if (!oCheck.bHaveExpected) {
             oCheck.bHaveExpected = true;
@@ -278,7 +340,23 @@ int main(int argc, char* argv[])
     std::printf("writes rejected (late)  %llu\n", (unsigned long long)oStats.uRejectedWrites);
     std::printf("packet-count gaps       %llu\n", (unsigned long long)oStats.uPacketCountGaps);
 
+    std::printf("\n-- CPI extraction\n");
+    std::printf("   CPIs emitted           %llu\n", (unsigned long long)oStats.uCpisEmitted);
+    std::printf("   skipped, poor coverage %llu\n", (unsigned long long)oStats.uCpisSkippedCoverage);
+    std::printf("   skipped, overtaken     %llu\n", (unsigned long long)oStats.uCpisOvertaken);
+    std::printf("   hop-spacing errors     %llu\n", (unsigned long long)uCpiHopErrors);
+    std::printf("   all-zero windows       %llu\n", (unsigned long long)uCpiZeroRef);
+    if (oStats.uCpisEmitted > 0) {
+        std::printf("   first CPI start        %llu\n", (unsigned long long)uFirstCpiStart);
+        std::printf("   last CPI start         %llu\n", (unsigned long long)uPrevCpiStart);
+        std::printf("   span                   %.3f s of signal\n",
+                    double(uPrevCpiStart + oCfg.uCpiSamples - uFirstCpiStart)
+                        / double(oCfg.uSampleRateHz));
+    }
+
     if (uParseFailures > 0 || oStats.uRejectedWrites > 0)
+        bPass = false;
+    if (uCpiHopErrors > 0 || uCpiZeroRef > 0 || oStats.uCpisEmitted == 0)
         bPass = false;
 
     for (size_t u = 0; u < vChecks.size(); ++u) {
