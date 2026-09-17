@@ -40,12 +40,12 @@ passive-radar-sbc/
 ├── .gitignore
 ├── bench/                standalone benchmarking harnesses
 │   └── cufft_bench.cu    cuFFT timing + memory-ceiling tool
-├── include/pbr/          public headers for the processing library
+├── include/pbr/          public headers for the processing library (flat)
 ├── src/
-│   ├── ingest/           VITA 49.2 UDP receiver + lock-free circular buffer
-│   ├── dsp/              DSI cancellation, CAF, CFAR kernels
-│   ├── fft/              cuFFT plan/lifetime wrappers
-│   ├── linalg/           cuBLAS / cuSOLVER wrappers (ECA, CGLS)
+│   ├── ingest/           VITA 49.2 UDP receiver, circular buffer, config
+│   ├── dsi/              DSI cancellation: ECA-B, ECA-S, ECA-CD, CGLS
+│   ├── ard/              CAF / range–Doppler map, 2D CA-CFAR, map output
+│   ├── display/          on-screen ARD viewer (reserved, not yet written)
 │   └── app/              executables (offline runner, live pipeline)
 ├── tests/                unit + integration tests, MATLAB-vs-CUDA validation
 ├── matlab/               the reference implementation (validation ground truth)
@@ -55,6 +55,11 @@ passive-radar-sbc/
 ├── docs/                 architecture notes, benchmarking methodology, results
 └── cmake/                helper modules
 ```
+
+`src/` is grouped by pipeline stage, not by library: cuFFT and cuBLAS calls
+live in the stage that uses them rather than behind a wrapper layer. Public
+headers stay flat in `include/pbr/` regardless of which subdirectory
+implements them, so every include reads `#include "pbr/<Name>.hpp"`.
 
 Large data (captured IQ, FERS output, `.mat` files, benchmark CSVs, tegrastats
 logs) is **not** version-controlled — it lives on the microSD card at `/data`

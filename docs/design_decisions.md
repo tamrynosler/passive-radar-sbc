@@ -9,6 +9,39 @@ hardware). Nothing in this document has been measured on the Jetson yet.
 
 ---
 
+## 0. Source tree layout
+
+**Decision (2026-09-17).** `src/` is grouped by **pipeline stage**, not by
+library: `ingest/`, `dsi/`, `ard/`, `display/`, `app/`. The earlier
+placeholders `dsp/`, `fft/` and `linalg/` were removed before any code landed
+in them.
+
+**Why by stage.** The thesis contribution is a comparison of DSI cancellation
+algorithms, so cancellation deserves a directory of its own rather than being
+one third of a `dsp/` bucket. Each directory also matches a validation
+checkpoint — a stage is proven in isolation before the next one starts — so
+the tree mirrors the order the work is done in.
+
+**Why no `fft/` or `linalg/`.** Those directories would have held wrapper
+classes over cuFFT and cuBLAS with no caller yet to shape them. Both libraries
+are called directly from the stage that needs them: the CAF owns its cuFFT
+plan, ECA-B its cuBLAS calls. A shared wrapper can be extracted later, once
+two callers exist and their real requirements are known, rather than guessed.
+
+**Why headers stay flat in `include/pbr/`.** Mirroring the `src/`
+subdirectories in `include/` would spend a round of include-path churn on a
+grouping that filenames already carry, and would make moving a file between
+stages an API change for every caller. The directory a file is implemented in
+is an internal detail; the header name is the interface.
+
+**`display/` is reserved, not started.** The current milestone ends at "basic
+range-Doppler output", so serialising the ARD map and detection list to disk
+belongs with the stage that produces them, in `ard/`. `display/` exists for a
+later on-screen viewer, which would be the first GUI dependency in the project
+and needs a decision of its own.
+
+---
+
 ## 1. Ingest circular buffer (`pbr::CircularBuffer`)
 
 Files: `include/pbr/CircularBuffer.hpp`, `src/ingest/CircularBuffer.cpp`,
