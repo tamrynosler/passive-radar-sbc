@@ -260,6 +260,9 @@ gone and will not come back. Collapsing them would hide data loss.
 Files: `include/pbr/DSICanceller.hpp`, `src/dsi/DSICanceller.cpp`,
 `src/dsi/cpu/EcaCpu.cpp`, `tests/test_eca.cpp`, `bench/dsi_bench.cpp`.
 
+A from-zero explanation of the mechanism, with an exact program trace, is in
+`docs/dsi-cancellation-explained.md`. This section records only the decisions.
+
 ### 1d.1 Three named algorithms, one implementation
 
 Colone et al. (TAES 52(3), 2016, eq. 18–20) define ECA-S with two independent

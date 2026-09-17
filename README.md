@@ -19,7 +19,8 @@ accepts a live receiver front end.
 - [x] C++/CUDA VITA 49.2 ingest + absolute-index circular buffer
 - [x] CPI extraction: aligned 1 s windows handed to the DSP chain
 - [x] Configuration file (`config/prb.conf`) driving the whole chain
-- [x] DSI cancellation on the CPU: ECA-m (MATLAB reference) and ECA-B
+- [x] DSI cancellation on the CPU: ECA-m (MATLAB reference) and ECA-B,
+      validated against MATLAB golden files at < 1e-9 relative error
 - [ ] DSI cancellation on the GPU, then ECA-S, ECA-CD, CGLS  ← next
 - [ ] CAF range–Doppler + 2D CA-CFAR
 - [ ] Algorithm benchmarking study (suppression vs latency)
@@ -190,6 +191,24 @@ mistake — batching costs the same arithmetic and buys adaptivity, not speed.
 
 **Host timings are order-of-magnitude only.** Citable figures come from the
 Jetson with clocks pinned; see the measurement note below.
+
+### Validation against MATLAB
+
+`matlab/eca_golden.m` reads the same frozen CPI, cancels in double precision,
+and writes golden outputs; `dsi_verify` compares the C++ canceller against
+them and exits non-zero on failure:
+
+```bash
+/Applications/MATLAB_R2025a.app/bin/matlab -batch "addpath('matlab'); eca_golden"
+make host-verify
+./bin/dsi_verify --cpi data/cpi_0000.bin --golden data/golden_ecam.bin --algorithm ECA-m
+./bin/dsi_verify --cpi data/cpi_0000.bin --golden data/golden_ecab.bin --algorithm ECA-B
+```
+
+The golden file records the parameters it was generated with, and
+`dsi_verify` refuses to compare if they disagree with the loaded config, so a
+stale golden file fails loudly. Re-run this pair of checks after any change
+to `src/dsi/`.
 
 ## Running the benchmark
 

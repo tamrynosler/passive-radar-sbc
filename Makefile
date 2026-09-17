@@ -21,7 +21,7 @@ RSYNC := rsync -av --delete \
          --exclude '.DS_Store'
 
 .PHONY: sync configure build test bench pull-results shell clean-remote \
-        host-probe host-replay host-test host-bench host-clean
+        host-probe host-replay host-test host-bench host-verify host-clean
 
 # ---------------------------------------------------------------------------
 # Host-only builds — run on the Mac, no Jetson and no CUDA involved.
@@ -81,6 +81,13 @@ host-bench:
 	$(HOST_CXX) $(HOST_CXXFLAGS) bench/dsi_bench.cpp $(LIB_SRC) \
 	    -o $(HOST_BIN)/dsi_bench
 	@echo "built $(HOST_BIN)/dsi_bench  —  timing here proves nothing; use the Jetson"
+
+## host-verify: build the MATLAB golden-file comparison tool -> bin/dsi_verify
+host-verify:
+	@mkdir -p $(HOST_BIN)
+	$(HOST_CXX) $(HOST_CXXFLAGS) src/app/dsi_verify.cpp $(LIB_SRC) \
+	    -o $(HOST_BIN)/dsi_verify
+	@echo "built $(HOST_BIN)/dsi_verify"
 
 ## host-clean: remove locally built binaries
 host-clean:
