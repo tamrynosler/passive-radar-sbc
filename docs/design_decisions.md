@@ -5,7 +5,8 @@ report. Each entry records what was decided, why, and what was rejected.
 
 Performance figures are labelled either **derived** (calculated from published
 hardware specifications and known data rates) or **measured** (observed on
-hardware). Nothing in this document has been measured on the Jetson yet.
+hardware). DSI cancellation figures in 1d.6c ARE measured on the Jetson,
+though with clocks unpinned and therefore provisional.
 
 ---
 
@@ -349,6 +350,96 @@ memory and parallelism.
 
 These are **host** figures and are not citable. They establish order of
 magnitude only; the Jetson with pinned clocks is the measurement platform.
+
+### 1d.6b GPU backend (`src/dsi/gpu/EcaGpu.cu`), 2026-09-17
+
+**Single precision is forced, not chosen.** The Nano's Maxwell GPU runs FP64
+at 1/32 the FP32 rate: ~0.2 s per CPI in single precision against 5+ s in
+double, which would be slower than the CPU. So the GPU is FP32 throughout and
+ignores `DSIParams::bFloat32Math`.
+
+**The error is in the multiplications, not the summation.** Measured on the
+real CPI, against MATLAB:
+
+| | relative L2 | suppression |
+|---|---|---|
+| double throughout | 8.2e-10 | 51.6193 dB |
+| float Gram, sequential sum | 7.2e-3 | 51.6191 dB |
+| float Gram, tree sum | 5.0e-3 | 51.6192 dB |
+| **float products, double accumulate** | **4.9e-3** | 51.6192 dB |
+| FP32 Gram + FP32 solve + FP32 apply | 4.9e-3 | 51.6192 dB |
+
+Keeping the additions in double and rounding only the products still gives
+4.9e-3. That rules out tree reductions, Kahan summation and double
+accumulators as fixes — they all address the addition. It also means the
+FP32 batched solve is free: 4.935e-3 with it against 4.951e-3 without.
+
+**Two-tier validation.** The MATLAB bar is relaxed to 1e-2 for the GPU,
+because FP32 measures ~5e-3 and no amount of care brings that to 1e-4 on this
+hardware. What keeps that safe is a second, tighter test:
+
+- **GPU vs CPU in FP32 mode, on uncorrelated signals: 2.72e-07.** With nothing
+  to cancel there is no amplification, so the two backends must agree almost
+  exactly, and any indexing or race bug still shows at full size.
+- On the deeply-cancelled real CPI the same comparison is only good to
+  ~1e-2, because cuBLAS sums in a different order and the suppression ratio
+  (~380x) amplifies the difference. **That tolerance is too loose to catch an
+  off-by-one**, which is precisely why the low-suppression test exists.
+- Plus: bit-identical output across repeated runs (catches races), and 125 dB
+  suppression of synthetic known clutter (an indexing bug collapses this).
+
+**What runs where.** Two custom kernels of about ten lines each (build the
+delayed-reference matrix; subtract the clutter). Everything heavy is a
+library call: cuBLAS `cherk` for the Gram, `cgemv` for the right-hand side,
+cuSOLVER `Cpotrf/CpotrsBatched` for all 40 solves at once, `scnrm2` for the
+suppression figure.
+
+The solve stays on the GPU. It is 1.5% of the arithmetic, but on the A57 that
+1.5% measures ~150 ms against a 145 ms total, with the GPU idle throughout.
+
+**Memory: ~25 MB.** R is built one chunk at a time and the buffer reused;
+building it for a whole CPI at once would cost 197 MB. Chunking with
+`beta = 1` accumulation is also what lets ECA-m (one window over the whole
+CPI) share the same code as ECA-B.
+
+### 1d.6c Measured on the Jetson, 2026-09-17
+
+Single session, first CPI of `fers_capture.pbrcap`. **Clocks NOT pinned** --
+provisional, not citable.
+
+| Algorithm | Backend | Suppression | Time per CPI | vs real time |
+|---|---|---|---|---|
+| ECA-m | GPU | 40.1846 dB | 151.8 ms | 0.15x |
+| ECA-B | GPU | 51.6191 dB | **142.1 ms** | **0.14x** |
+| ECA-m | CPU | 40.1834 dB | 9719.9 ms | 9.72x |
+| ECA-B | CPU | 51.6193 dB | 9632.1 ms | 9.63x |
+
+**The GPU is 68x faster than the CPU and runs at 7x real time.** The CPU
+cannot keep up at all. ECA-m and ECA-B cost the same on both backends, which
+confirms again that batching buys adaptivity rather than speed.
+
+Golden-file agreement: ECA-B (GPU) 6.5e-3, ECA-m (GPU) 2.1e-4. ECA-m is the
+tighter of the two because its 40 dB of suppression amplifies the FP32 error
+less than ECA-B's 51.6 dB does.
+
+### 1d.6d Two bugs this work exposed
+
+**The Jetson test suite was not testing anything.** CMake's Release build
+defines `NDEBUG`, which turns every `assert()` in `tests/` into a no-op. The
+suite ran to completion and reported 5/5 PASS having checked nothing. Fixed
+with `target_compile_options(... -UNDEBUG)` on test targets; the suite's run
+time went from 0.22 s to 3.40 s, which is the checks actually executing.
+This predates the GPU work and applies to every test written so far.
+
+**`make build` was deleting the recorded test data.** `rsync --delete` with
+the gitignore filter removed `data/` on the Jetson on every build. Fixed with
+explicit `P` (protect) filter rules for `data`, `results` and `build`.
+
+**The test generator produced correlated "uncorrelated" signals.** A plain LCG
+walks one cycle, so two seeds give two offset positions on the same sequence.
+The backend comparison was being run on signals that cancelled by 6.3 dB
+where theory says 0.28 dB, hiding the real agreement by three orders of
+magnitude (1.19e-5 against the true 2.72e-7). Replaced with splitmix64.
 
 ### 1d.7 Deferred: the efficient implementation
 

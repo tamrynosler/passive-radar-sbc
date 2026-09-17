@@ -215,6 +215,11 @@ bool validate(PbrConfig& oConfig)
         std::fprintf(stderr, "config: DSI_ALGORITHM and DSI_BACKEND must not be empty\n");
         bOk = false;
     }
+    if (oConfig.sDsiMathPrecision != "FP64" && oConfig.sDsiMathPrecision != "FP32") {
+        std::fprintf(stderr, "config: DSI_MATH_PRECISION must be FP64 or FP32, not \"%s\"\n",
+                     oConfig.sDsiMathPrecision.c_str());
+        bOk = false;
+    }
     // Loading is a fraction of the Gram diagonal, so it is dimensionless and
     // a value of 1 or more would swamp the signal entirely.
     if (oConfig.dEcaDiagLoading < 0.0 || oConfig.dEcaDiagLoading >= 1.0) {
@@ -360,6 +365,7 @@ bool loadPbrConfig(const char* pPath, PbrConfig& oConfig)
 
     getString(mValues, "DSI_ALGORITHM",        oConfig.sDsiAlgorithm,      bOk);
     getString(mValues, "DSI_BACKEND",          oConfig.sDsiBackend,        bOk);
+    getString(mValues, "DSI_MATH_PRECISION",   oConfig.sDsiMathPrecision,  bOk);
     getDouble(mValues, "ECA_BATCH_LENGTH_s",   oConfig.dEcaBatchSeconds,   bOk);
     getDouble(mValues, "ECA_UPDATE_INTERVAL_s", oConfig.dEcaUpdateSeconds, bOk);
     getUInt64(mValues, "ECA_DOPPLER_TAPS",     oConfig.uEcaDopplerTaps,    bOk);
@@ -408,8 +414,9 @@ void printPbrConfig(const PbrConfig& oConfig)
                 static_cast<unsigned long long>(oConfig.uDopplerDecimation),
                 oConfig.dDopplerHalfSpanHz);
     std::printf("  min CPI coverage   %.1f%%\n", 100.0 * oConfig.dMinCpiCoverage);
-    std::printf("  DSI                %s on %s\n",
-                oConfig.sDsiAlgorithm.c_str(), oConfig.sDsiBackend.c_str());
+    std::printf("  DSI                %s on %s (%s math)\n",
+                oConfig.sDsiAlgorithm.c_str(), oConfig.sDsiBackend.c_str(),
+                oConfig.sDsiMathPrecision.c_str());
     std::printf("  ECA windows        estimate %.4f s (%llu samples), "
                 "update %.4f s (%llu samples)\n",
                 oConfig.dEcaBatchSeconds,

@@ -48,6 +48,8 @@ struct PbrConfig {
     // an ingest-only tool never has to know the algorithm names.
     std::string sDsiAlgorithm;              // ECA-m, ECA-B, ECA-S, ECA-CD, CGLS
     std::string sDsiBackend;                // CPU or GPU
+    std::string sDsiMathPrecision;          // FP64 or FP32 (CPU only; GPU is
+                                            // always FP32 -- see DSICanceller.hpp)
     double      dEcaBatchSeconds   = 0.0;   // T_A, the weight-estimation window
     double      dEcaUpdateSeconds  = 0.0;   // T_S, the weight-application window
     uint64_t    uEcaDopplerTaps    = 0;     // P; subspace is K(2P+1) wide

@@ -21,7 +21,9 @@ accepts a live receiver front end.
 - [x] Configuration file (`config/prb.conf`) driving the whole chain
 - [x] DSI cancellation on the CPU: ECA-m (MATLAB reference) and ECA-B,
       validated against MATLAB golden files at < 1e-9 relative error
-- [ ] DSI cancellation on the GPU, then ECA-S, ECA-CD, CGLS  ← next
+- [x] DSI cancellation on the GPU: 142 ms/CPI on the Nano, 68× the CPU,
+      7× faster than real time
+- [ ] ECA-S, ECA-CD, CGLS  ← next
 - [ ] CAF range–Doppler + 2D CA-CFAR
 - [ ] Algorithm benchmarking study (suppression vs latency)
 
@@ -178,16 +180,23 @@ loads the CPI once, calls `init()` once, discards a warm-up iteration, and
 times only the cancellation — so every algorithm sees byte-identical input and
 no allocation lands inside the timed region.
 
-Measured on the Mac against the first CPI of the shipped capture:
+Measured on the **Jetson**, first CPI of the shipped capture, one session,
+clocks not pinned (provisional):
 
-| Algorithm | Windows | Suppression | Time per CPI |
-|---|---|---|---|
-| ECA-m | 1 × 1000 ms | 40.18 dB | 971 ms |
-| ECA-B | 40 × 25 ms | 51.62 dB | 971 ms |
+| Algorithm | Backend | Suppression | Time per CPI | vs real time |
+|---|---|---|---|---|
+| ECA-m | GPU | 40.18 dB | 151.8 ms | 0.15× |
+| ECA-B | GPU | 51.62 dB | **142.1 ms** | **0.14×** |
+| ECA-m | CPU | 40.18 dB | 9719.9 ms | 9.72× |
+| ECA-B | CPU | 51.62 dB | 9632.1 ms | 9.63× |
+
+The GPU is **68× faster than the CPU** and runs at 7× real time; the CPU
+cannot keep up at all.
 
 The 11.4 dB gain is why ECA-B exists: one set of weights for a whole second
-cannot follow clutter that changes within it. The identical times are not a
-mistake — batching costs the same arithmetic and buys adaptivity, not speed.
+cannot follow clutter that changes within it. ECA-m and ECA-B taking the same
+time is not a mistake — batching costs the same arithmetic and buys
+adaptivity, not speed.
 
 **Host timings are order-of-magnitude only.** Citable figures come from the
 Jetson with clocks pinned; see the measurement note below.

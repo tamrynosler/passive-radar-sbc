@@ -149,6 +149,22 @@ struct DSIParams {
     // Set by dsiParamsFromConfig() for EcaM and by nothing else.
     bool         bAbsoluteLoading = false;
 
+    // Work in single precision rather than double.
+    //
+    // The GPU backend has no choice: the Jetson Nano's Maxwell GPU runs
+    // double-precision arithmetic at 1/32 the single-precision rate, which
+    // would make it slower than the CPU. It therefore ignores this flag and
+    // always works in single precision.
+    //
+    // On the CPU the flag exists so the reference implementation can be made
+    // to do the SAME arithmetic as the GPU. Comparing the two then isolates
+    // structural bugs -- a wrong index, a race -- from the precision
+    // difference, which would otherwise mask them. Measured cost of single
+    // precision against the MATLAB reference: ~5e-3 relative L2, with the
+    // suppression figure unchanged to four decimals
+    // (docs/design_decisions.md 1d.4).
+    bool         bFloat32Math = false;
+
     // CGLS. Iterating a fixed number of times rather than to a tolerance is
     // what gives a fixed, predictable execution time.
     uint64_t     uMaxIterations = 0;

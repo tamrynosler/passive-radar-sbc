@@ -94,6 +94,9 @@ private:
     // Fill mvcGram and mvcRhs from the samples in [uStart, uEnd).
     void buildNormalEquations(const ComplexF* pcRef, const ComplexF* pcSur,
                               uint64_t uStart, uint64_t uEnd);
+    template <typename Acc>
+    void buildNormalEquationsT(const ComplexF* pcRef, const ComplexF* pcSur,
+                               uint64_t uStart, uint64_t uEnd);
 
     // Add the diagonal loading, then solve G w = v into mvcWeights.
     bool solveWeights(uint64_t uWindowIndex);
@@ -160,8 +163,9 @@ bool EcaCpu::init(const DSIParams& oParams)
     mvcRhs.assign(static_cast<size_t>(muTaps), ComplexAcc());
     mvcWeights.assign(static_cast<size_t>(muTaps), ComplexAcc());
 
-    std::snprintf(machName, sizeof(machName), "%s (CPU)",
-                  dsiAlgorithmName(oParams.eAlgorithm));
+    std::snprintf(machName, sizeof(machName), "%s (CPU%s)",
+                  dsiAlgorithmName(oParams.eAlgorithm),
+                  oParams.bFloat32Math ? " FP32" : "");
 
     mbReady = true;
     return true;
@@ -169,6 +173,23 @@ bool EcaCpu::init(const DSIParams& oParams)
 
 void EcaCpu::buildNormalEquations(const ComplexF* pcRef, const ComplexF* pcSur,
                                   uint64_t uStart, uint64_t uEnd)
+{
+    if (moParams.bFloat32Math)
+        buildNormalEquationsT<float>(pcRef, pcSur, uStart, uEnd);
+    else
+        buildNormalEquationsT<double>(pcRef, pcSur, uStart, uEnd);
+}
+
+// The working precision is a template parameter rather than a runtime test,
+// so the innermost loop never branches. Acc = double is the reference: a
+// float-to-double conversion is exact and the product of two floats fits a
+// double exactly, so every term is computed without error and only the
+// summation rounds. Acc = float reproduces what the GPU does, where both the
+// products and the sum round -- and the products turn out to dominate
+// (docs/design_decisions.md 1d.4).
+template <typename Acc>
+void EcaCpu::buildNormalEquationsT(const ComplexF* pcRef, const ComplexF* pcSur,
+                                   uint64_t uStart, uint64_t uEnd)
 {
     const uint64_t uK = muTaps;
 
@@ -183,21 +204,23 @@ void EcaCpu::buildNormalEquations(const ComplexF* pcRef, const ComplexF* pcSur,
             // zero-padding of each column amounts to.
             const uint64_t uFirst = (uStart > j) ? uStart : j;
 
-            double dRe = 0.0;
-            double dIm = 0.0;
+            Acc aRe = Acc(0);
+            Acc aIm = Acc(0);
 
-            // conj(a) * b, written out. Accumulating in double is the point;
-            // doing the complex multiply by hand keeps the compiler from
-            // routing it through the library's NaN-handling path.
+            // conj(a) * b, written out. Doing the complex multiply by hand
+            // keeps the compiler from routing it through the library's
+            // NaN-handling path, and makes the working precision explicit.
             for (uint64_t n = uFirst; n < uEnd; ++n) {
                 const ComplexF& cA = pcRef[n - i];
                 const ComplexF& cB = pcRef[n - j];
-                const double dAr = cA.real(), dAi = cA.imag();
-                const double dBr = cB.real(), dBi = cB.imag();
-                dRe += dAr * dBr + dAi * dBi;
-                dIm += dAr * dBi - dAi * dBr;
+                const Acc aAr = Acc(cA.real()), aAi = Acc(cA.imag());
+                const Acc aBr = Acc(cB.real()), aBi = Acc(cB.imag());
+                aRe += aAr * aBr + aAi * aBi;
+                aIm += aAr * aBi - aAi * aBr;
             }
 
+            const double dRe = static_cast<double>(aRe);
+            const double dIm = static_cast<double>(aIm);
             mvcGram[static_cast<size_t>(i * uK + j)] = ComplexAcc(dRe, dIm);
             if (j != i)
                 mvcGram[static_cast<size_t>(j * uK + i)] = ComplexAcc(dRe, -dIm);
@@ -209,17 +232,18 @@ void EcaCpu::buildNormalEquations(const ComplexF* pcRef, const ComplexF* pcSur,
     for (uint64_t i = 0; i < uK; ++i) {
         const uint64_t uFirst = (uStart > i) ? uStart : i;
 
-        double dRe = 0.0;
-        double dIm = 0.0;
+        Acc aRe = Acc(0);
+        Acc aIm = Acc(0);
         for (uint64_t n = uFirst; n < uEnd; ++n) {
             const ComplexF& cA = pcRef[n - i];
             const ComplexF& cB = pcSur[n];
-            const double dAr = cA.real(), dAi = cA.imag();
-            const double dBr = cB.real(), dBi = cB.imag();
-            dRe += dAr * dBr + dAi * dBi;
-            dIm += dAr * dBi - dAi * dBr;
+            const Acc aAr = Acc(cA.real()), aAi = Acc(cA.imag());
+            const Acc aBr = Acc(cB.real()), aBi = Acc(cB.imag());
+            aRe += aAr * aBr + aAi * aBi;
+            aIm += aAr * aBi - aAi * aBr;
         }
-        mvcRhs[static_cast<size_t>(i)] = ComplexAcc(dRe, dIm);
+        mvcRhs[static_cast<size_t>(i)] = ComplexAcc(static_cast<double>(aRe),
+                                                    static_cast<double>(aIm));
     }
 }
 
@@ -238,10 +262,21 @@ bool EcaCpu::solveWeights(uint64_t uWindowIndex)
     if (moParams.bAbsoluteLoading) {
         dLambda = moParams.dDiagonalLoading;
     } else if (moParams.dDiagonalLoading > 0.0) {
-        double dTrace = 0.0;
-        for (uint64_t i = 0; i < uK; ++i)
-            dTrace += mvcGram[static_cast<size_t>(i * uK + i)].real();
-        dLambda = moParams.dDiagonalLoading * (dTrace / static_cast<double>(uK));
+        // Summed in the working precision, so the FP32 mode computes the same
+        // lambda the GPU kernel does. A lambda that differed would show up as
+        // a disagreement that had nothing to do with the code being compared.
+        if (moParams.bFloat32Math) {
+            float fTrace = 0.0f;
+            for (uint64_t i = 0; i < uK; ++i)
+                fTrace += static_cast<float>(mvcGram[static_cast<size_t>(i * uK + i)].real());
+            dLambda = moParams.dDiagonalLoading *
+                      (static_cast<double>(fTrace) / static_cast<double>(uK));
+        } else {
+            double dTrace = 0.0;
+            for (uint64_t i = 0; i < uK; ++i)
+                dTrace += mvcGram[static_cast<size_t>(i * uK + i)].real();
+            dLambda = moParams.dDiagonalLoading * (dTrace / static_cast<double>(uK));
+        }
     }
 
     // Cholesky, G = L L^H. G is Hermitian and, with the loading, positive

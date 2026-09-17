@@ -13,7 +13,15 @@ NVCC := /usr/local/cuda-10.2/bin/nvcc
 # Exclusions are driven by .gitignore (per-directory merge), so anything
 # ignored by git is also kept off the Jetson. The explicit excludes below
 # are belt-and-braces for paths that must never sync regardless.
+# 'P' is a protect rule: it stops --delete removing these on the Jetson.
+# data/ is gitignored, so the filter above hides it from the transfer, and
+# without protection every `make build` would wipe the recorded captures and
+# golden files the benchmark needs. build/ and results/ are protected for the
+# same reason.
 RSYNC := rsync -av --delete \
+         --filter='P data' \
+         --filter='P results' \
+         --filter='P build' \
          --filter=':- .gitignore' \
          --exclude '.git' \
          --exclude 'build' \

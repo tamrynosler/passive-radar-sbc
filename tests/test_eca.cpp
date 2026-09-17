@@ -24,23 +24,31 @@ using namespace pbr;
 
 namespace {
 
-// Deterministic generator, so a failure is always reproducible. Plain LCG --
-// the statistical quality does not matter, only that it is repeatable and the
-// same on every platform.
-struct Lcg {
+// Deterministic generator, so a failure is always reproducible, and the same
+// on every platform.
+//
+// This is splitmix64 rather than a plain LCG. A bare LCG walks a single cycle,
+// so two different seeds give two OFFSET POSITIONS ON THE SAME SEQUENCE --
+// which made "uncorrelated" test signals correlated enough to be cancelled by
+// 6 dB where theory says 0.3. The extra mixing steps below decorrelate the
+// streams, which the tests that compare backends depend on.
+struct Rng {
     uint64_t uState;
-    explicit Lcg(uint64_t uSeed) : uState(uSeed) {}
+    explicit Rng(uint64_t uSeed) : uState(uSeed * 0x9E3779B97F4A7C15ULL) {}
     double next()   // uniform in [-1, 1)
     {
-        uState = uState * 6364136223846793005ULL + 1442695040888963407ULL;
-        const uint32_t u = static_cast<uint32_t>(uState >> 33);
-        return (static_cast<double>(u) / 2147483648.0) - 1.0;
+        uState += 0x9E3779B97F4A7C15ULL;
+        uint64_t z = uState;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        z =  z ^ (z >> 31);
+        return (static_cast<double>(z >> 11) / 9007199254740992.0) * 2.0 - 1.0;
     }
 };
 
 std::vector<ComplexF> makeNoise(uint64_t uCount, uint64_t uSeed)
 {
-    Lcg oRng(uSeed);
+    Rng oRng(uSeed);
     std::vector<ComplexF> vc(static_cast<size_t>(uCount));
     for (size_t u = 0; u < vc.size(); ++u)
         vc[u] = ComplexF(static_cast<float>(oRng.next()),
@@ -406,6 +414,143 @@ void testConfigMapping()
     std::printf("  config maps onto DSIParams ........................ ok\n");
 }
 
+// ---------------------------------------------------------------------------
+// GPU backend. Only built where CUDA is.
+// ---------------------------------------------------------------------------
+#if defined(PBR_WITH_CUDA)
+
+// Run one algorithm on one backend over the given signals.
+bool runBackend(DSIAlgorithm eAlgorithm, DSIBackend eBackend, bool bFloat32,
+                const std::vector<ComplexF>& vcRef,
+                const std::vector<ComplexF>& vcSur,
+                uint64_t uTaps, uint64_t uWindow,
+                std::vector<ComplexF>& vcOut, DSIStats& oStats)
+{
+    DSIParams o = baseParams(eAlgorithm, vcRef.size(), uTaps, uWindow);
+    o.eBackend     = eBackend;
+    o.bFloat32Math = bFloat32;
+
+    std::unique_ptr<DSICanceller> p = makeDSICanceller(eAlgorithm, eBackend);
+    if (!p || !p->init(o))
+        return false;
+
+    vcOut.assign(vcRef.size(), ComplexF());
+    return p->cancel(vcRef.data(), vcSur.data(), vcOut.data(), oStats);
+}
+
+double relativeL2(const std::vector<ComplexF>& vcA, const std::vector<ComplexF>& vcB)
+{
+    double dDiff = 0.0, dRef = 0.0;
+    for (size_t u = 0; u < vcA.size(); ++u) {
+        const double dRe = double(vcA[u].real()) - vcB[u].real();
+        const double dIm = double(vcA[u].imag()) - vcB[u].imag();
+        dDiff += dRe * dRe + dIm * dIm;
+        dRef  += double(vcB[u].real()) * vcB[u].real() +
+                 double(vcB[u].imag()) * vcB[u].imag();
+    }
+    return (dRef > 0.0) ? std::sqrt(dDiff / dRef) : 0.0;
+}
+
+// The real structural check on the GPU port.
+//
+// On deeply-cancelled real data the GPU and the CPU cannot be compared
+// tightly: both work in single precision, but cuBLAS sums in a different
+// ORDER, and at 50 dB of suppression that difference is amplified by the
+// suppression ratio into ~1e-2. That tolerance is too loose to catch an
+// off-by-one.
+//
+// With UNCORRELATED signals there is almost nothing to cancel, so there is no
+// amplification, and the two backends must agree closely. Any indexing or
+// race bug still shows up at full size, because the arithmetic is identical.
+void testGpuMatchesCpuWithoutAmplification()
+{
+    const uint64_t uCpi = 8192, uTaps = 64, uWindow = 1024;
+    const std::vector<ComplexF> vcRef = makeNoise(uCpi, 101);
+    const std::vector<ComplexF> vcSur = makeNoise(uCpi, 202);   // uncorrelated
+
+    std::vector<ComplexF> vcCpu, vcGpu;
+    DSIStats oCpu, oGpu;
+    assert(runBackend(DSIAlgorithm::EcaB, DSIBackend::Cpu, true,
+                      vcRef, vcSur, uTaps, uWindow, vcCpu, oCpu));
+    assert(runBackend(DSIAlgorithm::EcaB, DSIBackend::Gpu, true,
+                      vcRef, vcSur, uTaps, uWindow, vcGpu, oGpu));
+
+    const double dRel = relativeL2(vcGpu, vcCpu);
+    std::printf("  GPU vs CPU-FP32, no amplification: relL2 %.2e, "
+                "suppression %.3f dB\n", dRel, oCpu.dSuppressionDb);
+
+    // Fitting K complex taps over an N-sample window absorbs about K/N of the
+    // energy even from uncorrelated noise, so a little suppression is
+    // expected. What matters is that it is nowhere near the 50 dB of real
+    // data, because that is the factor the Gram rounding gets amplified by.
+    assert(oCpu.dSuppressionDb < 1.0);
+    // Measured 2.7e-07. This is the tolerance that actually catches GPU bugs:
+    // against the deeply-cancelled real CPI the same comparison is only good
+    // to ~1e-2, because the suppression ratio amplifies the difference in
+    // cuBLAS's summation order.
+    assert(dRel < 1e-6);
+}
+
+// Clutter built from known taps must still cancel enormously on the GPU. An
+// indexing bug would leave the strongest component uncancelled and collapse
+// this figure to near zero, so it is a blunt but very sensitive check.
+void testGpuCancelsKnownClutter()
+{
+    const uint64_t uCpi = 8192, uTaps = 8, uWindow = 1024;
+    const std::vector<ComplexF> vcRef = makeNoise(uCpi, 303);
+
+    std::vector<ComplexF> vcSur(static_cast<size_t>(uCpi));
+    for (uint64_t n = 0; n < uCpi; ++n) {
+        std::complex<double> cAcc(0.0, 0.0);
+        const uint64_t uK = (n + 1 < uTaps) ? (n + 1) : uTaps;
+        for (uint64_t k = 0; k < uK; ++k) {
+            const ComplexF& cR = vcRef[static_cast<size_t>(n - k)];
+            cAcc += std::complex<double>(1.0 / (1.0 + double(k)), 0.2) *
+                    std::complex<double>(cR.real(), cR.imag());
+        }
+        vcSur[static_cast<size_t>(n)] = ComplexF(float(cAcc.real()), float(cAcc.imag()));
+    }
+
+    std::vector<ComplexF> vcGpu;
+    DSIStats oGpu;
+    assert(runBackend(DSIAlgorithm::EcaB, DSIBackend::Gpu, true,
+                      vcRef, vcSur, uTaps, uWindow, vcGpu, oGpu));
+    std::printf("  GPU cancels known clutter: %.1f dB\n", oGpu.dSuppressionDb);
+    assert(oGpu.dSuppressionDb > 60.0);
+}
+
+// A race would show up as run-to-run variation. The same input must give
+// bit-identical output every time.
+void testGpuIsDeterministic()
+{
+    const uint64_t uCpi = 8192, uTaps = 32, uWindow = 2048;
+    const std::vector<ComplexF> vcRef = makeNoise(uCpi, 404);
+    const std::vector<ComplexF> vcSur = makeNoise(uCpi, 505);
+
+    DSIParams o = baseParams(DSIAlgorithm::EcaB, uCpi, uTaps, uWindow);
+    o.eBackend = DSIBackend::Gpu;
+
+    std::unique_ptr<DSICanceller> p = makeDSICanceller(DSIAlgorithm::EcaB,
+                                                       DSIBackend::Gpu);
+    assert(p && p->init(o));
+
+    std::vector<ComplexF> vcFirst(static_cast<size_t>(uCpi));
+    std::vector<ComplexF> vcAgain(static_cast<size_t>(uCpi));
+    DSIStats oStats;
+    assert(p->cancel(vcRef.data(), vcSur.data(), vcFirst.data(), oStats));
+    for (int i = 0; i < 3; ++i) {
+        assert(p->cancel(vcRef.data(), vcSur.data(), vcAgain.data(), oStats));
+        for (uint64_t n = 0; n < uCpi; ++n) {
+            assert(vcAgain[n].real() == vcFirst[n].real());
+            assert(vcAgain[n].imag() == vcFirst[n].imag());
+        }
+    }
+
+    std::printf("  GPU is bit-identical across runs ................... ok\n");
+}
+
+#endif // PBR_WITH_CUDA
+
 } // namespace
 
 int main()
@@ -420,6 +565,12 @@ int main()
     testBatchingBeatsSingleSolveOnVaryingClutter();
     testSingleWindowBatchMatchesEcaM();
     testConfigMapping();
+
+#if defined(PBR_WITH_CUDA)
+    testGpuMatchesCpuWithoutAmplification();
+    testGpuCancelsKnownClutter();
+    testGpuIsDeterministic();
+#endif
 
     std::printf("test_eca: all tests passed\n");
     return 0;

@@ -36,4 +36,35 @@
     } while (0)
 #endif
 
+// cuBLAS and cuSOLVER report status codes of their own rather than
+// cudaError_t, and neither has a strerror-style helper in CUDA 10.2, so the
+// numeric code is printed. Both are only defined when the corresponding
+// library header is already in scope -- include <cublas_v2.h> / <cusolverDn.h>
+// BEFORE this header.
+#if defined(CUBLAS_V2_H_)
+#define CUBLAS_CHECK(call)                                                    \
+    do {                                                                      \
+        cublasStatus_t eStatus = (call);                                      \
+        if (eStatus != CUBLAS_STATUS_SUCCESS) {                               \
+            std::fprintf(stderr, "CUBLAS_CHECK failed: status %d\n"           \
+                                 "  (%s) at %s:%d\n",                         \
+                         static_cast<int>(eStatus), #call, __FILE__, __LINE__);\
+            return false;                                                     \
+        }                                                                     \
+    } while (0)
+#endif
+
+#if defined(CUSOLVERDN_H_)
+#define CUSOLVER_CHECK(call)                                                  \
+    do {                                                                      \
+        cusolverStatus_t eStatus = (call);                                    \
+        if (eStatus != CUSOLVER_STATUS_SUCCESS) {                             \
+            std::fprintf(stderr, "CUSOLVER_CHECK failed: status %d\n"         \
+                                 "  (%s) at %s:%d\n",                         \
+                         static_cast<int>(eStatus), #call, __FILE__, __LINE__);\
+            return false;                                                     \
+        }                                                                     \
+    } while (0)
+#endif
+
 #endif // PBR_CHECK_HPP

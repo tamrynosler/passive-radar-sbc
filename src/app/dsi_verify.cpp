@@ -55,6 +55,8 @@ struct Options {
     std::string sConfigPath = kDefaultConfigPath;
     std::string sAlgorithm;
     std::string sBackend;
+    std::string sPrecision;
+    std::string sAgainst;          // other backend to diff against
     double      dTolerance  = 1e-4;
 };
 
@@ -66,6 +68,11 @@ void printUsage(const char* pProgram)
     std::printf("  --config FILE     configuration (default %s)\n", kDefaultConfigPath);
     std::printf("  --algorithm NAME  override DSI_ALGORITHM\n");
     std::printf("  --backend NAME    override DSI_BACKEND\n");
+    std::printf("  --precision NAME  override DSI_MATH_PRECISION: FP64 or FP32\n");
+    std::printf("  --against NAME    instead of a golden file, run the same\n");
+    std::printf("                    algorithm on this other backend and diff\n");
+    std::printf("                    the two. Set --precision FP32 to remove\n");
+    std::printf("                    precision as a variable, leaving only bugs.\n");
     std::printf("  --tolerance X     relative L2 acceptance threshold (default 1e-4)\n");
 }
 
@@ -87,6 +94,10 @@ bool parseArgs(int argc, char* argv[], Options& oOptions)
             oOptions.sAlgorithm = argv[++i];
         } else if (sArg == "--backend" && bHasValue) {
             oOptions.sBackend = argv[++i];
+        } else if (sArg == "--precision" && bHasValue) {
+            oOptions.sPrecision = argv[++i];
+        } else if (sArg == "--against" && bHasValue) {
+            oOptions.sAgainst = argv[++i];
         } else if (sArg == "--tolerance" && bHasValue) {
             oOptions.dTolerance = std::atof(argv[++i]);
         } else {
@@ -95,8 +106,12 @@ bool parseArgs(int argc, char* argv[], Options& oOptions)
         }
     }
 
-    if (oOptions.sCpiPath.empty() || oOptions.sGoldenPath.empty()) {
-        std::fprintf(stderr, "--cpi and --golden are both required\n");
+    if (oOptions.sCpiPath.empty()) {
+        std::fprintf(stderr, "--cpi is required\n");
+        return false;
+    }
+    if (oOptions.sGoldenPath.empty() == oOptions.sAgainst.empty()) {
+        std::fprintf(stderr, "give exactly one of --golden FILE or --against BACKEND\n");
         return false;
     }
     if (oOptions.dTolerance <= 0.0) {
@@ -176,6 +191,8 @@ int main(int argc, char* argv[])
         oCfg.sDsiAlgorithm = oOptions.sAlgorithm;
     if (!oOptions.sBackend.empty())
         oCfg.sDsiBackend = oOptions.sBackend;
+    if (!oOptions.sPrecision.empty())
+        oCfg.sDsiMathPrecision = oOptions.sPrecision;
 
     DSIParams oParams;
     if (!dsiParamsFromConfig(oCfg, oParams))
@@ -199,10 +216,46 @@ int main(int argc, char* argv[])
                      vcRef.data(), vcSur.data(), oCpiHeader.uSampleCount))
         return 1;
 
+    // The reference output: either a MATLAB golden file, or the same
+    // algorithm run on the other backend.
+    //
+    // Backend-vs-backend is the stronger test for a GPU port. A golden file
+    // can only be compared at a tolerance loose enough to absorb the
+    // single-precision difference (~5e-3), and that is exactly the range
+    // where an off-by-one or a race would hide. Running the CPU in FP32 mode
+    // against the GPU removes precision as a variable, so what is left is
+    // structure.
     GoldenHeader          oGolden;
     std::vector<ComplexF> vcGold;
-    if (!readGolden(oOptions.sGoldenPath.c_str(), oGolden, vcGold))
+    std::string           sReferenceName = oOptions.sGoldenPath;
+
+    if (!oOptions.sAgainst.empty()) {
+        PbrConfig oOther = oCfg;
+        oOther.sDsiBackend = oOptions.sAgainst;
+
+        DSIParams oOtherParams;
+        if (!dsiParamsFromConfig(oOther, oOtherParams))
+            return 1;
+
+        std::unique_ptr<DSICanceller> pOther =
+            makeDSICanceller(oOtherParams.eAlgorithm, oOtherParams.eBackend);
+        if (!pOther || !pOther->init(oOtherParams))
+            return 1;
+
+        vcGold.assign(static_cast<size_t>(oCpiHeader.uSampleCount), ComplexF());
+        DSIStats oOtherStats;
+        if (!pOther->cancel(vcRef.data(), vcSur.data(), vcGold.data(), oOtherStats))
+            return 1;
+
+        sReferenceName = pOther->name();
+        oGolden.uSampleCount     = oOtherParams.uCpiSamples;
+        oGolden.uClutterTaps     = oOtherParams.uClutterTaps;
+        oGolden.uUpdateSamples   = oOtherParams.uUpdateSamples;
+        oGolden.uAbsoluteLoading = oOtherParams.bAbsoluteLoading ? 1 : 0;
+        oGolden.dLoading         = oOtherParams.dDiagonalLoading;
+    } else if (!readGolden(oOptions.sGoldenPath.c_str(), oGolden, vcGold)) {
         return 1;
+    }
 
     // ---- the golden file must have been generated with THESE parameters ----
     // Comparing against a golden file made with different settings would
@@ -225,7 +278,7 @@ int main(int argc, char* argv[])
             "  window      %-20llu  %llu\n"
             "  loading     %g (%s)   %g (%s)\n"
             "Re-run matlab/eca_golden.m, or pick the matching --algorithm.\n",
-            oOptions.sGoldenPath.c_str(), dsiAlgorithmName(oParams.eAlgorithm),
+            sReferenceName.c_str(), dsiAlgorithmName(oParams.eAlgorithm),
             (unsigned long long)oGolden.uSampleCount,
             (unsigned long long)oParams.uCpiSamples,
             (unsigned long long)oGolden.uClutterTaps,
@@ -278,13 +331,13 @@ int main(int argc, char* argv[])
     const bool bPass = dRelL2 < oOptions.dTolerance;
 
     std::printf("dsi_verify: %s against %s\n",
-                pCanceller->name(), oOptions.sGoldenPath.c_str());
-    std::printf("  suppression   C++ %.4f dB   MATLAB %.4f dB\n",
+                pCanceller->name(), sReferenceName.c_str());
+    std::printf("  suppression   %.4f dB   reference %.4f dB\n",
                 oStats.dSuppressionDb, dGoldSuppressionDb);
     std::printf("  relative L2   %.3e   (tolerance %g)\n", dRelL2, oOptions.dTolerance);
     std::printf("  worst sample  %.3e   (vs the golden RMS)\n", dMaxVsRms);
     std::printf("%s\n", bPass
-        ? "PASS -- the C++ canceller matches the MATLAB reference."
+        ? "PASS -- the two agree within tolerance."
         : "FAIL -- the outputs disagree beyond tolerance.");
 
     return bPass ? 0 : 1;

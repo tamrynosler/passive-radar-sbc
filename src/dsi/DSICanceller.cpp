@@ -117,6 +117,10 @@ bool dsiParamsFromConfig(const PbrConfig& oConfig, DSIParams& oParams)
     if (!dsiBackendFromString(oConfig.sDsiBackend.c_str(), oParams.eBackend))
         return false;
 
+    // The GPU has no double-precision option worth using, so it overrides
+    // this in init(). On the CPU it is a real choice.
+    oParams.bFloat32Math     = (oConfig.sDsiMathPrecision == "FP32");
+
     oParams.uCpiSamples      = oConfig.uCpiSamples;
     oParams.uClutterTaps     = oConfig.uClutterTaps;
     oParams.uDopplerTaps     = oConfig.uEcaDopplerTaps;

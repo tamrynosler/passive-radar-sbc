@@ -50,12 +50,20 @@ find_library(CUBLAS_LIBRARY cublas
         /usr/local/cuda-10.2/lib64
         /usr/local/cuda/lib64)
 
-if(NOT CUFFT_LIBRARY OR NOT CUBLAS_LIBRARY)
+# cuSOLVER ships with the CUDA toolkit (verified present on the Nano at
+# /usr/local/cuda-10.2/lib64). Used for the batched Cholesky that solves all
+# of a CPI's cancellation windows in one call.
+find_library(CUSOLVER_LIBRARY cusolver
+  HINTS ${CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES}
+        /usr/local/cuda-10.2/lib64
+        /usr/local/cuda/lib64)
+
+if(NOT CUFFT_LIBRARY OR NOT CUBLAS_LIBRARY OR NOT CUSOLVER_LIBRARY)
   message(FATAL_ERROR
-    "cuFFT/cuBLAS not found. Check CUDA 10.2 is installed at /usr/local/cuda-10.2.")
+    "cuFFT/cuBLAS/cuSOLVER not found. Check CUDA 10.2 is installed at /usr/local/cuda-10.2.")
 endif()
 
-set(PBR_CUDA_LIBS ${CUFFT_LIBRARY} ${CUBLAS_LIBRARY})
+set(PBR_CUDA_LIBS ${CUFFT_LIBRARY} ${CUBLAS_LIBRARY} ${CUSOLVER_LIBRARY})
 
 # Project-wide public headers
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -124,6 +132,10 @@ if(TEST_SOURCES)
     get_filename_component(test_name ${test_src} NAME_WE)
     add_executable(${test_name} ${test_src})
     target_link_libraries(${test_name} ${PBR_LIB} ${PBR_CUDA_LIBS})
+    # The tests are built with assert(), and a Release build defines NDEBUG,
+    # which turns every one of them into a no-op. Without this the suite runs
+    # to completion and reports PASS having checked nothing at all.
+    target_compile_options(${test_name} PRIVATE -UNDEBUG)
     add_test(NAME ${test_name} COMMAND ${test_name})
   endforeach()
 endif()
