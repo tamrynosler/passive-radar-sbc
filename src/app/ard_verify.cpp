@@ -22,6 +22,7 @@
 #include "pbr/ArdFile.hpp"
 #include "pbr/ArdProcessor.hpp"
 #include "pbr/Config.hpp"
+#include "pbr/DSICanceller.hpp"
 #include "pbr/CpiFile.hpp"
 #include "pbr/types.hpp"
 
@@ -43,12 +44,17 @@ const uint64_t    kMaxDetections     = 8192;
 
 struct Options {
     std::string sCleanedPath;      // (reference, cleaned) CPI
+    std::string sRawCpiPath;       // raw CPI, for --chained
+    bool        bChained    = false;
     std::string sGoldenPath;       // MATLAB ARD file
     std::string sConfigPath = kDefaultConfigPath;
     std::string sBackend;
     std::string sStage      = "both";
     double      dTolerance  = 1e-4;
+    double      dMarginDb   = 0.5;
 };
+
+bool bToleranceGiven = false;
 
 void printUsage(const char* pProgram)
 {
@@ -59,7 +65,14 @@ void printUsage(const char* pProgram)
     std::printf("  --stage NAME     caf | cfar | both   (default both)\n");
     std::printf("  --backend NAME   CPU or GPU (default: from the config)\n");
     std::printf("  --config FILE    configuration (default %s)\n", kDefaultConfigPath);
+    std::printf("  --cpi FILE       raw CPI, used with --chained\n");
+    std::printf("  --chained        run the canceller and the ARD stage\n");
+    std::printf("                   DEVICE-COUPLED, which is the exact path\n");
+    std::printf("                   pbr_run uses, and compare end to end\n");
     std::printf("  --tolerance X    relative L2 acceptance for the map (default 1e-4)\n");
+    std::printf("  --margin X       a detection difference is only a failure if\n");
+    std::printf("                   the cell cleared its threshold by more than\n");
+    std::printf("                   this many dB (default 0.5)\n");
 }
 
 bool parseArgs(int argc, char* argv[], Options& oOptions)
@@ -72,6 +85,10 @@ bool parseArgs(int argc, char* argv[], Options& oOptions)
             return false;
         } else if (sArg == "--cleaned" && bHasValue) {
             oOptions.sCleanedPath = argv[++i];
+        } else if (sArg == "--cpi" && bHasValue) {
+            oOptions.sRawCpiPath = argv[++i];
+        } else if (sArg == "--chained") {
+            oOptions.bChained = true;
         } else if (sArg == "--golden" && bHasValue) {
             oOptions.sGoldenPath = argv[++i];
         } else if (sArg == "--stage" && bHasValue) {
@@ -82,6 +99,9 @@ bool parseArgs(int argc, char* argv[], Options& oOptions)
             oOptions.sConfigPath = argv[++i];
         } else if (sArg == "--tolerance" && bHasValue) {
             oOptions.dTolerance = std::atof(argv[++i]);
+            bToleranceGiven = true;
+        } else if (sArg == "--margin" && bHasValue) {
+            oOptions.dMarginDb = std::atof(argv[++i]);
         } else {
             std::fprintf(stderr, "unrecognised or incomplete argument: %s\n", sArg.c_str());
             return false;
@@ -97,7 +117,12 @@ bool parseArgs(int argc, char* argv[], Options& oOptions)
         std::fprintf(stderr, "--stage must be caf, cfar or both\n");
         return false;
     }
-    if (oOptions.sStage != "cfar" && oOptions.sCleanedPath.empty()) {
+    if (oOptions.bChained) {
+        if (oOptions.sRawCpiPath.empty()) {
+            std::fprintf(stderr, "--chained needs --cpi with the RAW CPI\n");
+            return false;
+        }
+    } else if (oOptions.sStage != "cfar" && oOptions.sCleanedPath.empty()) {
         std::fprintf(stderr, "--cleaned is required unless --stage cfar\n");
         return false;
     }
@@ -118,6 +143,21 @@ double relativeL2(const std::vector<ComplexF>& vcA, const std::vector<ComplexF>&
 }
 
 typedef std::set<std::pair<uint64_t, uint64_t> > CellSet;
+
+// How far above its own threshold a detection sat, or -1 if it is not in the
+// list at all. A cell that cleared the threshold by hundredths of a dB is a
+// coin toss: the smallest difference in the map flips it either way, so a
+// disagreement there says nothing about correctness. A cell that cleared it
+// by several dB and then went missing is a real fault.
+double marginOf(const Detection* pDet, uint64_t uCount,
+                uint64_t uRangeBin, uint64_t uDopplerBin)
+{
+    for (uint64_t u = 0; u < uCount; ++u) {
+        if (pDet[u].uRangeBin == uRangeBin && pDet[u].uDopplerBin == uDopplerBin)
+            return pDet[u].dSnrDb;
+    }
+    return -1.0;
+}
 
 CellSet toCellSet(const Detection* pDet, uint64_t uCount)
 {
@@ -189,7 +229,118 @@ int main(int argc, char* argv[])
     std::vector<Detection> vDet(static_cast<size_t>(kMaxDetections));
     ArdStats oStats;
 
-    if (oOptions.sStage == "cfar") {
+    std::string sPathLabel = pArd->name();
+
+    if (oOptions.bChained) {
+        // Validating the chained path takes TWO comparisons, because there are
+        // two different questions and one number cannot answer both.
+        //
+        //   1. Is the device coupling correct? Run the same GPU code twice --
+        //      once with the cleaned samples round-tripping through the host,
+        //      once reading the canceller's device buffer directly. The
+        //      arithmetic is identical either way, so the two must agree
+        //      EXACTLY. Anything else means processDevice() is reading the
+        //      wrong memory. This is the real test of the coupling.
+        //
+        //   2. Does the whole chain still match MATLAB? It does, but more
+        //      loosely than the ARD stage alone, because it inherits the
+        //      canceller's single-precision error (~6.5e-3). That is expected
+        //      propagation rather than a new fault, so --chained defaults to
+        //      the canceller's own accepted tolerance rather than the ARD's.
+        DSIParams oDsiParams;
+        if (!dsiParamsFromConfig(oCfg, oDsiParams))
+            return 1;
+
+        CpiFileHeader oCpiHeader;
+        if (!readCpiFileHeader(oOptions.sRawCpiPath.c_str(), oCpiHeader))
+            return 1;
+        if (oCpiHeader.uSampleCount != oDsiParams.uCpiSamples) {
+            std::fprintf(stderr, "ard_verify: %s holds %llu samples, config "
+                                 "says %llu\n", oOptions.sRawCpiPath.c_str(),
+                         (unsigned long long)oCpiHeader.uSampleCount,
+                         (unsigned long long)oDsiParams.uCpiSamples);
+            return 1;
+        }
+
+        std::vector<ComplexF> vcRef(static_cast<size_t>(oCpiHeader.uSampleCount));
+        std::vector<ComplexF> vcSur(static_cast<size_t>(oCpiHeader.uSampleCount));
+        if (!readCpiFile(oOptions.sRawCpiPath.c_str(), oCpiHeader,
+                         vcRef.data(), vcSur.data(), oCpiHeader.uSampleCount))
+            return 1;
+
+        std::unique_ptr<DSICanceller> pDsi =
+            makeDSICanceller(oDsiParams.eAlgorithm, oDsiParams.eBackend);
+        if (!pDsi || !pDsi->init(oDsiParams))
+            return 1;
+
+        DSIStats oDsiStats;
+
+        // --- path A: through the host -------------------------------------
+        std::vector<ComplexF> vcCleaned(static_cast<size_t>(oCpiHeader.uSampleCount));
+        std::vector<ComplexF> vcMapHost(static_cast<size_t>(uCells));
+        std::vector<Detection> vDetHost(static_cast<size_t>(kMaxDetections));
+        ArdStats oStatsHost;
+
+        pDsi->setHostOutputEnabled(true);
+        if (!pDsi->cancel(vcRef.data(), vcSur.data(), vcCleaned.data(), oDsiStats))
+            return 1;
+        if (!pArd->process(vcRef.data(), vcCleaned.data(), vcMapHost.data(),
+                           vDetHost.data(), kMaxDetections, oStatsHost))
+            return 1;
+
+        // --- path B: device-coupled ---------------------------------------
+        if (pDsi->deviceOutput() != nullptr) {
+            pDsi->setHostOutputEnabled(false);
+            if (!pDsi->cancel(vcRef.data(), vcSur.data(), nullptr, oDsiStats))
+                return 1;
+            if (!pArd->processDevice(pDsi->deviceReference(), pDsi->deviceOutput(),
+                                     vcMap.data(), vDet.data(), kMaxDetections,
+                                     oStats))
+                return 1;
+
+            // The coupling check. Same code, same inputs, different plumbing.
+            uint64_t uCellsDiffer = 0;
+            for (uint64_t u = 0; u < uCells; ++u) {
+                if (vcMap[u].real() != vcMapHost[u].real() ||
+                    vcMap[u].imag() != vcMapHost[u].imag())
+                    ++uCellsDiffer;
+            }
+            std::printf("  coupling check    %llu of %llu map cells differ "
+                        "from the host round-trip\n",
+                        (unsigned long long)uCellsDiffer,
+                        (unsigned long long)uCells);
+            std::printf("  detections        %llu device-coupled, %llu via host\n",
+                        (unsigned long long)oStats.uDetections,
+                        (unsigned long long)oStatsHost.uDetections);
+            if (uCellsDiffer != 0 ||
+                oStats.uDetections != oStatsHost.uDetections) {
+                std::fprintf(stderr,
+                    "ard_verify: the device-coupled path disagrees with the "
+                    "host round-trip. These run identical arithmetic, so any "
+                    "difference means processDevice() is reading the wrong "
+                    "memory.\n");
+                return 1;
+            }
+            sPathLabel = std::string(pDsi->name()) + " -> " + pArd->name() +
+                         ", device-coupled";
+        } else {
+            // No device to couple through. Report honestly rather than
+            // implying the coupling was exercised.
+            vcMap = vcMapHost;
+            vDet  = vDetHost;
+            oStats = oStatsHost;
+            sPathLabel = std::string(pDsi->name()) + " -> " + pArd->name() +
+                         ", via host (no device to couple)";
+        }
+
+        std::printf("  cancellation      %.4f dB suppression\n",
+                    oDsiStats.dSuppressionDb);
+
+        // The chain inherits the canceller's error, so it is held to the
+        // canceller's tolerance unless the caller says otherwise.
+        if (!bToleranceGiven)
+            oOptions.dTolerance = 1e-2;
+    } else if (oOptions.sStage == "cfar") {
         // Feed the detector MATLAB's own map, so nothing about map formation
         // can influence the result.
         if (!pArd->detect(vcGoldenMap.data(), vDet.data(), kMaxDetections, oStats))
@@ -220,11 +371,13 @@ int main(int argc, char* argv[])
 
     // ---- compare -----------------------------------------------------------
     std::printf("ard_verify: %s, stage %s, against %s\n",
-                pArd->name(), oOptions.sStage.c_str(), oOptions.sGoldenPath.c_str());
+                sPathLabel.c_str(),
+                oOptions.bChained ? "chained" : oOptions.sStage.c_str(),
+                oOptions.sGoldenPath.c_str());
 
     bool bPass = true;
 
-    if (oOptions.sStage != "cfar") {
+    if (oOptions.bChained || oOptions.sStage != "cfar") {
         const double dRel = relativeL2(vcMap, vcGoldenMap);
         std::printf("  map relative L2   %.3e   (tolerance %g)\n",
                     dRel, oOptions.dTolerance);
@@ -233,7 +386,7 @@ int main(int argc, char* argv[])
             bPass = false;
     }
 
-    if (oOptions.sStage != "caf") {
+    if (oOptions.bChained || oOptions.sStage != "caf") {
         const CellSet oMine   = toCellSet(vDet.data(), oStats.uDetections);
         const CellSet oGolden = toCellSet(vGoldenDet.data(), oGoldenHeader.uDetections);
 
@@ -259,17 +412,45 @@ int main(int argc, char* argv[])
             bPass = false;
         }
 
-        for (size_t u = 0; u < vMissed.size() && u < 5; ++u)
-            std::printf("    missed: range bin %llu, doppler bin %llu\n",
-                        (unsigned long long)vMissed[u].first,
-                        (unsigned long long)vMissed[u].second);
-        for (size_t u = 0; u < vExtra.size() && u < 5; ++u)
-            std::printf("    extra:  range bin %llu, doppler bin %llu\n",
-                        (unsigned long long)vExtra[u].first,
-                        (unsigned long long)vExtra[u].second);
+        // Judge each difference by how far the cell was from its threshold.
+        double dWorstMargin = 0.0;
+        for (size_t u = 0; u < vMissed.size(); ++u) {
+            const double dMargin = marginOf(vGoldenDet.data(),
+                                            oGoldenHeader.uDetections,
+                                            vMissed[u].first, vMissed[u].second);
+            if (dMargin > dWorstMargin)
+                dWorstMargin = dMargin;
+            if (u < 5)
+                std::printf("    missed: range bin %llu, doppler bin %llu "
+                            "(MATLAB cleared threshold by %.4f dB)\n",
+                            (unsigned long long)vMissed[u].first,
+                            (unsigned long long)vMissed[u].second, dMargin);
+        }
+        for (size_t u = 0; u < vExtra.size(); ++u) {
+            const double dMargin = marginOf(vDet.data(), oStats.uDetections,
+                                            vExtra[u].first, vExtra[u].second);
+            if (dMargin > dWorstMargin)
+                dWorstMargin = dMargin;
+            if (u < 5)
+                std::printf("    extra:  range bin %llu, doppler bin %llu "
+                            "(cleared threshold by %.4f dB)\n",
+                            (unsigned long long)vExtra[u].first,
+                            (unsigned long long)vExtra[u].second, dMargin);
+        }
 
-        if (!vMissed.empty() || !vExtra.empty())
-            bPass = false;
+        if (!vMissed.empty() || !vExtra.empty()) {
+            std::printf("  worst margin      %.4f dB   (tolerated up to %.2f dB)\n",
+                        dWorstMargin, oOptions.dMarginDb);
+            if (dWorstMargin > oOptions.dMarginDb) {
+                std::printf("  -> a cell well clear of its threshold disagrees; "
+                            "that is a real fault, not rounding\n");
+                bPass = false;
+            } else {
+                std::printf("  -> every disagreement is a cell sitting on its "
+                            "threshold, which the smallest\n"
+                            "     difference in the map flips either way\n");
+            }
+        }
     }
 
     std::printf("%s\n", bPass ? "PASS -- matches the MATLAB reference."

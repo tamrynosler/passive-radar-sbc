@@ -30,6 +30,7 @@ RSYNC := rsync -av --delete \
 
 .PHONY: sync configure build test bench pull-results shell clean-remote \
         host-probe host-replay host-test host-bench host-verify host-ard \
+        host-run \
         host-clean \
         dsi-bench
 
@@ -108,6 +109,13 @@ host-ard:
 	$(HOST_CXX) $(HOST_CXXFLAGS) src/app/ard_verify.cpp $(LIB_SRC) \
 	    -o $(HOST_BIN)/ard_verify
 	@echo "built $(HOST_BIN)/ard_verify"
+
+## host-run: build the full chain runner locally -> bin/pbr_run
+host-run:
+	@mkdir -p $(HOST_BIN)
+	$(HOST_CXX) $(HOST_CXXFLAGS) src/app/pbr_run.cpp $(LIB_SRC) \
+	    -o $(HOST_BIN)/pbr_run
+	@echo "built $(HOST_BIN)/pbr_run"
 
 ## host-clean: remove locally built binaries
 host-clean:

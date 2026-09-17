@@ -414,9 +414,20 @@ void printPbrConfig(const PbrConfig& oConfig)
                 static_cast<unsigned long long>(oConfig.uDopplerDecimation),
                 oConfig.dDopplerHalfSpanHz);
     std::printf("  min CPI coverage   %.1f%%\n", 100.0 * oConfig.dMinCpiCoverage);
-    std::printf("  DSI                %s on %s (%s math)\n",
-                oConfig.sDsiAlgorithm.c_str(), oConfig.sDsiBackend.c_str(),
-                oConfig.sDsiMathPrecision.c_str());
+    // The GPU ignores DSI_MATH_PRECISION -- Maxwell runs FP64 at 1/32 the
+    // FP32 rate, so single precision is forced. Printing the configured value
+    // unqualified next to "on GPU" would read as a claim about what will
+    // actually happen.
+    if (oConfig.sDsiBackend == "GPU") {
+        std::printf("  DSI                %s on GPU (FP32; DSI_MATH_PRECISION=%s "
+                    "applies to the CPU backend only)\n",
+                    oConfig.sDsiAlgorithm.c_str(),
+                    oConfig.sDsiMathPrecision.c_str());
+    } else {
+        std::printf("  DSI                %s on %s (%s math)\n",
+                    oConfig.sDsiAlgorithm.c_str(), oConfig.sDsiBackend.c_str(),
+                    oConfig.sDsiMathPrecision.c_str());
+    }
     std::printf("  ECA windows        estimate %.4f s (%llu samples), "
                 "update %.4f s (%llu samples)\n",
                 oConfig.dEcaBatchSeconds,

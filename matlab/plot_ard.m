@@ -10,7 +10,7 @@
 %   plot_ard('data/ard_0000.bin', 400)
 
 function plot_ard(path, fdMax)
-    if nargin < 1 || isempty(path),  path  = 'data/golden_ard.bin'; end
+    if nargin < 1 || isempty(path),  path  = '../data/golden_ard.bin'; end
     if nargin < 2 || isempty(fdMax), fdMax = 200; end
 
     [map, nRange, nDop, fs, dec, dets] = read_ard(path);

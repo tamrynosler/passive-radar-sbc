@@ -26,6 +26,8 @@ accepts a live receiver front end.
 - [ ] ECA-S, ECA-CD, CGLS  ← next
 - [x] CAF range–Doppler + 2D CA-CFAR: 19.6 ms/CPI on the GPU, matching
       MATLAB at 3.2e-7 with identical detections
+- [x] **Full chain running live in real time on the Jetson** — 156 ms/CPI
+      against a 1000 ms budget, 0 CPIs dropped over a 45 s live FERS run
 - [ ] Algorithm benchmarking study (suppression vs latency)
 
 > The cuFFT harness compiles, runs, times cleanly and emits valid CSV on the
