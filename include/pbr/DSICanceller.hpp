@@ -217,6 +217,24 @@ public:
 
     // Name for logs, CSV rows and figure captions, e.g. "ECA-B (CPU)".
     virtual const char* name() const = 0;
+
+    // Device pointers to the reference and to the cleaned surveillance
+    // signal, valid after a successful cancel(). Null on a backend with no
+    // device, which is how a caller tells whether it can chain without
+    // copying.
+    //
+    // Deliberately opaque void*: the next stage casts them back, and this
+    // header stays free of CUDA types. The point is that a GPU canceller
+    // feeding a GPU range-Doppler stage moves no samples through the host at
+    // all -- the download below exists only for validation and for the CPU
+    // path.
+    virtual const void* deviceReference() const { return nullptr; }
+    virtual const void* deviceOutput()    const { return nullptr; }
+
+    // Skip the final device-to-host copy of the cleaned signal. Set this when
+    // the next stage reads deviceOutput() directly; the host output buffer is
+    // then left untouched. Ignored by backends with no device.
+    virtual void setHostOutputEnabled(bool /*bEnabled*/) {}
 };
 
 // Build a canceller. Returns null, having logged the reason, for a

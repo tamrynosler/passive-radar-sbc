@@ -57,6 +57,7 @@ struct Options {
     std::string sBackend;
     std::string sPrecision;
     std::string sAgainst;          // other backend to diff against
+    std::string sDumpPath;         // write the cleaned CPI here
     double      dTolerance  = 1e-4;
 };
 
@@ -73,6 +74,8 @@ void printUsage(const char* pProgram)
     std::printf("                    algorithm on this other backend and diff\n");
     std::printf("                    the two. Set --precision FP32 to remove\n");
     std::printf("                    precision as a variable, leaving only bugs.\n");
+    std::printf("  --dump-output FILE  write (reference, cleaned) as a CPI file,\n");
+    std::printf("                    which is what matlab/ard_golden.m reads\n");
     std::printf("  --tolerance X     relative L2 acceptance threshold (default 1e-4)\n");
 }
 
@@ -98,6 +101,8 @@ bool parseArgs(int argc, char* argv[], Options& oOptions)
             oOptions.sPrecision = argv[++i];
         } else if (sArg == "--against" && bHasValue) {
             oOptions.sAgainst = argv[++i];
+        } else if (sArg == "--dump-output" && bHasValue) {
+            oOptions.sDumpPath = argv[++i];
         } else if (sArg == "--tolerance" && bHasValue) {
             oOptions.dTolerance = std::atof(argv[++i]);
         } else {
@@ -336,6 +341,19 @@ int main(int argc, char* argv[])
                 oStats.dSuppressionDb, dGoldSuppressionDb);
     std::printf("  relative L2   %.3e   (tolerance %g)\n", dRelL2, oOptions.dTolerance);
     std::printf("  worst sample  %.3e   (vs the golden RMS)\n", dMaxVsRms);
+    // The cleaned CPI is what the range-Doppler stage consumes. Written in
+    // the SAME format as the input CPI -- both hold two aligned channels, so
+    // (reference, cleaned) fits with no new format and MATLAB reads it with
+    // the loader it already has.
+    if (!oOptions.sDumpPath.empty()) {
+        CpiFileHeader oOut = oCpiHeader;
+        if (!writeCpiFile(oOptions.sDumpPath.c_str(), oOut,
+                          vcRef.data(), vcOut.data()))
+            return 1;
+        std::printf("wrote (reference, cleaned) to %s\n",
+                    oOptions.sDumpPath.c_str());
+    }
+
     std::printf("%s\n", bPass
         ? "PASS -- the two agree within tolerance."
         : "FAIL -- the outputs disagree beyond tolerance.");

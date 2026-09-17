@@ -209,6 +209,10 @@ public:
                 ComplexF* pcOut, DSIStats& oStats) override;
     const char* name() const override { return machName; }
 
+    const void* deviceReference() const override { return md_cRef; }
+    const void* deviceOutput()    const override { return md_cOut; }
+    void setHostOutputEnabled(bool bEnabled) override { mbHostOutput = bEnabled; }
+
 private:
     void release();
 
@@ -233,6 +237,9 @@ private:
 
     char               machName[32];
     bool               mbReady        = false;
+    // When the range-Doppler stage reads deviceOutput() directly there is no
+    // reason to move 1.6 MB back to the host every CPI.
+    bool               mbHostOutput   = true;
 };
 
 EcaGpu::~EcaGpu()
@@ -348,8 +355,10 @@ bool EcaGpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
                     ComplexF* pcOut, DSIStats& oStats)
 {
     CHECK(mbReady, "EcaGpu::cancel before a successful init");
-    CHECK(pcRef != nullptr && pcSur != nullptr && pcOut != nullptr,
-          "null buffer passed to EcaGpu::cancel");
+    CHECK(pcRef != nullptr && pcSur != nullptr,
+          "null input buffer passed to EcaGpu::cancel");
+    CHECK(pcOut != nullptr || !mbHostOutput,
+          "null output buffer with host output enabled");
     CHECK(pcOut != pcRef && pcOut != pcSur,
           "the output buffer must not alias either input");
 
@@ -493,8 +502,15 @@ bool EcaGpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
     CUBLAS_CHECK(cublasScnrm2(mhCublas, static_cast<int>(moParams.uCpiSamples),
                               md_cOut, 1, &fOutNorm));
 
-    CUDA_CHECK(cudaMemcpy(reinterpret_cast<DeviceComplex*>(pcOut), md_cOut,
-                          uCpiBytes, cudaMemcpyDeviceToHost));
+    if (mbHostOutput) {
+        CUDA_CHECK(cudaMemcpy(reinterpret_cast<DeviceComplex*>(pcOut), md_cOut,
+                              uCpiBytes, cudaMemcpyDeviceToHost));
+    } else {
+        // Nothing synchronises otherwise, and the suppression figures below
+        // are read back by cublasScnrm2 which does -- but make the wait
+        // explicit so a kernel error surfaces here rather than later.
+        CUDA_CHECK(cudaDeviceSynchronize());
+    }
 
     // The copy above synchronises, so any kernel error has surfaced by now.
     CUDA_CHECK(cudaGetLastError());

@@ -106,6 +106,10 @@ target_link_libraries(cufft_bench ${PBR_LIB} ${PBR_CUDA_LIBS})
 add_executable(dsi_bench bench/dsi_bench.cpp)
 target_link_libraries(dsi_bench ${PBR_LIB} ${PBR_CUDA_LIBS})
 
+# Range-Doppler map + CFAR timing harness.
+add_executable(ard_bench bench/ard_bench.cpp)
+target_link_libraries(ard_bench ${PBR_LIB} ${PBR_CUDA_LIBS})
+
 # ---------------------------------------------------------------------------
 # Application executables: one per source file in src/app/
 # ---------------------------------------------------------------------------

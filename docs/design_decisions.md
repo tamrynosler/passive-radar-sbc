@@ -378,7 +378,7 @@ FP32 batched solve is free: 4.935e-3 with it against 4.951e-3 without.
 because FP32 measures ~5e-3 and no amount of care brings that to 1e-4 on this
 hardware. What keeps that safe is a second, tighter test:
 
-- **GPU vs CPU in FP32 mode, on uncorrelated signals: 2.72e-07.** With nothing
+- **GPU vs CPU in FP32 mode, on uncorrelated signals: 3.41e-07.** With nothing
   to cancel there is no amplification, so the two backends must agree almost
   exactly, and any indexing or race bug still shows at full size.
 - On the deeply-cancelled real CPI the same comparison is only good to
@@ -435,11 +435,24 @@ This predates the GPU work and applies to every test written so far.
 the gitignore filter removed `data/` on the Jetson on every build. Fixed with
 explicit `P` (protect) filter rules for `data`, `results` and `build`.
 
-**The test generator produced correlated "uncorrelated" signals.** A plain LCG
-walks one cycle, so two seeds give two offset positions on the same sequence.
-The backend comparison was being run on signals that cancelled by 6.3 dB
-where theory says 0.28 dB, hiding the real agreement by three orders of
-magnitude (1.19e-5 against the true 2.72e-7). Replaced with splitmix64.
+**The test data generator was broken in two ways**, and the first diagnosis of
+it was wrong -- the real causes came out only under measurement.
+
+The LCG returned `uint32_t(state >> 33) / 2^31 - 1`: 31 bits divided by 2^31
+is [0,1), so the output range was **[-1, 0), not [-1, 1)**. Every sample
+carried a -0.5 DC offset. A constant offset is precisely what a clutter
+canceller removes perfectly, so signals that were supposed to be
+uncorrelated cancelled by 6.3 dB where theory says 0.28.
+
+The splitmix64 replacement then had its own flaw: seeded `state = seed *
+GAMMA` and stepped `+= GAMMA`, seed s+1 yields **exactly stream s offset by
+one output**. Adjacent seeds produced the same signal, shifted -- and seeds
+51/52 in an existing test were that case.
+
+Both are fixed (the seed is hashed through the finaliser), and
+`testRngIsUsable()` now asserts zero mean and adjacent-seed decorrelation
+before any test depends on them. The GPU-vs-CPU agreement is 3.41e-07 with a
+correct generator, against 1.19e-5 with the broken one.
 
 ### 1d.7 Deferred: the efficient implementation
 
@@ -472,6 +485,124 @@ should not.
 The same frozen CPI is what the MATLAB golden-file check will read, so both
 sides start from identical samples and the unresolved `.h5` amplitude scaling
 (§5.2, and `PLAN.md`) is out of the critical path entirely.
+
+---
+
+## 1e. Range-Doppler map and CFAR (`pbr::ArdProcessor`)
+
+Files: `include/pbr/ArdProcessor.hpp`, `src/ard/ArdProcessor.cpp`,
+`src/ard/cpu/ArdCpu.cpp`, `src/ard/gpu/ArdGpu.cu`, `include/pbr/ArdFile.hpp`,
+`tests/test_ard.cpp`, `src/app/ard_verify.cpp`, `bench/ard_bench.cpp`,
+`matlab/ard_golden.m`, `matlab/plot_ard.m`.
+
+### 1e.1 Range on the x axis: the array is the picture
+
+**Decision.** The map is stored `map[doppler * uRangeBins + range]`, range
+varying fastest, which is exactly how it is displayed: range horizontal,
+Doppler vertical.
+
+**Why.** That is the convention of every paper this work is measured against
+-- Schuepbach RadarConf 2020 Figs 3-7, Colone TAES 52(3) 2016 Figs 4-5,
+Laptev DSPA 2026 Fig 4 all plot bistatic range horizontally.
+`fm_passive_radar_process.m` stores the transpose and plots Doppler
+horizontally; it is the outlier, and `ard_golden.m` flips once on the way out
+so nothing downstream has to think about it.
+
+Storing it in display orientation costs nothing. The batched FFT naturally
+produces range-major output, and the kernel that converts complex to power has
+to read and write anyway, so it does the transpose and the `fftshift` in the
+same pass.
+
+### 1e.2 Samples never leave the GPU between stages
+
+`DSICanceller` gained `deviceReference()` and `deviceOutput()`, returning
+opaque `const void*` so no CUDA types enter a public header, plus
+`setHostOutputEnabled(false)` to skip a 1.6 MB download nobody wants.
+`ArdProcessor::processDevice()` takes those pointers directly.
+
+A chained run therefore copies nothing between cancellation and map formation.
+`process()` is the same work with an upload in front and a download behind,
+for standalone use and validation. No new buffer-management class was needed.
+
+### 1e.3 A direct DFT in the CPU reference, on purpose
+
+The Doppler length is 1600 = 2^6 * 5^2, so radix-2 does not apply and a
+mixed-radix or Bluestein implementation is a lot of subtle code.
+
+More to the point, the CPU version is a REFERENCE. Its job is to be obviously
+right and to fail differently from cuFFT if either fails. A direct DFT is ten
+inspectable lines sharing no algorithm with the thing it checks. It costs
+120 * 1600^2 complex operations, seconds per CPI; that is the trade, not an
+oversight.
+
+### 1e.4 CFAR edges match MATLAB exactly, and the cost is reported
+
+`conv2(..., 'same')` zero-pads. Cells near the border therefore build their
+background estimate from fewer real neighbours while still dividing by the
+full training count, so they under-estimate the background and over-detect.
+Both implementations replicate this exactly, because a golden comparison
+against a reference we had silently "improved" would prove nothing.
+
+**Measured on the first CPI**: the border is 11.1% of the map but holds 21.7%
+of detections -- about 2.2x over-detection, 20 of 92. `ArdStats::
+uDetectionsInBorder` reports it every run so the effect is visible rather than
+silent. Fixing it properly (normalise by the count of cells actually inside
+the map) is deferred and will be a documented divergence when it happens.
+
+### 1e.5 Validated, 2026-09-17
+
+Three checks, because one end-to-end number cannot say which half is wrong.
+`ard_verify --stage caf | cfar | both`; the `cfar` stage reads MATLAB's own
+golden map as input, so the detector is isolated from map formation.
+
+| Stage | CPU | GPU |
+|---|---|---|
+| CAF, map relative L2 | 5.299e-11 | **3.203e-07** |
+| CFAR detections | 92 vs 92, 0 missed, 0 extra | 92 vs 92, 0 missed, 0 extra |
+
+The GPU meets the **standard 1e-4 bar**, unlike the canceller which needed
+1e-2. Two reasons, both predicted before measuring: the summation here is
+hierarchical (128 samples per block, then 1600 blocks) rather than 204800 in
+one go, and there is no ill-conditioned solve amplifying small errors.
+
+### 1e.6 The ambiguity check the golden file could not give us
+
+`PLAN.md` flagged that ECA-B must place Doppler ambiguities at exactly 1/T_B
+spacing around a target ([2] eq. 17), and that no golden file could verify it
+because MATLAB would reproduce the same artefact.
+
+The first real CPI shows it. Brightest cell: range bin 46 (67.34 km) at
++99 Hz, with the detections in that same range bin at:
+
+```
+  +99 Hz   0.00 dB   the target
+  +19 Hz -21.63 dB   offset -80 Hz  = -2 x 40 Hz
+  -21 Hz -21.40 dB   offset -120 Hz = -3 x 40 Hz
+```
+
+T_B is 25 ms, so 1/T_B is 40 Hz, and the artefacts land on that comb exactly.
+This simultaneously confirms that the batching is right, that the Doppler axis
+is right, and that the two stages are coherent with each other.
+
+### 1e.7 Measured on the Jetson, 2026-09-17
+
+GPU, 20 iterations after a warm-up, clocks NOT pinned -- provisional.
+
+| Stage | Time per CPI | vs real time |
+|---|---|---|
+| DSI cancellation (ECA-B) | 142.1 ms | 0.14x |
+| **Range-Doppler + CFAR** | **19.6 ms** | **0.02x** |
+| **Full chain** | **~162 ms** | **~0.16x** |
+
+The ARD stage is about 7x cheaper than the cancellation, as predicted. The
+whole chain runs at roughly six times real time on a $99 board.
+
+Also observed: the interior false-alarm rate is 4.2e-4 against a configured
+Pfa of 1e-5. That is not a bug in the detector -- the CFAR scale factor
+assumes independent, exponentially distributed noise, and a real post-
+cancellation map has neither (correlated neighbouring cells from the ambiguity
+function, residual clutter structure, and genuine target smear all count).
+Worth stating plainly when reporting detection results.
 
 ---
 

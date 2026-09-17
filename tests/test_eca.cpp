@@ -14,6 +14,7 @@
 #include "pbr/types.hpp"
 
 #include <cassert>
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstdio>
@@ -25,16 +26,33 @@ using namespace pbr;
 namespace {
 
 // Deterministic generator, so a failure is always reproducible, and the same
-// on every platform.
+// on every platform. splitmix64.
 //
-// This is splitmix64 rather than a plain LCG. A bare LCG walks a single cycle,
-// so two different seeds give two OFFSET POSITIONS ON THE SAME SEQUENCE --
-// which made "uncorrelated" test signals correlated enough to be cancelled by
-// 6 dB where theory says 0.3. The extra mixing steps below decorrelate the
-// streams, which the tests that compare backends depend on.
+// Two mistakes were made here before, both of which quietly corrupted the
+// tests that compare two independent signals:
+//
+//   1. The original LCG returned  uint32_t(state >> 33) / 2^31 - 1, which is
+//      31 bits over 2^31 -- a range of [-1, 0), not [-1, 1). Every sample
+//      carried a -0.5 DC offset, and a constant offset is exactly the kind of
+//      thing a clutter canceller removes perfectly. "Uncorrelated" signals
+//      cancelled by 6.3 dB when theory says 0.28.
+//   2. Seeding splitmix64 as  state = seed * GAMMA  and then stepping by
+//      += GAMMA means seed s+1 produces precisely stream s offset by one
+//      output. Adjacent seeds gave the same signal, shifted.
+//
+// Hence the seed is hashed below, and testRngIsUsable() checks both
+// properties before anything depends on them.
 struct Rng {
     uint64_t uState;
-    explicit Rng(uint64_t uSeed) : uState(uSeed * 0x9E3779B97F4A7C15ULL) {}
+
+    explicit Rng(uint64_t uSeed)
+    {
+        uint64_t z = uSeed + 0x9E3779B97F4A7C15ULL;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        uState = z ^ (z >> 31);
+    }
+
     double next()   // uniform in [-1, 1)
     {
         uState += 0x9E3779B97F4A7C15ULL;
@@ -81,6 +99,49 @@ DSIParams baseParams(DSIAlgorithm eAlgorithm, uint64_t uCpi, uint64_t uTaps,
 }
 
 // ---------------------------------------------------------------------------
+
+// The test data generator is itself load-bearing: two bugs in it previously
+// hid a real result by three orders of magnitude. Check it before anything
+// depends on it.
+void testRngIsUsable()
+{
+    const uint64_t uCount = 100000;
+
+    // Zero mean. A DC offset is perfectly cancellable, so it would show up as
+    // suppression that has nothing to do with the algorithm.
+    const std::vector<ComplexF> vcA = makeNoise(uCount, 101);
+    double dRe = 0.0, dIm = 0.0;
+    for (size_t u = 0; u < vcA.size(); ++u) {
+        dRe += vcA[u].real();
+        dIm += vcA[u].imag();
+    }
+    assert(std::fabs(dRe / double(uCount)) < 0.01);
+    assert(std::fabs(dIm / double(uCount)) < 0.01);
+
+    // Adjacent seeds must give unrelated streams, not the same one shifted.
+    // Peak cross-correlation over the delays a canceller searches; chance
+    // alone gives about 1/sqrt(N).
+    const std::vector<ComplexF> vcB = makeNoise(uCount, 102);
+    double dPa = 0.0, dPb = 0.0;
+    for (size_t u = 0; u < uCount; ++u) {
+        dPa += std::norm(std::complex<double>(vcA[u].real(), vcA[u].imag()));
+        dPb += std::norm(std::complex<double>(vcB[u].real(), vcB[u].imag()));
+    }
+    double dPeak = 0.0;
+    for (uint64_t uLag = 0; uLag < 64; ++uLag) {
+        std::complex<double> cAcc(0.0, 0.0);
+        for (uint64_t n = uLag; n < uCount; ++n) {
+            cAcc += std::conj(std::complex<double>(vcA[n - uLag].real(),
+                                                   vcA[n - uLag].imag())) *
+                    std::complex<double>(vcB[n].real(), vcB[n].imag());
+        }
+        dPeak = std::max(dPeak, std::abs(cAcc) / std::sqrt(dPa * dPb));
+    }
+    assert(dPeak < 0.05);
+
+    std::printf("  test RNG: zero mean, adjacent seeds uncorrelated (%.4f)  ok\n",
+                dPeak);
+}
 
 void testRejectsWhatIsNotImplemented()
 {
@@ -484,7 +545,7 @@ void testGpuMatchesCpuWithoutAmplification()
     // expected. What matters is that it is nowhere near the 50 dB of real
     // data, because that is the factor the Gram rounding gets amplified by.
     assert(oCpu.dSuppressionDb < 1.0);
-    // Measured 2.7e-07. This is the tolerance that actually catches GPU bugs:
+    // Measured 3.4e-07. This is the tolerance that actually catches GPU bugs:
     // against the deeply-cancelled real CPI the same comparison is only good
     // to ~1e-2, because the suppression ratio amplifies the difference in
     // cuBLAS's summation order.
@@ -557,6 +618,7 @@ int main()
 {
     std::printf("test_eca\n");
 
+    testRngIsUsable();
     testRejectsWhatIsNotImplemented();
     testRejectsBadBuffers();
     testCancelsKnownClutter(DSIAlgorithm::EcaM, 4096, "ECA-m");

@@ -24,7 +24,8 @@ accepts a live receiver front end.
 - [x] DSI cancellation on the GPU: 142 ms/CPI on the Nano, 68× the CPU,
       7× faster than real time
 - [ ] ECA-S, ECA-CD, CGLS  ← next
-- [ ] CAF range–Doppler + 2D CA-CFAR
+- [x] CAF range–Doppler + 2D CA-CFAR: 19.6 ms/CPI on the GPU, matching
+      MATLAB at 3.2e-7 with identical detections
 - [ ] Algorithm benchmarking study (suppression vs latency)
 
 > The cuFFT harness compiles, runs, times cleanly and emits valid CSV on the

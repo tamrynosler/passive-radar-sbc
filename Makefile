@@ -29,7 +29,9 @@ RSYNC := rsync -av --delete \
          --exclude '.DS_Store'
 
 .PHONY: sync configure build test bench pull-results shell clean-remote \
-        host-probe host-replay host-test host-bench host-verify host-clean
+        host-probe host-replay host-test host-bench host-verify host-ard \
+        host-clean \
+        dsi-bench
 
 # ---------------------------------------------------------------------------
 # Host-only builds — run on the Mac, no Jetson and no CUDA involved.
@@ -55,10 +57,13 @@ INGEST_SRC    := src/ingest/CircularBuffer.cpp \
                  src/ingest/CaptureFile.cpp
 DSI_SRC       := src/dsi/DSICanceller.cpp \
                  src/dsi/cpu/EcaCpu.cpp
-LIB_SRC       := $(INGEST_SRC) $(DSI_SRC)
+ARD_SRC       := src/ard/ArdProcessor.cpp \
+                 src/ard/ArdFile.cpp \
+                 src/ard/cpu/ArdCpu.cpp
+LIB_SRC       := $(INGEST_SRC) $(DSI_SRC) $(ARD_SRC)
 HOST_TESTS    := tests/test_circular_buffer.cpp tests/test_vita49_packet.cpp \
                  tests/test_config.cpp tests/test_cpi_extraction.cpp \
-                 tests/test_eca.cpp
+                 tests/test_eca.cpp tests/test_ard.cpp
 
 ## host-probe: build the live FERS ingest checkpoint locally -> bin/ingest_probe
 host-probe:
@@ -97,6 +102,13 @@ host-verify:
 	    -o $(HOST_BIN)/dsi_verify
 	@echo "built $(HOST_BIN)/dsi_verify"
 
+## host-ard: build the ARD verification tool locally -> bin/ard_verify
+host-ard:
+	@mkdir -p $(HOST_BIN)
+	$(HOST_CXX) $(HOST_CXXFLAGS) src/app/ard_verify.cpp $(LIB_SRC) \
+	    -o $(HOST_BIN)/ard_verify
+	@echo "built $(HOST_BIN)/ard_verify"
+
 ## host-clean: remove locally built binaries
 host-clean:
 	rm -rf $(HOST_BIN)
@@ -123,11 +135,20 @@ bench: build
 	ssh $(JETSON) 'cd $(REMOTE) && bash scripts/run_cufft_bench.sh'
 	$(MAKE) pull-results
 
+## dsi-bench: DSI cancellation sweep on the Jetson with clocks pinned and
+##            tegrastats logged, then pull the results back.
+##            Needs an interactive sudo password on the board, so run it from
+##            a terminal rather than unattended.
+dsi-bench: build
+	ssh -t $(JETSON) 'cd $(REMOTE) && bash scripts/run_dsi_bench.sh'
+	$(MAKE) pull-results
+
 ## pull-results: copy CSV/logs from the Jetson SD card to ./results
 pull-results:
 	mkdir -p results
 	-scp '$(JETSON):/data/results/*.csv' results/
 	-scp '$(JETSON):/data/results/*.log' results/
+	-scp -r '$(JETSON):/data/results/dsi_*' results/
 
 ## shell: interactive shell in the remote repo
 shell:
