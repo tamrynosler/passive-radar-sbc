@@ -77,6 +77,10 @@ list(FILTER PBR_SOURCES EXCLUDE REGEX "/src/app/")
 if(PBR_SOURCES)
   add_library(pbr STATIC ${PBR_SOURCES})
   target_link_libraries(pbr ${PBR_CUDA_LIBS})
+  # This build has CUDA, so the GPU cancellers are compiled in and selectable.
+  # The host-only Makefile build does not define this, and asking for the GPU
+  # backend there fails loudly rather than falling back to the CPU.
+  target_compile_definitions(pbr PUBLIC PBR_WITH_CUDA)
   set(PBR_LIB pbr)
 else()
   # src/ is still empty scaffolding — build benchmarks standalone for now.
@@ -88,6 +92,11 @@ endif()
 # ---------------------------------------------------------------------------
 add_executable(cufft_bench bench/cufft_bench.cu)
 target_link_libraries(cufft_bench ${PBR_LIB} ${PBR_CUDA_LIBS})
+
+# DSI cancellation timing harness. Plain C++ -- it drives whichever backend
+# the config or the command line selects and times only the cancel() call.
+add_executable(dsi_bench bench/dsi_bench.cpp)
+target_link_libraries(dsi_bench ${PBR_LIB} ${PBR_CUDA_LIBS})
 
 # ---------------------------------------------------------------------------
 # Application executables: one per source file in src/app/

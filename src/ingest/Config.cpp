@@ -169,6 +169,8 @@ bool validate(PbrConfig& oConfig)
         { "N_CLUTTER_TAPS",       static_cast<double>(oConfig.uClutterTaps) },
         { "DOPPLER_HALF_SPAN_Hz", oConfig.dDopplerHalfSpanHz },
         { "DOPPLER_DECIMATION",   static_cast<double>(oConfig.uDopplerDecimation) },
+        { "ECA_BATCH_LENGTH_s",   oConfig.dEcaBatchSeconds },
+        { "ECA_UPDATE_INTERVAL_s", oConfig.dEcaUpdateSeconds },
     };
     for (size_t u = 0; u < sizeof(aPositive) / sizeof(aPositive[0]); ++u) {
         if (aPositive[u].dValue <= 0.0) {
@@ -209,6 +211,17 @@ bool validate(PbrConfig& oConfig)
         bOk = false;
     }
 
+    if (oConfig.sDsiAlgorithm.empty() || oConfig.sDsiBackend.empty()) {
+        std::fprintf(stderr, "config: DSI_ALGORITHM and DSI_BACKEND must not be empty\n");
+        bOk = false;
+    }
+    // Loading is a fraction of the Gram diagonal, so it is dimensionless and
+    // a value of 1 or more would swamp the signal entirely.
+    if (oConfig.dEcaDiagLoading < 0.0 || oConfig.dEcaDiagLoading >= 1.0) {
+        std::fprintf(stderr, "config: ECA_DIAGONAL_LOADING must be in [0, 1)\n");
+        bOk = false;
+    }
+
     if (!bOk)
         return false;
 
@@ -245,6 +258,55 @@ bool validate(PbrConfig& oConfig)
                      static_cast<unsigned long long>(oConfig.uCpiSamples));
         return false;
     }
+    // ECA windows. Colone et al. (TAES 52(3), 2016) divide the CPI into a
+    // whole number of batches "without remainder": a partial trailing window
+    // would be solved from fewer samples than the rest and quietly behave
+    // differently from its neighbours.
+    oConfig.uEcaEstimateSamples = toSamples(oConfig.dEcaBatchSeconds,  oConfig.uSampleRateHz);
+    oConfig.uEcaUpdateSamples   = toSamples(oConfig.dEcaUpdateSeconds, oConfig.uSampleRateHz);
+
+    if (oConfig.uEcaEstimateSamples == 0 || oConfig.uEcaUpdateSamples == 0) {
+        std::fprintf(stderr, "config: ECA_BATCH_LENGTH_s and ECA_UPDATE_INTERVAL_s "
+                             "must each be at least one sample at %llu Hz\n",
+                     static_cast<unsigned long long>(oConfig.uSampleRateHz));
+        return false;
+    }
+    if (oConfig.uEcaUpdateSamples > oConfig.uEcaEstimateSamples) {
+        std::fprintf(stderr,
+                     "config: ECA_UPDATE_INTERVAL_s (%llu samples) is longer than "
+                     "ECA_BATCH_LENGTH_s (%llu samples); weights cannot be applied "
+                     "to more signal than they were estimated from\n",
+                     static_cast<unsigned long long>(oConfig.uEcaUpdateSamples),
+                     static_cast<unsigned long long>(oConfig.uEcaEstimateSamples));
+        return false;
+    }
+    if (oConfig.uEcaEstimateSamples > oConfig.uCpiSamples) {
+        std::fprintf(stderr,
+                     "config: ECA_BATCH_LENGTH_s (%llu samples) exceeds the %llu "
+                     "samples in one CPI\n",
+                     static_cast<unsigned long long>(oConfig.uEcaEstimateSamples),
+                     static_cast<unsigned long long>(oConfig.uCpiSamples));
+        return false;
+    }
+    if (oConfig.uCpiSamples % oConfig.uEcaUpdateSamples != 0) {
+        std::fprintf(stderr,
+                     "config: ECA_UPDATE_INTERVAL_s (%llu samples) does not divide "
+                     "the %llu samples per CPI exactly\n",
+                     static_cast<unsigned long long>(oConfig.uEcaUpdateSamples),
+                     static_cast<unsigned long long>(oConfig.uCpiSamples));
+        return false;
+    }
+    // Fewer samples than unknowns leaves the least-squares problem
+    // underdetermined and the Gram matrix singular.
+    if (oConfig.uEcaEstimateSamples <= oConfig.uClutterTaps) {
+        std::fprintf(stderr,
+                     "config: ECA_BATCH_LENGTH_s gives %llu samples, which is not "
+                     "more than the %llu clutter taps being solved for\n",
+                     static_cast<unsigned long long>(oConfig.uEcaEstimateSamples),
+                     static_cast<unsigned long long>(oConfig.uClutterTaps));
+        return false;
+    }
+
     if (oConfig.uBufferCapacity < 2 * oConfig.uCpiSamples) {
         std::fprintf(stderr,
                      "config: warning -- BUFFER_LENGTH_s (%.3f s) is less than twice "
@@ -296,6 +358,15 @@ bool loadPbrConfig(const char* pPath, PbrConfig& oConfig)
     getUInt64(mValues, "DOPPLER_DECIMATION",   oConfig.uDopplerDecimation, bOk);
     getDouble(mValues, "MIN_CPI_COVERAGE",     oConfig.dMinCpiCoverage,    bOk);
 
+    getString(mValues, "DSI_ALGORITHM",        oConfig.sDsiAlgorithm,      bOk);
+    getString(mValues, "DSI_BACKEND",          oConfig.sDsiBackend,        bOk);
+    getDouble(mValues, "ECA_BATCH_LENGTH_s",   oConfig.dEcaBatchSeconds,   bOk);
+    getDouble(mValues, "ECA_UPDATE_INTERVAL_s", oConfig.dEcaUpdateSeconds, bOk);
+    getUInt64(mValues, "ECA_DOPPLER_TAPS",     oConfig.uEcaDopplerTaps,    bOk);
+    getDouble(mValues, "ECA_DIAGONAL_LOADING", oConfig.dEcaDiagLoading,    bOk);
+    getUInt64(mValues, "CGLS_ITERATIONS",      oConfig.uCglsIterations,    bOk);
+    getDouble(mValues, "CGLS_TOLERANCE",       oConfig.dCglsTolerance,     bOk);
+
     getDouble(mValues, "CFAR_PFA",             oConfig.dCfarPfa,           bOk);
     getUInt64(mValues, "CFAR_GUARD_RANGE",     oConfig.uCfarGuardRange,    bOk);
     getUInt64(mValues, "CFAR_GUARD_DOPPLER",   oConfig.uCfarGuardDoppler,  bOk);
@@ -337,6 +408,17 @@ void printPbrConfig(const PbrConfig& oConfig)
                 static_cast<unsigned long long>(oConfig.uDopplerDecimation),
                 oConfig.dDopplerHalfSpanHz);
     std::printf("  min CPI coverage   %.1f%%\n", 100.0 * oConfig.dMinCpiCoverage);
+    std::printf("  DSI                %s on %s\n",
+                oConfig.sDsiAlgorithm.c_str(), oConfig.sDsiBackend.c_str());
+    std::printf("  ECA windows        estimate %.4f s (%llu samples), "
+                "update %.4f s (%llu samples)\n",
+                oConfig.dEcaBatchSeconds,
+                static_cast<unsigned long long>(oConfig.uEcaEstimateSamples),
+                oConfig.dEcaUpdateSeconds,
+                static_cast<unsigned long long>(oConfig.uEcaUpdateSamples));
+    std::printf("  ECA loading        %g (relative), doppler taps %llu\n",
+                oConfig.dEcaDiagLoading,
+                static_cast<unsigned long long>(oConfig.uEcaDopplerTaps));
     std::printf("  CFAR               Pfa %g, guard %llux%llu, train %llux%llu\n",
                 oConfig.dCfarPfa,
                 static_cast<unsigned long long>(oConfig.uCfarGuardRange),

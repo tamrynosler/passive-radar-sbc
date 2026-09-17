@@ -21,7 +21,7 @@ RSYNC := rsync -av --delete \
          --exclude '.DS_Store'
 
 .PHONY: sync configure build test bench pull-results shell clean-remote \
-        host-probe host-replay host-test host-clean
+        host-probe host-replay host-test host-bench host-clean
 
 # ---------------------------------------------------------------------------
 # Host-only builds — run on the Mac, no Jetson and no CUDA involved.
@@ -39,25 +39,30 @@ HOST_CXX      ?= c++
 HOST_CXXFLAGS := -std=c++14 -O2 -Wall -Wextra -Iinclude -pthread
 HOST_BIN      := bin
 INGEST_SRC    := src/ingest/CircularBuffer.cpp \
+                 src/ingest/CpiFile.cpp \
                  src/ingest/Config.cpp \
                  src/ingest/Vita49Packet.cpp \
                  src/ingest/UdpReceiver.cpp \
                  src/ingest/ChannelIngest.cpp \
                  src/ingest/CaptureFile.cpp
+DSI_SRC       := src/dsi/DSICanceller.cpp \
+                 src/dsi/cpu/EcaCpu.cpp
+LIB_SRC       := $(INGEST_SRC) $(DSI_SRC)
 HOST_TESTS    := tests/test_circular_buffer.cpp tests/test_vita49_packet.cpp \
-                 tests/test_config.cpp tests/test_cpi_extraction.cpp
+                 tests/test_config.cpp tests/test_cpi_extraction.cpp \
+                 tests/test_eca.cpp
 
 ## host-probe: build the live FERS ingest checkpoint locally -> bin/ingest_probe
 host-probe:
 	@mkdir -p $(HOST_BIN)
-	$(HOST_CXX) $(HOST_CXXFLAGS) src/app/ingest_probe.cpp $(INGEST_SRC) \
+	$(HOST_CXX) $(HOST_CXXFLAGS) src/app/ingest_probe.cpp $(LIB_SRC) \
 	    -o $(HOST_BIN)/ingest_probe
 	@echo "built $(HOST_BIN)/ingest_probe  —  run it BEFORE starting fers-cli"
 
 ## host-replay: build the capture replay tool locally -> bin/ingest_replay
 host-replay:
 	@mkdir -p $(HOST_BIN)
-	$(HOST_CXX) $(HOST_CXXFLAGS) src/app/ingest_replay.cpp $(INGEST_SRC) \
+	$(HOST_CXX) $(HOST_CXXFLAGS) src/app/ingest_replay.cpp $(LIB_SRC) \
 	    -o $(HOST_BIN)/ingest_replay
 	@echo "built $(HOST_BIN)/ingest_replay"
 
@@ -66,9 +71,16 @@ host-test:
 	@mkdir -p $(HOST_BIN)
 	@for t in $(HOST_TESTS); do \
 	    n=$$(basename $$t .cpp); \
-	    $(HOST_CXX) $(HOST_CXXFLAGS) $$t $(INGEST_SRC) -o $(HOST_BIN)/$$n || exit 1; \
+	    $(HOST_CXX) $(HOST_CXXFLAGS) $$t $(LIB_SRC) -o $(HOST_BIN)/$$n || exit 1; \
 	    ./$(HOST_BIN)/$$n || exit 1; \
 	done
+
+## host-bench: build the DSI cancellation benchmark locally -> bin/dsi_bench
+host-bench:
+	@mkdir -p $(HOST_BIN)
+	$(HOST_CXX) $(HOST_CXXFLAGS) bench/dsi_bench.cpp $(LIB_SRC) \
+	    -o $(HOST_BIN)/dsi_bench
+	@echo "built $(HOST_BIN)/dsi_bench  —  timing here proves nothing; use the Jetson"
 
 ## host-clean: remove locally built binaries
 host-clean:

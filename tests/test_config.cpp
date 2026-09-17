@@ -35,6 +35,15 @@ const char* const kValidConfig =
     "DOPPLER_DECIMATION = 128\n"
     "MIN_CPI_COVERAGE = 0.99\n"
     "\n"
+    "DSI_ALGORITHM = ECA-B\n"
+    "DSI_BACKEND = CPU\n"
+    "ECA_BATCH_LENGTH_s = 0.025\n"
+    "ECA_UPDATE_INTERVAL_s = 0.025\n"
+    "ECA_DOPPLER_TAPS = 0\n"
+    "ECA_DIAGONAL_LOADING = 1e-6\n"
+    "CGLS_ITERATIONS = 30\n"
+    "CGLS_TOLERANCE = 1e-6\n"
+    "\n"
     "CFAR_PFA = 1e-5\n"
     "CFAR_GUARD_RANGE = 2\n"
     "CFAR_GUARD_DOPPLER = 2\n"
@@ -227,6 +236,49 @@ void testValidationRules()
     // Exactly one CPI of buffer is legal but warns; it must still load.
     assert(loadPbrConfig(writeTemp(replaced(kValidConfig,
         "BUFFER_LENGTH_s = 2.0", "BUFFER_LENGTH_s = 1.0")), oConfig));
+
+    // ---- ECA windows -----------------------------------------------------
+
+    // The shipped 25 ms batch is 5120 samples, 40 to a CPI.
+    assert(loadPbrConfig(writeTemp(kValidConfig), oConfig));
+    assert(oConfig.uEcaEstimateSamples == 5120u);
+    assert(oConfig.uEcaUpdateSamples   == 5120u);
+
+    // The update window must divide the CPI exactly, or the last fragment is
+    // short and behaves differently from its neighbours. 0.03 s is 6144
+    // samples and 204800 / 6144 is not a whole number.
+    assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "ECA_UPDATE_INTERVAL_s = 0.025", "ECA_UPDATE_INTERVAL_s = 0.03")), oConfig));
+
+    // Applying weights to more signal than they were estimated from is
+    // backwards; ECA-S goes the other way.
+    assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "ECA_BATCH_LENGTH_s = 0.025", "ECA_BATCH_LENGTH_s = 0.0125")), oConfig));
+
+    // An estimation window longer than the CPI cannot be filled.
+    assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "ECA_BATCH_LENGTH_s = 0.025", "ECA_BATCH_LENGTH_s = 2.0")), oConfig));
+
+    // Fewer samples than taps leaves the least-squares problem
+    // underdetermined. 0.0005 s is 102 samples against 120 taps.
+    assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "ECA_BATCH_LENGTH_s = 0.025\nECA_UPDATE_INTERVAL_s = 0.025",
+        "ECA_BATCH_LENGTH_s = 0.0005\nECA_UPDATE_INTERVAL_s = 0.0005")), oConfig));
+
+    // Loading is a fraction of the Gram diagonal, so 1.0 or more would swamp
+    // the signal.
+    assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "ECA_DIAGONAL_LOADING = 1e-6", "ECA_DIAGONAL_LOADING = 1.0")), oConfig));
+
+    // Zero loading is legal: the Gram is normally well conditioned without it.
+    assert(loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "ECA_DIAGONAL_LOADING = 1e-6", "ECA_DIAGONAL_LOADING = 0")), oConfig));
+
+    // ECA-m is the whole CPI in one window, so a short batch length must not
+    // stop it loading -- the algorithm ignores those keys.
+    assert(loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "DSI_ALGORITHM = ECA-B", "DSI_ALGORITHM = ECA-m")), oConfig));
+    assert(oConfig.sDsiAlgorithm == "ECA-m");
 }
 
 void testWhitespaceAndCommentHandling()
@@ -248,6 +300,14 @@ void testWhitespaceAndCommentHandling()
         "DOPPLER_HALF_SPAN_Hz = 200\n"
         "DOPPLER_DECIMATION = 128\n"
         "MIN_CPI_COVERAGE = 0.99\n"
+        "DSI_ALGORITHM = ECA-B\n"
+        "DSI_BACKEND = CPU\n"
+        "ECA_BATCH_LENGTH_s = 0.025\n"
+        "ECA_UPDATE_INTERVAL_s = 0.025\n"
+        "ECA_DOPPLER_TAPS = 0\n"
+        "ECA_DIAGONAL_LOADING = 1e-6\n"
+        "CGLS_ITERATIONS = 30\n"
+        "CGLS_TOLERANCE = 1e-6\n"
         "CFAR_PFA = 1e-5\n"
         "CFAR_GUARD_RANGE = 2\n"
         "CFAR_GUARD_DOPPLER = 2\n"

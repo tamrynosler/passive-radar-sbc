@@ -19,7 +19,8 @@ accepts a live receiver front end.
 - [x] C++/CUDA VITA 49.2 ingest + absolute-index circular buffer
 - [x] CPI extraction: aligned 1 s windows handed to the DSP chain
 - [x] Configuration file (`config/prb.conf`) driving the whole chain
-- [ ] DSI cancellation kernels: ECA-S, ECA-B, ECA-CD, CGLS, batches  ← next
+- [x] DSI cancellation on the CPU: ECA-m (MATLAB reference) and ECA-B
+- [ ] DSI cancellation on the GPU, then ECA-S, ECA-CD, CGLS  ← next
 - [ ] CAF range–Doppler + 2D CA-CFAR
 - [ ] Algorithm benchmarking study (suppression vs latency)
 
@@ -154,6 +155,41 @@ The `--csv` output feeds `matlab/compare_vita49_capture.m`, which decodes the
 same bytes with `parse_vita49_packet.m` and compares field by field. A capture
 recorded at a different `--vita49-fullscale` than the config needs
 `--fullscale` to override it.
+
+## DSI cancellation
+
+Two steps. First freeze one CPI from a recorded capture, then run the
+canceller against it. Nothing here needs FERS or a network.
+
+```bash
+make host-replay
+./bin/ingest_replay --file data/fers_capture.pbrcap --fullscale 0.005 \
+                    --dump-cpi data/cpi_0000.bin
+
+make host-bench
+./bin/dsi_bench --cpi data/cpi_0000.bin --algorithm ECA-B --iters 10 \
+                --csv results/dsi_bench.csv
+```
+
+`--algorithm` and `--backend` override `config/prb.conf` when given; with
+neither, the run is fully described by the tracked config file. The harness
+loads the CPI once, calls `init()` once, discards a warm-up iteration, and
+times only the cancellation — so every algorithm sees byte-identical input and
+no allocation lands inside the timed region.
+
+Measured on the Mac against the first CPI of the shipped capture:
+
+| Algorithm | Windows | Suppression | Time per CPI |
+|---|---|---|---|
+| ECA-m | 1 × 1000 ms | 40.18 dB | 971 ms |
+| ECA-B | 40 × 25 ms | 51.62 dB | 971 ms |
+
+The 11.4 dB gain is why ECA-B exists: one set of weights for a whole second
+cannot follow clutter that changes within it. The identical times are not a
+mistake — batching costs the same arithmetic and buys adaptivity, not speed.
+
+**Host timings are order-of-magnitude only.** Citable figures come from the
+Jetson with clocks pinned; see the measurement note below.
 
 ## Running the benchmark
 

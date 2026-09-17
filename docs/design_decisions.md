@@ -255,6 +255,132 @@ count of CPIs lost.
 genuinely different situations for the caller: wait, versus a window that is
 gone and will not come back. Collapsing them would hide data loss.
 
+## 1d. DSI cancellation: ECA-m and ECA-B (`pbr::DSICanceller`)
+
+Files: `include/pbr/DSICanceller.hpp`, `src/dsi/DSICanceller.cpp`,
+`src/dsi/cpu/EcaCpu.cpp`, `tests/test_eca.cpp`, `bench/dsi_bench.cpp`.
+
+### 1d.1 Three named algorithms, one implementation
+
+Colone et al. (TAES 52(3), 2016, eq. 18–20) define ECA-S with two independent
+windows: **T_A**, the stretch of signal the weights are estimated from, and
+**T_S**, the stretch they are applied to. The paper then states that ECA-B is
+the case T_B = T_S = T_A.
+
+That collapses the family:
+
+| | estimate from | apply to |
+|---|---|---|
+| ECA-m | whole CPI | whole CPI |
+| ECA-B | batch | same batch |
+| ECA-S | long, overlapping | short |
+
+One implementation covers all three, so there is one thing to validate, one to
+optimise for the GPU, and no possibility of the variants disagreeing through
+separate code. ECA-m stops being a special case that happens to agree with
+ECA-B and becomes a genuine cross-check on it.
+
+It also resolves a question the earlier reading could not: ECA-S output
+fragments do **not** overlap and are never blended. Only the estimation windows
+overlap; each output sample is written exactly once.
+
+### 1d.2 ECA-m is a separate algorithm, not a configuration
+
+The MATLAB reference chain is labelled ECA-B in its comments but performs one
+least-squares solve over the whole CPI with no batching. Rather than quietly
+treat that as ECA-B with B = 1, it is a fifth named algorithm, ECA-m, defined
+as "whatever `matlab/fm_passive_radar_process.m` does".
+
+The gain is that ECA-m can inherit the reference's quirks without infecting the
+others. Specifically the diagonal loading: MATLAB adds an **absolute** `1e-3`,
+which is not scale invariant — the same number is meaningful regularisation at
+one signal amplitude and nothing at all at another, and the two sides of the
+golden-file comparison do not currently agree on amplitude. ECA-m keeps the
+absolute value so it reproduces the reference exactly; every other algorithm
+uses a loading expressed as a **fraction of the mean Gram diagonal**, which
+means the same thing at any amplitude. Nothing in `matlab/` had to change.
+
+### 1d.3 The subspace matrix is never formed
+
+MATLAB builds the N x K matrix `R` of delayed reference copies explicitly. At
+204800 samples and 120 taps that is 197 MB — most of the Jetson's shared
+memory, for something only ever needed as a 120x120 Gram summary (115 KB).
+
+Each Gram entry is instead computed directly as a dot product of two shifted
+slices of the reference. The arithmetic is identical; only the storage differs.
+This is what makes the GPU port viable at all on a 4 GB shared-memory board.
+
+### 1d.4 Accumulation in double, samples in float
+
+A Gram entry sums 204800 products. Accumulating that in FP32 loses roughly four
+decimal digits, which on its own would breach the 1e-4 relative agreement the
+golden-file check demands. The accumulators are therefore `std::complex<double>`
+while the samples stay `ComplexF`.
+
+**This is an open question for the GPU backend**, not a settled one. cuBLAS
+accumulates in the precision it is given, and a `cherk` in FP32 would hit
+exactly the error described above. Resolving it — mixed precision, splitting
+the sum, or accepting a looser tolerance — is a decision the GPU port has to
+make explicitly rather than discover.
+
+### 1d.5 Not implemented is refused, not ignored
+
+`ECA_DOPPLER_TAPS > 0`, ECA-S, ECA-CD, CGLS and the GPU backend in a build
+without CUDA all fail loudly. The GPU case matters most: a silent fallback to
+the CPU would produce a benchmark row labelled GPU that was measured on the
+CPU, and nothing downstream could tell.
+
+### 1d.6 Measured, 2026-09-17 (Mac host, first CPI of `fers_capture.pbrcap`)
+
+| Algorithm | Windows | Suppression | Time per CPI |
+|---|---|---|---|
+| ECA-m | 1 x 1000 ms | 40.18 dB | 971 ms |
+| ECA-B | 40 x 25 ms | **51.62 dB** | 971 ms |
+
+Two things to take from this. The 11.4 dB gain from batching is the entire
+justification for ECA-B, and 51.62 dB sits near the ~52 dB theoretical
+cancellation Colone reports for FM. And the two times are identical, which
+confirms that batching does not reduce the arithmetic — the Gram cost is
+K(K+1)/2 sums over the CPI either way. Batching buys adaptivity, bounded
+memory and parallelism.
+
+These are **host** figures and are not citable. They establish order of
+magnitude only; the Jetson with pinned clocks is the measurement platform.
+
+### 1d.7 Deferred: the efficient implementation
+
+Colone Section VI shows the Gram is Hermitian positive-definite **Toeplitz** if
+the border effect is neglected (valid when K << N), which turns the whole setup
+into FFTs and the solve into Levinson at ~16K². For our parameters that is
+about 1.0e8 FLOPs against 1.2e10 for the direct form — roughly 100x.
+
+A smaller, **exact** saving of about 60x is also available, since successive
+Gram entries share nearly all their terms.
+
+Neither is implemented. The direct form is the correctness reference and has to
+be right before it is fast, and both are legitimate separate benchmark rows
+later rather than silent optimisations now.
+
+### 1d.8 Benchmark isolation
+
+Timing the canceller inside the live pipeline would measure the socket, the
+packet decode and the scheduler along with it. Instead `ingest_replay
+--dump-cpi` freezes one extracted CPI to a self-describing file, and
+`bench/dsi_bench` loads it once, calls `init()` once, and times only `cancel()`.
+
+Consequences: every algorithm and every run sees byte-identical input, so the
+comparison is fair by construction; no allocation happens inside the timed
+region, so the numbers are not measuring the allocator; the first call is
+discarded as warm-up; and the harness fails if the suppression figure changes
+between identical runs, which would mean the canceller is carrying state it
+should not.
+
+The same frozen CPI is what the MATLAB golden-file check will read, so both
+sides start from identical samples and the unresolved `.h5` amplitude scaling
+(§5.2, and `PLAN.md`) is out of the critical path entirely.
+
+---
+
 ## 2. Memory layout on the Jetson Nano
 
 One contiguous heap allocation per channel, made once at construction and never

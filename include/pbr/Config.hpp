@@ -42,6 +42,19 @@ struct PbrConfig {
     uint64_t    uDopplerDecimation = 0;
     double      dMinCpiCoverage    = 0.0;
 
+    // ---- DSI cancellation ------------------------------------------------
+    // Kept as strings here and turned into enums by dsiAlgorithmFromString /
+    // dsiBackendFromString, so this struct stays free of DSICanceller.hpp and
+    // an ingest-only tool never has to know the algorithm names.
+    std::string sDsiAlgorithm;              // ECA-m, ECA-B, ECA-S, ECA-CD, CGLS
+    std::string sDsiBackend;                // CPU or GPU
+    double      dEcaBatchSeconds   = 0.0;   // T_A, the weight-estimation window
+    double      dEcaUpdateSeconds  = 0.0;   // T_S, the weight-application window
+    uint64_t    uEcaDopplerTaps    = 0;     // P; subspace is K(2P+1) wide
+    double      dEcaDiagLoading    = 0.0;   // fraction of the mean Gram diagonal
+    uint64_t    uCglsIterations    = 0;
+    double      dCglsTolerance     = 0.0;
+
     // ---- detection -------------------------------------------------------
     double      dCfarPfa           = 0.0;
     uint64_t    uCfarGuardRange    = 0;
@@ -54,6 +67,8 @@ struct PbrConfig {
     uint64_t    uHopSamples        = 0;   // round(dHopSeconds * fs)
     uint64_t    uBufferCapacity    = 0;   // round(dBufferSeconds * fs)
     uint64_t    uDopplerBins       = 0;   // uCpiSamples / uDopplerDecimation
+    uint64_t    uEcaEstimateSamples= 0;   // round(dEcaBatchSeconds * fs)
+    uint64_t    uEcaUpdateSamples  = 0;   // round(dEcaUpdateSeconds * fs)
 };
 
 // Load and validate a config file.

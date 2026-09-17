@@ -23,6 +23,7 @@
 #include "pbr/ChannelIngest.hpp"
 #include "pbr/CircularBuffer.hpp"
 #include "pbr/Config.hpp"
+#include "pbr/CpiFile.hpp"
 #include "pbr/Vita49Packet.hpp"
 #include "pbr/types.hpp"
 
@@ -42,8 +43,10 @@ const char* const     kDefaultConfigPath = "config/prb.conf";
 struct Options {
     std::string sCapturePath;
     std::string sCsvPath;
+    std::string sDumpCpiPath;
     std::string sConfigPath = kDefaultConfigPath;
     double      dFullScale  = 0.0;   // 0 means "take it from the config"
+    uint64_t    uCpiIndex   = 0;     // which extracted CPI to dump
 };
 
 void printUsage(const char* pProgram)
@@ -55,6 +58,9 @@ void printUsage(const char* pProgram)
     std::printf("                   with a different --vita49-fullscale\n");
     std::printf("  --csv FILE       write decoded data-packet fields for the\n");
     std::printf("                   MATLAB cross-check\n");
+    std::printf("  --dump-cpi FILE  write one extracted CPI (both channels) for\n");
+    std::printf("                   the DSI benchmark and the MATLAB golden file\n");
+    std::printf("  --cpi-index N    which CPI to dump, 0-based (default 0)\n");
 }
 
 bool parseArgs(int argc, char* argv[], Options& oOptions)
@@ -73,6 +79,10 @@ bool parseArgs(int argc, char* argv[], Options& oOptions)
             oOptions.sConfigPath = argv[++i];
         } else if (sArg == "--fullscale" && bHasValue) {
             oOptions.dFullScale = std::atof(argv[++i]);
+        } else if (sArg == "--dump-cpi" && bHasValue) {
+            oOptions.sDumpCpiPath = argv[++i];
+        } else if (sArg == "--cpi-index" && bHasValue) {
+            oOptions.uCpiIndex = std::strtoull(argv[++i], nullptr, 10);
         } else {
             std::fprintf(stderr, "unrecognised or incomplete argument: %s\n", sArg.c_str());
             return false;
@@ -180,6 +190,8 @@ int main(int argc, char* argv[])
     uint64_t uPrevCpiStart  = 0;
     uint64_t uCpiHopErrors  = 0;
     uint64_t uCpiZeroRef    = 0;   // Ready windows that were entirely zero
+    uint64_t uCpiSeen       = 0;   // Ready windows so far, for --cpi-index
+    bool     bCpiDumped     = false;
 
     std::FILE* pCsv = nullptr;
     if (!oOptions.sCsvPath.empty()) {
@@ -263,6 +275,28 @@ int main(int argc, char* argv[])
             }
             if (!bAnyNonZero)
                 ++uCpiZeroRef;
+
+            // Freeze one CPI to disk. Everything downstream -- the DSI
+            // benchmark and the MATLAB golden file -- then works from these
+            // exact bytes, with no FERS and no ingest in the way.
+            if (!oOptions.sDumpCpiPath.empty() && !bCpiDumped &&
+                uCpiSeen == oOptions.uCpiIndex) {
+                CpiFileHeader oHeader;
+                oHeader.uSampleCount  = oCfg.uCpiSamples;
+                oHeader.uSampleRateHz = oCfg.uSampleRateHz;
+                oHeader.uStartIndex   = uCpiStart;
+
+                if (!writeCpiFile(oOptions.sDumpCpiPath.c_str(), oHeader,
+                                  vcCpiRef.data(), vcCpiSur.data()))
+                    return 1;
+
+                bCpiDumped = true;
+                std::printf("wrote CPI %llu (start index %llu) to %s\n",
+                            (unsigned long long)uCpiSeen,
+                            (unsigned long long)uCpiStart,
+                            oOptions.sDumpCpiPath.c_str());
+            }
+            ++uCpiSeen;
         }
 
         if (oPacket.eType != Vita49Type::Data)
@@ -352,6 +386,18 @@ int main(int argc, char* argv[])
         std::printf("   span                   %.3f s of signal\n",
                     double(uPrevCpiStart + oCfg.uCpiSamples - uFirstCpiStart)
                         / double(oCfg.uSampleRateHz));
+    }
+
+    // A dump that was asked for and never happened means the capture held
+    // fewer CPIs than --cpi-index asked for. Silent success would leave the
+    // benchmark reading a stale file from a previous run.
+    if (!oOptions.sDumpCpiPath.empty() && !bCpiDumped) {
+        std::fprintf(stderr,
+                     "ingest_replay: --cpi-index %llu was never reached; the "
+                     "capture yielded %llu CPIs\n",
+                     (unsigned long long)oOptions.uCpiIndex,
+                     (unsigned long long)uCpiSeen);
+        bPass = false;
     }
 
     if (uParseFailures > 0 || oStats.uRejectedWrites > 0)
