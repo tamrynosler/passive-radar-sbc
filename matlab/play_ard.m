@@ -20,9 +20,9 @@
 % as a frame with an aircraft in it, which is exactly the wrong impression.
 
 function play_ard(dirPath, fdMax, fps, videoPath)
-    if nargin < 1 || isempty(dirPath),   dirPath   = 'data/ard'; end
-    if nargin < 2 || isempty(fdMax),     fdMax     = 200;        end
-    if nargin < 3 || isempty(fps),       fps       = 4;          end
+    if nargin < 1 || isempty(dirPath),   dirPath   = '../data/ard_live'; end
+    if nargin < 2 || isempty(fdMax),     fdMax     = 400;        end
+    if nargin < 3 || isempty(fps),       fps       = 8;          end
     if nargin < 4,                       videoPath = '';         end
 
     files = dir(fullfile(dirPath, 'ard_*.bin'));
@@ -70,6 +70,12 @@ function play_ard(dirPath, fdMax, fps, videoPath)
         fprintf('writing %s\n', videoPath);
     end
 
+        % ---- accumulate every detection so the run can be shown as one plot ----
+    trackR = [];   % bistatic range, km
+    trackD = [];   % bistatic Doppler, Hz
+    trackT = [];   % CPI start time, s -- drives the colour
+    trackK = [];   % frame index, for the colour lookup
+
     for k = 1:nFrames
         [m, ~, ~, ~, ~, startIdx, dets] = ...
             read_ard(fullfile(dirPath, files(k).name));
@@ -82,6 +88,12 @@ function play_ard(dirPath, fdMax, fps, videoPath)
         else
             inWin = abs(dets(:,4)) <= fdMax;
             set(marks, 'XData', dets(inWin,3), 'YData', dets(inWin,4));
+            tNow   = double(startIdx)/double(fs);
+            nIn    = nnz(inWin);
+            trackR = [trackR; dets(inWin,3)];
+            trackD = [trackD; dets(inWin,4)];
+            trackT = [trackT; repmat(tNow, nIn, 1)];
+            trackK = [trackK; repmat(k,    nIn, 1)];
             nShown = nnz(inWin);
         end
 
@@ -104,6 +116,29 @@ function play_ard(dirPath, fdMax, fps, videoPath)
         close(writer);
         fprintf('wrote %s\n', videoPath);
     end
+
+    if isempty(trackR)
+        fprintf('no detections to plot\n');
+        return;
+    end
+
+    nUsed = max(trackK);
+    cmap  = time_colormap(nUsed);
+
+    figure('Color','w');
+    scatter(trackR, trackD, 10, cmap(trackK,:), 'filled');
+    grid on; box on;
+    xlim([rngAxis(1) rngAxis(end)]);
+    ylim([-fdMax fdMax]);
+    xlabel('Bistatic range (km)');
+    ylabel('Bistatic Doppler (Hz)');
+    title(sprintf('%d detections over %d frames', numel(trackR), nUsed));
+
+    colormap(gca, cmap);
+    caxis([min(trackT) max(trackT)]);
+    cbT = colorbar;
+    cbT.Label.String = 'Time (s)';
+
 end
 
 function [map, nRange, nDop, fs, dec, startIdx, dets] = read_ard(path)
@@ -129,4 +164,19 @@ function [map, nRange, nDop, fs, dec, startIdx, dets] = read_ard(path)
         dets(k,:) = [bins(:).' vals(:).'];
     end
     fclose(fid);
+end
+
+function cmap = time_colormap(n)
+    % red -> maroon -> black -> dark blue -> light blue, early to late.
+    anchors = [1.00 0.00 0.00;
+               0.50 0.00 0.00;
+               0.00 0.00 0.00;
+               0.00 0.00 0.45;
+               0.35 0.75 1.00];
+    if n < 2
+        cmap = anchors(1,:);
+        return;
+    end
+    cmap = interp1(linspace(0,1,size(anchors,1)), anchors, linspace(0,1,n));
+    cmap = min(max(cmap,0), 1);
 end

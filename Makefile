@@ -157,6 +157,7 @@ pull-results:
 	-scp '$(JETSON):/data/results/*.csv' results/
 	-scp '$(JETSON):/data/results/*.log' results/
 	-scp -r '$(JETSON):/data/results/dsi_*' results/
+	-scp -r '$(JETSON):/data/results/live_*' results/
 
 ## shell: interactive shell in the remote repo
 shell:
