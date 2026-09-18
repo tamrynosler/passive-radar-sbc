@@ -30,10 +30,12 @@ accepts a live receiver front end.
       against a 1000 ms budget, 0 CPIs dropped over a 45 s live FERS run
 - [ ] Algorithm benchmarking study (suppression vs latency)
 
-> The cuFFT harness compiles, runs, times cleanly and emits valid CSV on the
-> Nano. Latency numbers captured so far are **provisional** — taken on Micro-USB
-> power with DVFS active (see the measurement note below). Citable figures await
-> a stable barrel-jack supply with clocks pinned.
+> **The chain runs live in real time**: 156 ms per 1 s CPI on the Jetson,
+> zero CPIs dropped over a 45 s live FERS run, every stage validated against
+> MATLAB. All timing figures are still **provisional** — taken with DVFS
+> active, because pinning the clocks needs an interactive sudo password.
+> `make run` and `make bench` pin them; run those from a terminal for citable
+> numbers.
 
 
 ## Repository layout
