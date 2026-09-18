@@ -22,20 +22,18 @@
 
 set -euo pipefail
 
+# Everything about the processing comes from config/prb.conf. The only thing
+# this script decides is how long to run and where to put the output.
 SECONDS_TO_RUN=30
-FULLSCALE=0.005
-BACKEND=GPU
 OUTROOT="${OUTROOT:-/data/results}"
-ARD_EVERY=1
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --seconds)   SECONDS_TO_RUN="$2"; shift 2 ;;
-    --fullscale) FULLSCALE="$2";      shift 2 ;;
-    --backend)   BACKEND="$2";        shift 2 ;;
-    --ard-every) ARD_EVERY="$2";      shift 2 ;;
+    --seconds) SECONDS_TO_RUN="$2"; shift 2 ;;
     -h|--help)
-      echo "usage: $0 [--seconds N] [--fullscale F] [--ard-every N]"
+      echo "usage: $0 [--seconds N]"
+      echo "Algorithm, backend, full scale and CFAR settings come from"
+      echo "config/prb.conf. Edit that and 'make sync' to change them."
       exit 0 ;;
     *) echo "unrecognised argument: $1" >&2; exit 1 ;;
   esac
@@ -43,16 +41,17 @@ done
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
 OUTDIR="${OUTROOT}/live_${STAMP}"
-mkdir -p "${OUTDIR}/ard"
+mkdir -p "${OUTDIR}"
 
 echo "Output dir : ${OUTDIR}"
 echo "Board IP   : $(hostname -I | awk '{print $1}')   <- point fers-cli here"
 
+# The config IS the record of what was run, so keep a copy beside the results.
+cp config/prb.conf "${OUTDIR}/prb.conf"
+
 {
   echo "date        $(date -Is)"
   echo "seconds     ${SECONDS_TO_RUN}"
-  echo "fullscale   ${FULLSCALE}"
-  echo "backend     ${BACKEND}"
   echo "l4t         $(head -1 /etc/nv_tegra_release 2>/dev/null || echo unknown)"
   echo "git         $(git -C . rev-parse --short HEAD 2>/dev/null || echo unknown)"
 } > "${OUTDIR}/run.txt"
@@ -78,12 +77,7 @@ echo
 
 ./build/pbr_run --live \
   --seconds "${SECONDS_TO_RUN}" \
-  --backend "${BACKEND}" \
-  --fullscale "${FULLSCALE}" \
-  --ard-dir "${OUTDIR}/ard" \
-  --ard-every "${ARD_EVERY}" \
-  --telemetry "${OUTDIR}/telemetry.csv" \
-  --detections "${OUTDIR}/detections.csv" \
+  --out "${OUTDIR}" \
   | tee "${OUTDIR}/run.log"
 
 echo

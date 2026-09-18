@@ -1,168 +1,164 @@
 # passive-radar-sbc — host-side driver (runs on the Mac)
 #
-# All editing happens here on the Mac; the Jetson is a disposable
-# build/run target. NEVER edit files directly on the Jetson —
-# rsync --delete will clobber them on the next sync.
+# All editing happens here on the Mac; the Jetson is a disposable build/run
+# target. NEVER edit files directly on the Jetson — rsync --delete will
+# clobber them on the next sync.
 #
-# Requires: `Host jetson` alias in ~/.ssh/config with key auth.
+# ---------------------------------------------------------------------------
+# The workflow
+# ---------------------------------------------------------------------------
+#
+#   edited config/prb.conf only .....  make sync    (2 s, no compile)
+#   edited any C++ / CUDA ...........  make build   (~2 min)
+#   check nothing broke .............  make test
+#   live run against FERS ...........  make run
+#   replay the recorded capture .....  make replay
+#   bring results back to the Mac ...  make pull
+#
+# Everything about a run — algorithm, backend, CFAR and ECA settings — lives
+# in config/prb.conf, which is read at RUN time. So the whole tuning loop is
+# `make sync && make run`: no rebuild, no command-line flags to remember.
+#
+# Requires a `Host jetson` entry in ~/.ssh/config with key-based auth.
 
-JETSON  ?= jetson
-REMOTE  ?= ~/passive-radar-sbc
-NVCC := /usr/local/cuda-10.2/bin/nvcc
+JETSON ?= jetson
+REMOTE ?= ~/passive-radar-sbc
+NVCC   := /usr/local/cuda-10.2/bin/nvcc
+CMAKE_ARGS := -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_COMPILER=$(NVCC)
 
-# Exclusions are driven by .gitignore (per-directory merge), so anything
-# ignored by git is also kept off the Jetson. The explicit excludes below
-# are belt-and-braces for paths that must never sync regardless.
-# 'P' is a protect rule: it stops --delete removing these on the Jetson.
-# data/ is gitignored, so the filter above hides it from the transfer, and
-# without protection every `make build` would wipe the recorded captures and
-# golden files the benchmark needs. build/ and results/ are protected for the
-# same reason.
-RSYNC := rsync -av --delete \
-         --filter='P data' \
-         --filter='P results' \
-         --filter='P build' \
+# Exclusions follow .gitignore, so anything git ignores stays off the Jetson.
+# 'P' protects a path from --delete: data/, results/ and build/ live only on
+# the board and must survive every sync.
+RSYNC := rsync -a --delete \
+         --filter='P data' --filter='P results' --filter='P build' \
          --filter=':- .gitignore' \
-         --exclude '.git' \
-         --exclude 'build' \
-         --exclude 'results' \
-         --exclude '.DS_Store'
+         --exclude '.git' --exclude '.DS_Store'
 
-.PHONY: sync configure build test bench pull-results shell clean-remote \
-        host-probe host-replay host-test host-bench host-verify host-ard \
-        host-run \
-        host-clean \
-        dsi-bench
+.PHONY: help build sync test run replay verify bench pull shell clean \
+        host host-test
+
+help:
+	@echo "passive-radar-sbc"
+	@echo
+	@echo "  make sync       push config + source to the Jetson (no compile)"
+	@echo "  make build      sync, then compile on the Jetson"
+	@echo "  make test       run the unit tests on the Jetson"
+	@echo "  make run        live run against FERS, clocks pinned"
+	@echo "  make replay     replay the recorded capture on the Jetson"
+	@echo "  make verify     golden-file checks against MATLAB"
+	@echo "  make bench      DSI + ARD timing sweeps, clocks pinned"
+	@echo "  make pull       copy results back to ./results"
+	@echo "  make shell      interactive shell on the Jetson"
+	@echo "  make clean      wipe the Jetson build directory"
+	@echo
+	@echo "  make host       build every tool locally into ./bin (no CUDA)"
+	@echo "  make host-test  run the unit tests locally"
+	@echo
+	@echo "  ARGS=... passes extra arguments to run and bench, e.g."
+	@echo "    make run ARGS='--seconds 145'"
 
 # ---------------------------------------------------------------------------
-# Host-only builds — run on the Mac, no Jetson and no CUDA involved.
+# The Jetson
+# ---------------------------------------------------------------------------
+
+## sync: push config and source. Use this after editing config/prb.conf —
+##       the config is read at RUN time, so no rebuild is needed.
+sync:
+	@$(RSYNC) ./ $(JETSON):$(REMOTE)/
+	@echo "synced to $(JETSON)"
+
+## build: sync, then compile on the Jetson.
+build: sync
+	@ssh $(JETSON) 'cd $(REMOTE) && mkdir -p build && cd build && \
+	    cmake $(CMAKE_ARGS) .. > /dev/null && make -j2'
+	@echo "built on $(JETSON)"
+
+## test: unit tests on the Jetson. Does not build — run `make build` first if
+##       the source changed.
+test:
+	@ssh $(JETSON) 'cd $(REMOTE)/build && ctest --output-on-failure'
+
+## run: live run against FERS, clocks pinned and tegrastats logged. Needs an
+##      interactive sudo password, hence ssh -t. Start fers-cli on the other
+##      machine when it prints "Listening now".
+run:
+	@ssh -t $(JETSON) 'cd $(REMOTE) && bash scripts/run_live.sh $(ARGS)'
+
+## replay: run the recorded capture through the whole chain on the Jetson.
+replay:
+	@ssh $(JETSON) 'cd $(REMOTE) && ./build/pbr_run \
+	    --file data/fers_capture.pbrcap --out /data/results/replay'
+
+## verify: every golden-file check. Run after changing src/dsi or src/ard.
+verify:
+	@ssh $(JETSON) 'cd $(REMOTE) && \
+	    ./build/dsi_verify --cpi data/cpi_0000.bin \
+	        --golden data/golden_ecab.bin --algorithm ECA-B --tolerance 1e-2 && \
+	    ./build/ard_verify --cpi data/cpi_0000.bin \
+	        --golden data/golden_ard.bin --chained'
+
+## bench: DSI and ARD timing sweeps with clocks pinned, then pull the CSVs.
+bench:
+	@ssh -t $(JETSON) 'cd $(REMOTE) && bash scripts/run_dsi_bench.sh $(ARGS)'
+	@$(MAKE) pull
+
+## pull: copy everything under the Jetson's /data/results to ./results.
+pull:
+	@mkdir -p results
+	@-scp -qr '$(JETSON):/data/results/*' results/ 2>/dev/null || true
+	@echo "results in ./results"
+
+shell:
+	@ssh -t $(JETSON) 'cd $(REMOTE) && exec bash'
+
+clean:
+	@ssh $(JETSON) 'cd $(REMOTE) && rm -rf build'
+	@echo "wiped the Jetson build directory"
+
+# ---------------------------------------------------------------------------
+# Local builds (the Mac)
 #
-# The ingest layer (VITA 49 decode, UDP socket, circular buffer) is plain
-# C++14 and POSIX sockets, so it builds and runs locally. CMake cannot be
-# used for this: CMakeLists.txt declares CUDA as a project language, so
-# `cmake ..` fails outright on a machine without a CUDA toolkit. These
-# targets therefore call the compiler directly.
+# No CUDA here, so the GPU backends are absent and anything asking for them
+# fails loudly rather than falling back. CMake cannot be used either:
+# CMakeLists.txt declares CUDA as a project language and will not configure on
+# a machine without the toolkit, so these targets call the compiler directly.
 #
-# Local runs prove FUNCTION only. All timing and performance numbers must
-# come from the Jetson via `make bench`.
+# Local runs prove FUNCTION only. Every timing number comes from the Jetson.
 # ---------------------------------------------------------------------------
 HOST_CXX      ?= c++
 HOST_CXXFLAGS := -std=c++14 -O2 -Wall -Wextra -Iinclude -pthread
 HOST_BIN      := bin
-INGEST_SRC    := src/ingest/CircularBuffer.cpp \
-                 src/ingest/CpiFile.cpp \
-                 src/ingest/Config.cpp \
-                 src/ingest/Vita49Packet.cpp \
-                 src/ingest/UdpReceiver.cpp \
-                 src/ingest/ChannelIngest.cpp \
-                 src/ingest/CaptureFile.cpp
-DSI_SRC       := src/dsi/DSICanceller.cpp \
-                 src/dsi/cpu/EcaCpu.cpp
-ARD_SRC       := src/ard/ArdProcessor.cpp \
-                 src/ard/ArdFile.cpp \
-                 src/ard/cpu/ArdCpu.cpp
-LIB_SRC       := $(INGEST_SRC) $(DSI_SRC) $(ARD_SRC)
-HOST_TESTS    := tests/test_circular_buffer.cpp tests/test_vita49_packet.cpp \
-                 tests/test_config.cpp tests/test_cpi_extraction.cpp \
-                 tests/test_eca.cpp tests/test_ard.cpp
 
-## host-probe: build the live FERS ingest checkpoint locally -> bin/ingest_probe
-host-probe:
+LIB_SRC := src/ingest/CircularBuffer.cpp src/ingest/CpiFile.cpp \
+           src/ingest/Config.cpp src/ingest/Vita49Packet.cpp \
+           src/ingest/UdpReceiver.cpp src/ingest/ChannelIngest.cpp \
+           src/ingest/CaptureFile.cpp \
+           src/dsi/DSICanceller.cpp src/dsi/cpu/EcaCpu.cpp \
+           src/ard/ArdProcessor.cpp src/ard/ArdFile.cpp src/ard/cpu/ArdCpu.cpp
+
+HOST_APPS  := src/app/pbr_run.cpp src/app/ingest_replay.cpp \
+              src/app/ingest_probe.cpp src/app/dsi_verify.cpp \
+              src/app/ard_verify.cpp bench/dsi_bench.cpp bench/ard_bench.cpp
+HOST_TESTS := tests/test_circular_buffer.cpp tests/test_vita49_packet.cpp \
+              tests/test_config.cpp tests/test_cpi_extraction.cpp \
+              tests/test_eca.cpp tests/test_ard.cpp
+
+## host: build every tool locally into ./bin
+host:
 	@mkdir -p $(HOST_BIN)
-	$(HOST_CXX) $(HOST_CXXFLAGS) src/app/ingest_probe.cpp $(LIB_SRC) \
-	    -o $(HOST_BIN)/ingest_probe
-	@echo "built $(HOST_BIN)/ingest_probe  —  run it BEFORE starting fers-cli"
+	@for a in $(HOST_APPS); do \
+	    n=$$(basename $$a .cpp); \
+	    $(HOST_CXX) $(HOST_CXXFLAGS) $$a $(LIB_SRC) -o $(HOST_BIN)/$$n || exit 1; \
+	done
+	@echo "built into $(HOST_BIN)/"
 
-## host-replay: build the capture replay tool locally -> bin/ingest_replay
-host-replay:
-	@mkdir -p $(HOST_BIN)
-	$(HOST_CXX) $(HOST_CXXFLAGS) src/app/ingest_replay.cpp $(LIB_SRC) \
-	    -o $(HOST_BIN)/ingest_replay
-	@echo "built $(HOST_BIN)/ingest_replay"
-
-## host-test: build and run every unattended unit test locally
+## host-test: build and run the unit tests locally
 host-test:
 	@mkdir -p $(HOST_BIN)
 	@for t in $(HOST_TESTS); do \
 	    n=$$(basename $$t .cpp); \
 	    $(HOST_CXX) $(HOST_CXXFLAGS) $$t $(LIB_SRC) -o $(HOST_BIN)/$$n || exit 1; \
-	    ./$(HOST_BIN)/$$n || exit 1; \
+	    ./$(HOST_BIN)/$$n > /dev/null 2>&1 \
+	        || { echo "  FAILED  $$n"; ./$(HOST_BIN)/$$n; exit 1; }; \
+	    echo "  ok      $$n"; \
 	done
-
-## host-bench: build the DSI cancellation benchmark locally -> bin/dsi_bench
-host-bench:
-	@mkdir -p $(HOST_BIN)
-	$(HOST_CXX) $(HOST_CXXFLAGS) bench/dsi_bench.cpp $(LIB_SRC) \
-	    -o $(HOST_BIN)/dsi_bench
-	@echo "built $(HOST_BIN)/dsi_bench  —  timing here proves nothing; use the Jetson"
-
-## host-verify: build the MATLAB golden-file comparison tool -> bin/dsi_verify
-host-verify:
-	@mkdir -p $(HOST_BIN)
-	$(HOST_CXX) $(HOST_CXXFLAGS) src/app/dsi_verify.cpp $(LIB_SRC) \
-	    -o $(HOST_BIN)/dsi_verify
-	@echo "built $(HOST_BIN)/dsi_verify"
-
-## host-ard: build the ARD verification tool locally -> bin/ard_verify
-host-ard:
-	@mkdir -p $(HOST_BIN)
-	$(HOST_CXX) $(HOST_CXXFLAGS) src/app/ard_verify.cpp $(LIB_SRC) \
-	    -o $(HOST_BIN)/ard_verify
-	@echo "built $(HOST_BIN)/ard_verify"
-
-## host-run: build the full chain runner locally -> bin/pbr_run
-host-run:
-	@mkdir -p $(HOST_BIN)
-	$(HOST_CXX) $(HOST_CXXFLAGS) src/app/pbr_run.cpp $(LIB_SRC) \
-	    -o $(HOST_BIN)/pbr_run
-	@echo "built $(HOST_BIN)/pbr_run"
-
-## host-clean: remove locally built binaries
-host-clean:
-	rm -rf $(HOST_BIN)
-
-## sync: mirror the local tree to the Jetson (build/ and results survive)
-sync:
-	$(RSYNC) ./ $(JETSON):$(REMOTE)/
-
-## configure: run CMake configure step only (useful when debugging CMake)
-configure: sync
-		ssh $(JETSON) 'cd $(REMOTE) && mkdir -p build && cd build && cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_COMPILER=$(NVCC) ..'
-	
-build: sync
-		ssh $(JETSON) 'cd $(REMOTE) && mkdir -p build && cd build && cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_COMPILER=$(NVCC) .. && make -j2'
-
-## test: build then run every unit test in tests/ via ctest
-test: build
-	ssh $(JETSON) 'cd $(REMOTE)/build && ctest --output-on-failure'
-
-## bench: full benchmark run via scripts/run_cufft_bench.sh
-##        (pins clocks, logs tegrastats, writes CSV to /data/results),
-##        then pulls results back to ./results on the Mac
-bench: build
-	ssh $(JETSON) 'cd $(REMOTE) && bash scripts/run_cufft_bench.sh'
-	$(MAKE) pull-results
-
-## dsi-bench: DSI cancellation sweep on the Jetson with clocks pinned and
-##            tegrastats logged, then pull the results back.
-##            Needs an interactive sudo password on the board, so run it from
-##            a terminal rather than unattended.
-dsi-bench: build
-	ssh -t $(JETSON) 'cd $(REMOTE) && bash scripts/run_dsi_bench.sh'
-	$(MAKE) pull-results
-
-## pull-results: copy CSV/logs from the Jetson SD card to ./results
-pull-results:
-	mkdir -p results
-	-scp '$(JETSON):/data/results/*.csv' results/
-	-scp '$(JETSON):/data/results/*.log' results/
-	-scp -r '$(JETSON):/data/results/dsi_*' results/
-	-scp -r '$(JETSON):/data/results/live_*' results/
-
-## shell: interactive shell in the remote repo
-shell:
-	ssh -t $(JETSON) 'cd $(REMOTE) && exec bash'
-
-## clean-remote: wipe the remote build directory
-clean-remote:
-	ssh $(JETSON) 'cd $(REMOTE) && rm -rf build'

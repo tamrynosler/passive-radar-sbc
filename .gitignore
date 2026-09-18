@@ -25,6 +25,10 @@ nvprof.*
 tegrastats*.log
 data/
 results/
+# Rendered plots and movies from matlab/play_ard.m and friends -- regenerated
+# from the ARD snapshots, so not worth version controlling.
+*.mp4
+*.png
 
 # Editor / OS
 .vscode/

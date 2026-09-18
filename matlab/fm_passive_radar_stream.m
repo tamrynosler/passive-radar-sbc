@@ -57,7 +57,7 @@ Lrange   = 120;                     % bistatic range (delay) bins
 Kclutter = 120;                     % ECA delay taps
 fdMax    = 200;                     % Doppler half-span to display [Hz]
 dec      = 128;                     % Doppler decimation factor
-Pfa      = 1e-5;                    % CFAR false-alarm rate
+Pfa      = 1e-9;                    % CFAR false-alarm rate
 guard    = [2 2];                   % CFAR guard half-widths  [range doppler]
 train    = [4 8];                   % CFAR training half-widths [range doppler]
 

@@ -54,6 +54,7 @@ struct PbrConfig {
     double      dEcaUpdateSeconds  = 0.0;   // T_S, the weight-application window
     uint64_t    uEcaDopplerTaps    = 0;     // P; subspace is K(2P+1) wide
     double      dEcaDiagLoading    = 0.0;   // fraction of the mean Gram diagonal
+    uint64_t    uArdSnapshotEvery  = 0;     // 1 = every CPI
     uint64_t    uCglsIterations    = 0;
     double      dCglsTolerance     = 0.0;
 

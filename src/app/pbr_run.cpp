@@ -52,6 +52,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -64,35 +65,32 @@ const size_t   kDatagramCapacity = 2048;
 const uint64_t kMaxDetections    = 8192;
 const char* const kDefaultConfigPath = "config/prb.conf";
 
+// Everything that describes the SIGNAL PROCESSING lives in the config file, so
+// a run is fully reproducible from a tracked file. What is left here is only
+// what varies per invocation: where the samples come from, how long to run,
+// and where to put the results.
 struct Options {
     std::string sCapturePath;       // empty means live
     std::string sConfigPath = kDefaultConfigPath;
-    std::string sArdDir;
-    std::string sDetectionsPath;
-    std::string sTelemetryPath;
-    std::string sBackend;           // overrides DSI_BACKEND
-    double      dFullScale  = 0.0;  // 0 means "from the config"
+    std::string sOutDir;            // empty means console only
     double      dSeconds    = 0.0;  // 0 means "until the source ends"
-    uint64_t    uArdEvery   = 1;
     bool        bLive       = false;
 };
 
 void printUsage(const char* pProgram)
 {
     std::printf("usage: %s (--live | --file CAPTURE) [options]\n", pProgram);
-    std::printf("  --live             receive from FERS over UDP\n");
-    std::printf("  --file FILE        replay a .pbrcap capture instead\n");
-    std::printf("  --seconds N        stop after N seconds (live only)\n");
-    std::printf("  --config FILE      configuration (default %s)\n", kDefaultConfigPath);
-    std::printf("  --fullscale F      override the config, for a capture\n");
-    std::printf("                     recorded at a different scale\n");
-    std::printf("  --ard-dir DIR      write range-Doppler snapshots here\n");
-    std::printf("  --ard-every N      only write every Nth snapshot (default 1)\n");
-    std::printf("  --detections FILE  CSV, one row per detection\n");
-    std::printf("  --telemetry FILE   CSV, one row per CPI\n");
-    std::printf("  --backend NAME     override DSI_BACKEND: CPU or GPU.\n");
-    std::printf("                     The CPU chain is a correctness reference\n");
-    std::printf("                     and is far too slow for a live run.\n");
+    std::printf("  --live           receive from FERS over UDP\n");
+    std::printf("  --file FILE      replay a .pbrcap capture instead\n");
+    std::printf("  --seconds N      stop after N seconds (live only)\n");
+    std::printf("  --out DIR        write results here: ard/ snapshots,\n");
+    std::printf("                   telemetry.csv and detections.csv\n");
+    std::printf("  --config FILE    configuration (default %s)\n", kDefaultConfigPath);
+    std::printf("\n");
+    std::printf("Everything else -- algorithm, backend, full scale, CFAR and ECA\n");
+    std::printf("settings, snapshot rate -- comes from the config file, so a run\n");
+    std::printf("is described entirely by a tracked file rather than by whatever\n");
+    std::printf("flags happened to be typed.\n");
 }
 
 bool parseArgs(int argc, char* argv[], Options& o)
@@ -101,17 +99,12 @@ bool parseArgs(int argc, char* argv[], Options& o)
         const std::string sArg = argv[i];
         const bool bV = (i + 1 < argc);
 
-        if (sArg == "--help" || sArg == "-h")            return false;
-        else if (sArg == "--live")                        o.bLive = true;
-        else if (sArg == "--file" && bV)                  o.sCapturePath = argv[++i];
-        else if (sArg == "--config" && bV)                o.sConfigPath = argv[++i];
-        else if (sArg == "--ard-dir" && bV)               o.sArdDir = argv[++i];
-        else if (sArg == "--detections" && bV)            o.sDetectionsPath = argv[++i];
-        else if (sArg == "--telemetry" && bV)             o.sTelemetryPath = argv[++i];
-        else if (sArg == "--backend" && bV)               o.sBackend = argv[++i];
-        else if (sArg == "--fullscale" && bV)             o.dFullScale = std::atof(argv[++i]);
-        else if (sArg == "--seconds" && bV)               o.dSeconds = std::atof(argv[++i]);
-        else if (sArg == "--ard-every" && bV)             o.uArdEvery = std::strtoull(argv[++i], nullptr, 10);
+        if (sArg == "--help" || sArg == "-h")   return false;
+        else if (sArg == "--live")              o.bLive = true;
+        else if (sArg == "--file" && bV)        o.sCapturePath = argv[++i];
+        else if (sArg == "--config" && bV)      o.sConfigPath = argv[++i];
+        else if (sArg == "--out" && bV)         o.sOutDir = argv[++i];
+        else if (sArg == "--seconds" && bV)     o.dSeconds = std::atof(argv[++i]);
         else {
             std::fprintf(stderr, "unrecognised or incomplete argument: %s\n", sArg.c_str());
             return false;
@@ -122,10 +115,6 @@ bool parseArgs(int argc, char* argv[], Options& o)
     // ambiguous about where the samples should come from.
     if (o.bLive != o.sCapturePath.empty()) {
         std::fprintf(stderr, "give exactly one of --live or --file CAPTURE\n");
-        return false;
-    }
-    if (o.uArdEvery == 0) {
-        std::fprintf(stderr, "--ard-every must be at least 1\n");
         return false;
     }
     return true;
@@ -151,11 +140,22 @@ int main(int argc, char* argv[])
     if (!loadPbrConfig(oOptions.sConfigPath.c_str(), oCfg))
         return 1;
 
-    if (!oOptions.sBackend.empty())
-        oCfg.sDsiBackend = oOptions.sBackend;
+    const double dFullScale = oCfg.dFullScale;
 
-    const double dFullScale = (oOptions.dFullScale > 0.0) ? oOptions.dFullScale
-                                                          : oCfg.dFullScale;
+    // Build the output paths from the one directory the caller gave.
+    std::string sArdDir, sTelemetryPath, sDetectionsPath;
+    if (!oOptions.sOutDir.empty()) {
+        sArdDir         = oOptions.sOutDir + "/ard";
+        sTelemetryPath  = oOptions.sOutDir + "/telemetry.csv";
+        sDetectionsPath = oOptions.sOutDir + "/detections.csv";
+        // mkdir -p, so a run never fails at the first CPI for want of a
+        // directory it could have made at startup.
+        const std::string sCmd = "mkdir -p '" + sArdDir + "'";
+        if (std::system(sCmd.c_str()) != 0) {
+            std::fprintf(stderr, "pbr_run: cannot create %s\n", sArdDir.c_str());
+            return 1;
+        }
+    }
 
     // ---- build the chain ---------------------------------------------------
     DSIParams oDsiParams;
@@ -210,9 +210,8 @@ int main(int argc, char* argv[])
     std::printf("\npbr_run\n");
     std::printf("  source        %s\n",
                 oOptions.bLive ? "live UDP" : oOptions.sCapturePath.c_str());
-    if (dFullScale != oCfg.dFullScale)
-        std::printf("  fullscale     %g   (override; config says %g)\n",
-                    dFullScale, oCfg.dFullScale);
+    std::printf("  output        %s\n",
+                oOptions.sOutDir.empty() ? "console only" : oOptions.sOutDir.c_str());
     std::printf("  chain         %s -> %s\n", pDsi->name(), pArd->name());
     std::printf("  coupling      %s\n",
                 bDeviceCoupled ? "device-coupled: samples stay on the GPU"
@@ -284,11 +283,11 @@ int main(int argc, char* argv[])
 
     // ---- output files ------------------------------------------------------
     std::FILE* pDetCsv = nullptr;
-    if (!oOptions.sDetectionsPath.empty()) {
-        pDetCsv = std::fopen(oOptions.sDetectionsPath.c_str(), "w");
+    if (!sDetectionsPath.empty()) {
+        pDetCsv = std::fopen(sDetectionsPath.c_str(), "w");
         if (pDetCsv == nullptr) {
             std::fprintf(stderr, "pbr_run: cannot open %s\n",
-                         oOptions.sDetectionsPath.c_str());
+                         sDetectionsPath.c_str());
             return 1;
         }
         std::fprintf(pDetCsv, "cpi,signalTimeS,rangeBin,dopplerBin,"
@@ -296,11 +295,11 @@ int main(int argc, char* argv[])
     }
 
     std::FILE* pTelCsv = nullptr;
-    if (!oOptions.sTelemetryPath.empty()) {
-        pTelCsv = std::fopen(oOptions.sTelemetryPath.c_str(), "w");
+    if (!sTelemetryPath.empty()) {
+        pTelCsv = std::fopen(sTelemetryPath.c_str(), "w");
         if (pTelCsv == nullptr) {
             std::fprintf(stderr, "pbr_run: cannot open %s\n",
-                         oOptions.sTelemetryPath.c_str());
+                         sTelemetryPath.c_str());
             return 1;
         }
         std::fprintf(pTelCsv, "cpi,cpiStartIndex,signalTimeS,wallTimeS,lagS,"
@@ -395,8 +394,8 @@ int main(int argc, char* argv[])
             const std::chrono::steady_clock::time_point t1 =
                 std::chrono::steady_clock::now();
             ArdStats oArdStats;
-            const bool bWantMap = !oOptions.sArdDir.empty() &&
-                                  (uCpiIndex % oOptions.uArdEvery == 0);
+            const bool bWantMap = !sArdDir.empty() &&
+                                  (uCpiIndex % oCfg.uArdSnapshotEvery == 0);
             ComplexF* pMap = bWantMap ? vcMap.data() : nullptr;
 
             const bool bArdOk = bDeviceCoupled
@@ -471,7 +470,7 @@ int main(int argc, char* argv[])
             if (bWantMap) {
                 char achPath[512];
                 std::snprintf(achPath, sizeof(achPath), "%s/ard_%05llu.bin",
-                              oOptions.sArdDir.c_str(),
+                              sArdDir.c_str(),
                               (unsigned long long)uCpiIndex);
                 ArdFileHeader oArdHeader;
                 oArdHeader.uRangeBins         = oArdParams.uRangeBins;

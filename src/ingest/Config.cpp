@@ -215,6 +215,10 @@ bool validate(PbrConfig& oConfig)
         std::fprintf(stderr, "config: DSI_ALGORITHM and DSI_BACKEND must not be empty\n");
         bOk = false;
     }
+    if (oConfig.uArdSnapshotEvery == 0) {
+        std::fprintf(stderr, "config: ARD_SNAPSHOT_EVERY must be at least 1\n");
+        bOk = false;
+    }
     if (oConfig.sDsiMathPrecision != "FP64" && oConfig.sDsiMathPrecision != "FP32") {
         std::fprintf(stderr, "config: DSI_MATH_PRECISION must be FP64 or FP32, not \"%s\"\n",
                      oConfig.sDsiMathPrecision.c_str());
@@ -370,6 +374,7 @@ bool loadPbrConfig(const char* pPath, PbrConfig& oConfig)
     getDouble(mValues, "ECA_UPDATE_INTERVAL_s", oConfig.dEcaUpdateSeconds, bOk);
     getUInt64(mValues, "ECA_DOPPLER_TAPS",     oConfig.uEcaDopplerTaps,    bOk);
     getDouble(mValues, "ECA_DIAGONAL_LOADING", oConfig.dEcaDiagLoading,    bOk);
+    getUInt64(mValues, "ARD_SNAPSHOT_EVERY",   oConfig.uArdSnapshotEvery,  bOk);
     getUInt64(mValues, "CGLS_ITERATIONS",      oConfig.uCglsIterations,    bOk);
     getDouble(mValues, "CGLS_TOLERANCE",       oConfig.dCglsTolerance,     bOk);
 

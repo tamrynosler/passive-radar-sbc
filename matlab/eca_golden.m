@@ -26,11 +26,13 @@
 
 clear; clc;
 
-% ---- parameters: keep in step with config/prb.conf ------------------------
-K            = 120;      % N_CLUTTER_TAPS
-batchSamples = 5120;     % ECA_BATCH_LENGTH_s * SAMPLE_RATE_Hz = 0.025 * 204800
-loadingRel   = 1e-6;     % ECA_DIAGONAL_LOADING (fraction of mean Gram diagonal)
-loadingAbs   = 1e-3;     % the MATLAB reference chain's absolute loading (ECA-m)
+% ---- parameters, straight from the config the C++ side reads --------------
+cfg          = read_prb_conf('config/prb.conf');
+K            = cfg.N_CLUTTER_TAPS;
+batchSamples = round(cfg.ECA_BATCH_LENGTH_s * cfg.SAMPLE_RATE_Hz);
+loadingRel   = cfg.ECA_DIAGONAL_LOADING;
+loadingAbs   = 1e-3;     % ECA-m inherits the reference chain's absolute value
+fprintf('config: K %d, batch %d samples, loading %g\n', K, batchSamples, loadingRel);
 
 cpiPath   = 'data/cpi_0000.bin';
 ecamPath  = 'data/golden_ecam.bin';

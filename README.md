@@ -42,7 +42,7 @@ accepts a live receiver front end.
 passive-radar-sbc/
 ├── CMakeLists.txt        top-level build (CMake >= 3.10; see Build)
 ├── Makefile              laptop-side driver: sync + remote build/run over SSH
-├── jetson.mk             thin on-board wrapper around CMake (for direct use)
+│                         (`make help` lists every target)
 ├── README.md
 ├── .gitignore
 ├── bench/                standalone benchmarking harnesses
@@ -93,11 +93,27 @@ with `--delete` mirrors the tree and will clobber on-board edits).
 Requires a `Host jetson` entry in `~/.ssh/config` with key-based auth.
 
 ```bash
-make build     # rsync tree to the Jetson, then configure + compile there
-make test      # build, then run every unit test on the Jetson via ctest
-make bench     # build, run scripts/run_cufft_bench.sh, pull CSV/logs back
-make shell     # interactive shell in the remote repo
-make clean-remote
+make sync      # edited config/prb.conf only — 2 s, no compile
+make build     # edited any C++/CUDA — sync then compile on the Jetson
+make test      # unit tests on the Jetson
+make run       # live run against FERS, clocks pinned, tegrastats logged
+make replay    # replay the recorded capture through the whole chain
+make verify    # golden-file checks against MATLAB
+make bench     # DSI + ARD timing sweeps
+make pull      # copy results back to ./results
+```
+
+`make help` lists them all. Everything about a run — algorithm, backend,
+CFAR and ECA settings — lives in `config/prb.conf`, which is read at **run**
+time. So the tuning loop is just `make sync && make run`: no rebuild, and no
+command-line flags to remember.
+
+Local builds, for fast iteration without the board (no CUDA, so the GPU
+backends are absent and asking for them fails loudly):
+
+```bash
+make host        # every tool into ./bin
+make host-test   # unit tests locally
 ```
 
 ### Directly on the Jetson

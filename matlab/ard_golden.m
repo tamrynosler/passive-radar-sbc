@@ -27,12 +27,18 @@
 
 clear; clc;
 
-% ---- parameters: keep in step with config/prb.conf -------------------------
-Lrange = 120;      % N_RANGE_BINS
-dec    = 128;      % DOPPLER_DECIMATION
-Pfa    = 1e-5;     % CFAR_PFA
-guard  = [2 2];    % CFAR_GUARD_RANGE, CFAR_GUARD_DOPPLER
-train  = [4 8];    % CFAR_TRAIN_RANGE, CFAR_TRAIN_DOPPLER
+% ---- parameters, straight from the config the C++ side reads ---------------
+% Not copied by hand: a golden file generated with different settings than the
+% run it is compared against proves nothing, and hand-copied constants drift
+% the moment the config is tuned.
+cfg    = read_prb_conf('config/prb.conf');
+Lrange = cfg.N_RANGE_BINS;
+dec    = cfg.DOPPLER_DECIMATION;
+Pfa    = cfg.CFAR_PFA;
+guard  = [cfg.CFAR_GUARD_RANGE cfg.CFAR_GUARD_DOPPLER];
+train  = [cfg.CFAR_TRAIN_RANGE cfg.CFAR_TRAIN_DOPPLER];
+fprintf('config: %d range bins, dec %d, Pfa %g, guard [%d %d], train [%d %d]\n', ...
+        Lrange, dec, Pfa, guard(1), guard(2), train(1), train(2));
 
 cleanedPath = 'data/cleaned_0000.bin';
 outPath     = 'data/golden_ard.bin';
