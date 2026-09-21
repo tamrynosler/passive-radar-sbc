@@ -165,6 +165,11 @@ bool EcaCpu::init(const DSIParams& oParams)
 
     CHECK(oParams.uCpiSamples % oParams.uUpdateSamples == 0,
           "the update window must divide the CPI exactly");
+    // Keeps every estimation window on an update-window boundary, which is
+    // what lets the GPU share partial Grams; enforced here too so the two
+    // backends place their windows identically.
+    CHECK(oParams.uEstimateSamples % oParams.uUpdateSamples == 0,
+          "the update window must divide the estimation window exactly");
     CHECK(oParams.uEstimateSamples > oParams.uClutterTaps,
           "the estimation window must hold more samples than there are taps "
           "to solve for");

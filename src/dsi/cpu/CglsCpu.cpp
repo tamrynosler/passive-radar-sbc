@@ -237,25 +237,22 @@ bool CglsCpu::init(const DSIParams& oParams)
     CHECK(oParams.eAlgorithm == DSIAlgorithm::Cgls, "CglsCpu handles CGLS only");
     CHECK(oParams.uCpiSamples > 0, "CPI length must be non-zero");
     CHECK(oParams.uClutterTaps > 0, "clutter taps must be non-zero");
-    CHECK(oParams.uUpdateSamples > 0, "the update window must be non-zero");
+    CHECK(oParams.uCglsBatchSamples > 0, "the CGLS batch must be non-zero");
     CHECK(oParams.uMaxIterations > 0, "CGLS needs at least one iteration");
     CHECK(oParams.uDopplerTaps == 0,
           "ECA_DOPPLER_TAPS > 0 is not implemented; the clutter subspace is "
           "delay-only for now");
     // CGLS is batched like ECA-B: the weights are estimated from the window
-    // they are applied to. A sliding variant is not defined here.
-    CHECK(oParams.uEstimateSamples == oParams.uUpdateSamples,
-          "CGLS estimates from the window it applies to; the estimation and "
-          "update windows must be equal");
-    CHECK(oParams.uCpiSamples % oParams.uUpdateSamples == 0,
-          "the update window must divide the CPI exactly");
-    CHECK(oParams.uUpdateSamples > oParams.uClutterTaps,
-          "the window must hold more samples than there are taps to solve for");
+    // they are applied to, on its own window length.
+    CHECK(oParams.uCpiSamples % oParams.uCglsBatchSamples == 0,
+          "the CGLS batch must divide the CPI exactly");
+    CHECK(oParams.uCglsBatchSamples > oParams.uClutterTaps,
+          "the CGLS batch must hold more samples than there are taps to solve for");
 
     moParams        = oParams;
     muTaps          = oParams.uClutterTaps;
-    muWindowSamples = oParams.uUpdateSamples;
-    muWindows       = oParams.uCpiSamples / oParams.uUpdateSamples;
+    muWindowSamples = oParams.uCglsBatchSamples;
+    muWindows       = oParams.uCpiSamples / oParams.uCglsBatchSamples;
 
     // Every allocation happens here and is reused for the life of the object.
     mvcX.assign(static_cast<size_t>(muWindows * muTaps), ComplexAcc());

@@ -31,14 +31,13 @@ DSIParams cglsParams(uint64_t uCpi, uint64_t uTaps, uint64_t uWindow,
     DSIParams o;
     o.eAlgorithm       = DSIAlgorithm::Cgls;
     o.eBackend         = DSIBackend::Cpu;
-    o.uCpiSamples      = uCpi;
-    o.uClutterTaps     = uTaps;
-    o.uEstimateSamples = uWindow;
-    o.uUpdateSamples   = uWindow;
-    o.uDopplerTaps     = 0;
-    o.uMaxIterations   = uIterations;
-    o.bCglsPrime       = bPrime;
-    o.bFloat32Math     = true;
+    o.uCpiSamples       = uCpi;
+    o.uClutterTaps      = uTaps;
+    o.uCglsBatchSamples = uWindow;
+    o.uDopplerTaps      = 0;
+    o.uMaxIterations    = uIterations;
+    o.bCglsPrime        = bPrime;
+    o.bFloat32Math      = true;
     return o;
 }
 
@@ -73,9 +72,8 @@ void testRejectsBadParameters()
     std::unique_ptr<DSICanceller> p = makeDSICanceller(DSIAlgorithm::Cgls, DSIBackend::Cpu);
     assert(p);
 
-    DSIParams o = cglsParams(1024, 8, 256, 30, false);
-    o.uEstimateSamples = 512;          // sliding windows are not defined for CGLS
-    assert(!p->init(o));
+    DSIParams o = cglsParams(1024, 8, 300, 30, false);
+    assert(!p->init(o));               // batch does not divide the CPI
 
     o = cglsParams(1024, 8, 256, 30, false);
     o.uDopplerTaps = 1;                // delay-only subspace, as ECA

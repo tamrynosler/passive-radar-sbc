@@ -69,9 +69,9 @@ enum class DSIAlgorithm {
     // Conjugate gradient least squares. The same per-window least-squares
     // problem as ECA-B, but stepped towards iteratively instead of solved
     // directly, so a fixed iteration count buys a fixed execution time and a
-    // fixed memory footprint [4]. Uses uUpdateSamples as its window and
-    // uMaxIterations; ignores diagonal loading (stopping early is the
-    // regularisation).
+    // fixed memory footprint [4]. Uses its own window, uCglsBatchSamples, and
+    // uMaxIterations; ignores the ECA window fields and diagonal loading
+    // (stopping early is the regularisation).
     Cgls
 };
 
@@ -175,6 +175,11 @@ struct DSIParams {
     // the projection removes 2P+1 columns per carrier. At most 3.
     uint64_t     uCdBatchSamples = 0;
     uint64_t     uCdDopplerTaps  = 0;
+
+    // CGLS window: weights are estimated from and applied to fragments of
+    // this many samples, as ECA-B does with uUpdateSamples. Its own field so
+    // the two algorithms can be tuned apart; must divide the CPI exactly.
+    uint64_t     uCglsBatchSamples = 0;
 
     // CGLS. Iterating a fixed number of times rather than to a tolerance is
     // what gives a fixed, predictable execution time, and it is also the
@@ -284,16 +289,27 @@ bool dsiParamsFromConfig(const PbrConfig& oConfig, DSIParams& oParams);
 // Where the estimation window for one update window starts.
 //
 // ECA-S estimates the weights for the update window beginning at
-// uUpdateStart from a longer window centred on it. Near the ends of the CPI
-// a centred window would run off the edge, so it is clamped to stay inside:
-// the first and last few update windows share an estimation window that is
-// off-centre rather than short. Every window is therefore solved from
-// exactly uEstimateSamples samples, so conditioning and diagonal loading
-// mean the same thing everywhere in the CPI.
+// uUpdateStart from a longer window centred on it. Two rules:
 //
-// With uEstimateSamples == uUpdateSamples this returns uUpdateStart, which
-// is ECA-B. Both backends call this, so they cannot disagree at the edges.
-// Requires uEstimateSamples <= uCpiSamples; init() checks that.
+//   * CLAMPED at the ends of the CPI, where a centred window would run off
+//     the edge. The first and last few update windows therefore share an
+//     estimation window that is off-centre rather than short, so every
+//     window is solved from exactly uEstimateSamples samples and
+//     conditioning and diagonal loading mean the same thing throughout.
+//
+//   * QUANTISED to a whole number of update windows. The GPU shares one
+//     partial Gram per update-window-length chunk between the M =
+//     T_A / T_S estimation windows that span it, which is what makes ECA-S
+//     affordable (see docs/design_decisions.md 1d.9), and that sharing is
+//     only possible if every estimation window starts on a chunk boundary.
+//     When M is even there is no boundary at the centre of the update
+//     window, so the estimation window sits T_S/2 off-centre -- 5% of T_A
+//     at the shipped settings. Deliberate; M odd centres exactly.
+//
+// Requires uUpdateSamples to divide both uEstimateSamples and uCpiSamples;
+// init() and the config loader check both. With uEstimateSamples ==
+// uUpdateSamples it returns uUpdateStart unchanged, so ECA-m and ECA-B are
+// untouched. Both backends call this, so they cannot disagree.
 uint64_t dsiEstimationStart(uint64_t uUpdateStart, uint64_t uUpdateSamples,
                             uint64_t uEstimateSamples, uint64_t uCpiSamples);
 

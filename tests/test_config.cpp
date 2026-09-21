@@ -45,6 +45,7 @@ const char* const kValidConfig =
     "ECA_CD_BATCH_s = 0.0025\n"
     "ECA_CD_DOPPLER_TAPS = 1\n"
     "ARD_SNAPSHOT_EVERY = 1\n"
+    "CGLS_BATCH_s = 0.025\n"
     "CGLS_ITERATIONS = 30\n"
     "CGLS_PRIME = 0\n"
     "\n"
@@ -294,6 +295,16 @@ void testValidationRules()
         "CGLS_PRIME = 0", "CGLS_PRIME = 2")), oConfig));
     assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
         "CGLS_ITERATIONS = 30", "CGLS_ITERATIONS = 0")), oConfig));
+
+    // The CGLS batch follows the ECA update window's rules on its own key.
+    // 0.0625 s is Schuepbach's 16 segments: 12800 samples, divides exactly.
+    assert(loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "CGLS_BATCH_s = 0.025", "CGLS_BATCH_s = 0.0625")), oConfig));
+    assert(oConfig.uCglsBatchSamples == 12800u);
+    assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "CGLS_BATCH_s = 0.025", "CGLS_BATCH_s = 0.03")), oConfig));      // 6144 does not divide
+    assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "CGLS_BATCH_s = 0.025", "CGLS_BATCH_s = 0.0005")), oConfig));    // 102 < 120 taps
     assert(loadPbrConfig(writeTemp(replaced(kValidConfig,
         "CGLS_PRIME = 0", "CGLS_PRIME = 1")), oConfig));
     assert(oConfig.bCglsPrime);
@@ -334,6 +345,7 @@ void testWhitespaceAndCommentHandling()
         "ECA_CD_BATCH_s = 0.0025\n"
         "ECA_CD_DOPPLER_TAPS = 1\n"
         "ARD_SNAPSHOT_EVERY = 1\n"
+        "CGLS_BATCH_s = 0.025\n"
         "CGLS_ITERATIONS = 30\n"
         "CGLS_PRIME = 0\n"
         "CFAR_PFA = 1e-5\n"

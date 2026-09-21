@@ -172,6 +172,7 @@ bool validate(PbrConfig& oConfig)
         { "ECA_BATCH_LENGTH_s",   oConfig.dEcaBatchSeconds },
         { "ECA_UPDATE_INTERVAL_s", oConfig.dEcaUpdateSeconds },
         { "ECA_CD_BATCH_s",       oConfig.dCdBatchSeconds },
+        { "CGLS_BATCH_s",         oConfig.dCglsBatchSeconds },
         { "CGLS_ITERATIONS",      static_cast<double>(oConfig.uCglsIterations) },
     };
     for (size_t u = 0; u < sizeof(aPositive) / sizeof(aPositive[0]); ++u) {
@@ -313,6 +314,18 @@ bool validate(PbrConfig& oConfig)
                      static_cast<unsigned long long>(oConfig.uCpiSamples));
         return false;
     }
+    // ECA-S shares one partial Gram per update window between the estimation
+    // windows that span it, which needs the estimation window to be a whole
+    // number of them (docs/design_decisions.md 1d.9). ECA-B satisfies this
+    // trivially, the two being equal.
+    if (oConfig.uEcaEstimateSamples % oConfig.uEcaUpdateSamples != 0) {
+        std::fprintf(stderr,
+                     "config: ECA_UPDATE_INTERVAL_s (%llu samples) does not divide "
+                     "ECA_BATCH_LENGTH_s (%llu samples) exactly\n",
+                     static_cast<unsigned long long>(oConfig.uEcaUpdateSamples),
+                     static_cast<unsigned long long>(oConfig.uEcaEstimateSamples));
+        return false;
+    }
     // Fewer samples than unknowns leaves the least-squares problem
     // underdetermined and the Gram matrix singular.
     if (oConfig.uEcaEstimateSamples <= oConfig.uClutterTaps) {
@@ -342,6 +355,27 @@ bool validate(PbrConfig& oConfig)
                      "%llu samples per CPI exactly\n",
                      static_cast<unsigned long long>(oConfig.uCdBatchSamples),
                      static_cast<unsigned long long>(oConfig.uCpiSamples));
+        return false;
+    }
+
+    // CGLS window: the same two rules as the ECA update window, on its own key
+    // so the two can be tuned apart.
+    oConfig.uCglsBatchSamples = toSamples(oConfig.dCglsBatchSeconds, oConfig.uSampleRateHz);
+    if (oConfig.uCglsBatchSamples == 0 ||
+        oConfig.uCpiSamples % oConfig.uCglsBatchSamples != 0) {
+        std::fprintf(stderr,
+                     "config: CGLS_BATCH_s (%llu samples) does not divide the %llu "
+                     "samples per CPI exactly\n",
+                     static_cast<unsigned long long>(oConfig.uCglsBatchSamples),
+                     static_cast<unsigned long long>(oConfig.uCpiSamples));
+        return false;
+    }
+    if (oConfig.uCglsBatchSamples <= oConfig.uClutterTaps) {
+        std::fprintf(stderr,
+                     "config: CGLS_BATCH_s gives %llu samples, which is not more "
+                     "than the %llu clutter taps being solved for\n",
+                     static_cast<unsigned long long>(oConfig.uCglsBatchSamples),
+                     static_cast<unsigned long long>(oConfig.uClutterTaps));
         return false;
     }
 
@@ -407,6 +441,7 @@ bool loadPbrConfig(const char* pPath, PbrConfig& oConfig)
     getUInt64(mValues, "ECA_CD_DOPPLER_TAPS",  oConfig.uCdDopplerTaps,     bOk);
     getUInt64(mValues, "ARD_SNAPSHOT_EVERY",   oConfig.uArdSnapshotEvery,  bOk);
     getUInt64(mValues, "CGLS_ITERATIONS",      oConfig.uCglsIterations,    bOk);
+    getDouble(mValues, "CGLS_BATCH_s",         oConfig.dCglsBatchSeconds,  bOk);
 
     // 0 or 1, read as an integer so a typo like "yes" is a load error rather
     // than a silent false.
@@ -486,7 +521,9 @@ void printPbrConfig(const PbrConfig& oConfig)
                 oConfig.dCdBatchSeconds,
                 static_cast<unsigned long long>(oConfig.uCdBatchSamples),
                 static_cast<unsigned long long>(oConfig.uCdDopplerTaps));
-    std::printf("  CGLS               %llu iterations, %s\n",
+    std::printf("  CGLS               batch %.4f s (%llu samples), %llu iterations, %s\n",
+                oConfig.dCglsBatchSeconds,
+                static_cast<unsigned long long>(oConfig.uCglsBatchSamples),
                 static_cast<unsigned long long>(oConfig.uCglsIterations),
                 oConfig.bCglsPrime ? "primed from the previous CPI" : "cold start");
     std::printf("  CFAR               Pfa %g, guard %llux%llu, train %llux%llu\n",

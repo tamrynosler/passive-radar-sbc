@@ -304,7 +304,8 @@ int main(int argc, char* argv[])
         }
         std::fprintf(pTelCsv, "cpi,cpiStartIndex,signalTimeS,wallTimeS,lagS,"
                               "dsiMs,ardMs,totalMs,suppressionDb,peakDb,"
-                              "detections,borderDetections,skipped,datagrams\n");
+                              "detections,borderDetections,skipped,datagrams,"
+                              "waitMs,printMs,detCsvMs,ardWriteMs\n");
     }
 
     // ---- the loop ----------------------------------------------------------
@@ -315,6 +316,18 @@ int main(int argc, char* argv[])
     uint64_t uDatagrams    = 0;
     uint64_t uParseFailures = 0;
     uint64_t uFirstCpiStart = 0;
+    // Two different instants, and conflating them was a bug worth naming.
+    //
+    // dStartupOffset is when the FIRST CPI became available -- the wait for
+    // the transmitter plus one full second of signal. It is reported as a
+    // fixed offset.
+    //
+    // dWallAtFirstCpi is when that first CPI FINISHED being processed, and it
+    // is what the lag is measured from. Zeroing the lag at the earlier instant
+    // instead meant every CPI's lag carried one CPI's processing time as a
+    // permanent offset, so a healthy chain read 0.25 s rather than 0 and the
+    // slower algorithms sat closest to the failure threshold for no reason.
+    double   dStartupOffset  = 0.0;
     double   dWallAtFirstCpi = 0.0;
     bool     bHaveFirst     = false;
     double   dMaxLag        = 0.0;
@@ -322,6 +335,16 @@ int main(int argc, char* argv[])
     std::vector<double> vdTotalMs;
     bool     bReadError     = false;
     bool     bProcessError  = false;
+
+    // ---- transient diagnostics --------------------------------------------
+    // A 1.8 s stall was observed between CPIs on ECA-S with processing itself
+    // well inside budget and no memory, thermal or clock signature. The gap is
+    // outside cancel(), so these split the rest of the loop into the places it
+    // could be hiding: writing the snapshot, writing the CSVs, printing the
+    // progress line (which on a `make run` goes through tee and an ssh pipe,
+    // and blocks if that backs up), and waiting for the next CPI's packets.
+    std::chrono::steady_clock::time_point oLastOutputEnd = oStart;
+    bool     bHaveLastOutput = false;
 
     for (;;) {
         if (oOptions.dSeconds > 0.0 && nowSeconds(oStart) >= oOptions.dSeconds)
@@ -374,14 +397,19 @@ int main(int argc, char* argv[])
             if (eCpi == CpiStatus::Skipped) continue;
 
             if (!bHaveFirst) {
-                bHaveFirst      = true;
-                uFirstCpiStart  = uCpiStart;
-                dWallAtFirstCpi = nowSeconds(oStart);
+                uFirstCpiStart = uCpiStart;
+                dStartupOffset = nowSeconds(oStart);
             }
 
             // ---- cancel ---------------------------------------------------
             const std::chrono::steady_clock::time_point t0 =
                 std::chrono::steady_clock::now();
+
+            // Everything since the previous CPI's output finished: draining
+            // the socket, parsing, and spinning while the next window fills.
+            const double dWaitMs = bHaveLastOutput
+                ? std::chrono::duration<double, std::milli>(t0 - oLastOutputEnd).count()
+                : 0.0;
             DSIStats oDsiStats;
             if (!pDsi->cancel(vcRef.data(), vcSur.data(),
                               bDeviceCoupled ? nullptr : vcCleaned.data(),
@@ -427,12 +455,24 @@ int main(int argc, char* argv[])
             const double dSignalS = double(uCpiStart - uFirstCpiStart) /
                                     double(oCfg.uSampleRateHz);
             const double dWallS   = nowSeconds(oStart);
+
+            // Both clocks are zeroed at the same instant: the moment the
+            // first CPI finished processing. A chain that keeps up then holds
+            // the lag at zero, whatever the algorithm costs per CPI.
+            if (!bHaveFirst) {
+                bHaveFirst      = true;
+                dWallAtFirstCpi = dWallS;
+            }
+
             const double dLagS    = (dWallS - dWallAtFirstCpi) - dSignalS;
             if (dLagS > dMaxLag) dMaxLag = dLagS;
             if (dTotalMs > dWorstTotalMs) dWorstTotalMs = dTotalMs;
             vdTotalMs.push_back(dTotalMs);
 
             const ChannelIngest::Stats& oIngestStats = oIngest.stats();
+
+            const std::chrono::steady_clock::time_point t3 =
+                std::chrono::steady_clock::now();
 
             std::printf("CPI %4llu  t=%7.3f s  dsi %6.1f  ard %5.1f  "
                         "total %6.1f ms  %5.2f dB  %3llu det  lag %6.3f s\n",
@@ -442,19 +482,8 @@ int main(int argc, char* argv[])
                         (unsigned long long)oArdStats.uDetections, dLagS);
             std::fflush(stdout);
 
-            if (pTelCsv != nullptr) {
-                std::fprintf(pTelCsv,
-                    "%llu,%llu,%.6f,%.6f,%.6f,%.4f,%.4f,%.4f,%.4f,%.4f,"
-                    "%llu,%llu,%llu,%llu\n",
-                    (unsigned long long)uCpiIndex,
-                    (unsigned long long)uCpiStart,
-                    dSignalS, dWallS, dLagS, dDsiMs, dArdMs, dTotalMs,
-                    oDsiStats.dSuppressionDb, oArdStats.dPeakDb,
-                    (unsigned long long)oArdStats.uDetections,
-                    (unsigned long long)oArdStats.uDetectionsInBorder,
-                    (unsigned long long)oIngestStats.uCpisOvertaken,
-                    (unsigned long long)uDatagrams);
-            }
+            const std::chrono::steady_clock::time_point t4 =
+                std::chrono::steady_clock::now();
 
             if (pDetCsv != nullptr) {
                 for (uint64_t u = 0; u < oArdStats.uDetections; ++u) {
@@ -466,6 +495,9 @@ int main(int argc, char* argv[])
                                  d.dRangeKm, d.dDopplerHz, d.dPowerDb, d.dSnrDb);
                 }
             }
+
+            const std::chrono::steady_clock::time_point t5 =
+                std::chrono::steady_clock::now();
 
             if (bWantMap) {
                 char achPath[512];
@@ -484,6 +516,33 @@ int main(int argc, char* argv[])
                     break;
                 }
             }
+
+            const std::chrono::steady_clock::time_point t6 =
+                std::chrono::steady_clock::now();
+
+            // Written last, so the row can carry every phase of this CPI.
+            // The telemetry write itself is one fprintf and falls into the
+            // next CPI's waitMs, which is where it belongs.
+            if (pTelCsv != nullptr) {
+                std::fprintf(pTelCsv,
+                    "%llu,%llu,%.6f,%.6f,%.6f,%.4f,%.4f,%.4f,%.4f,%.4f,"
+                    "%llu,%llu,%llu,%llu,%.4f,%.4f,%.4f,%.4f\n",
+                    (unsigned long long)uCpiIndex,
+                    (unsigned long long)uCpiStart,
+                    dSignalS, dWallS, dLagS, dDsiMs, dArdMs, dTotalMs,
+                    oDsiStats.dSuppressionDb, oArdStats.dPeakDb,
+                    (unsigned long long)oArdStats.uDetections,
+                    (unsigned long long)oArdStats.uDetectionsInBorder,
+                    (unsigned long long)oIngestStats.uCpisOvertaken,
+                    (unsigned long long)uDatagrams,
+                    dWaitMs,
+                    std::chrono::duration<double, std::milli>(t4 - t3).count(),
+                    std::chrono::duration<double, std::milli>(t5 - t4).count(),
+                    std::chrono::duration<double, std::milli>(t6 - t5).count());
+            }
+
+            oLastOutputEnd   = std::chrono::steady_clock::now();
+            bHaveLastOutput  = true;
 
             ++uCpiIndex;
         }
@@ -528,7 +587,7 @@ int main(int argc, char* argv[])
                     dWorstTotalMs / dBudgetMs);
     }
     std::printf("   startup offset         %.3f s (before the first CPI; not a backlog)\n",
-                dWallAtFirstCpi);
+                dStartupOffset);
     std::printf("   lag growth since       %.3f s  <-- must stay near zero\n", dMaxLag);
 
     // A file replay runs as fast as it can, so lag is meaningless there.

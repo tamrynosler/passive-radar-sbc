@@ -34,12 +34,39 @@
 //   build the delayed-reference matrix   custom kernel (below)
 //   Gram matrix, 97% of the work         cuBLAS cherk
 //   right-hand side                      cuBLAS cgemv
+//   share partial Grams between windows  custom kernel (below, ECA-S only)
 //   solve all windows at once            cuSOLVER Cpotrf/CpotrsBatched
 //   subtract the clutter                 custom kernel (below)
 //   suppression figure                   cuBLAS scnrm2
 //
-// Only two custom kernels, both about ten lines. Everything heavy is a
-// library call: less to get wrong, and less to review.
+// Everything heavy is a library call: less to get wrong, and less to review.
+//
+// ---------------------------------------------------------------------------
+// ECA-S: one Gram per chunk, shared between the windows that span it
+// ---------------------------------------------------------------------------
+//
+// ECA-S's estimation windows overlap by (T_A - T_S)/T_A -- 90% at 25 ms over
+// 2.5 ms -- so summing each from scratch recomputes nearly every product
+// M = T_A/T_S times. Measured that way: 1460 ms per CPI against ECA-B's 155.
+//
+// Instead the CPI is cut into chunks of T_S, one Gram is computed per chunk
+// (so the total sample-work equals ECA-B's exactly), and each window's Gram is
+// the sum of the M chunk Grams its estimation window spans. The chunk length
+// IS the update window length, so there are exactly muWindows of them and
+// chunk c covers update window c.
+//
+// This is not Colone's recursive slide (G_{w+1} = G_w - leaving + entering).
+// That reads two chunks per window rather than M, but it serialises the
+// windows and accumulates add/subtract rounding across every step in FP32.
+// Summing M chunks is fully parallel and has no drift -- if anything it is
+// slightly more accurate than the direct form, M partial sums combined
+// pairwise beating one serial sum over T_A. See docs/design_decisions.md 1d.9,
+// which also records why the estimation window is quantised to a chunk
+// boundary and what that costs.
+//
+// M == 1 is ECA-m and ECA-B: the chunk IS the window, so the chunk arrays are
+// neither allocated nor touched and those two take byte-for-byte the path
+// they always did.
 //
 // The solve stays on the GPU deliberately. It is only 1.5% of the arithmetic,
 // but on the Nano's Cortex-A57 that 1.5% would cost an estimated 75-150 ms
@@ -64,8 +91,10 @@
 // than the update window; the subtract kernel does not change at all.
 //
 // Total device memory is about 25 MB for the shipped ECA-B parameters. The
-// Gram buffer is one K x K matrix per UPDATE window, so ECA-S at 2.5 ms
-// updates holds 400 of them: 46 MB.
+// Gram buffer is one K x K matrix per UPDATE window, and ECA-S needs a second
+// one of the same size for the chunk Grams, so at 2.5 ms updates it is 400
+// matrices twice over: 114 MB all told. kMaxDeviceBytes below caps that; the
+// measured memory budget behind the number is in design_decisions.md 1d.10.
 
 #include <cublas_v2.h>
 #include <cusolverDn.h>
@@ -82,9 +111,18 @@ namespace pbr {
 
 namespace {
 
-// Largest slice of a window handled in one cuBLAS call. Bounds the R buffer
-// at kMaxChunk * K * 8 bytes; 16384 x 120 is 15.7 MB.
-const uint64_t kMaxChunkSamples = 16384;
+// Largest slice of a chunk handled in one cuBLAS call. Bounds the R buffer
+// at kMaxBuildSamples * K * 8 bytes; 16384 x 120 is 15.7 MB.
+const uint64_t kMaxBuildSamples = 16384;
+
+// Ceiling on everything this canceller allocates on the device. Not a
+// hardware limit -- the Nano has about 2900 MB of true headroom -- but a
+// policy ceiling that sits above the whole useful parameter range and below
+// where the board starts reclaiming page cache and swapping to zram. It
+// exists to turn a mistyped ECA_UPDATE_INTERVAL_s into a named error rather
+// than a thrashing live run. See docs/design_decisions.md 1d.10 for the
+// measurements. ECA-S at the shipped settings uses 114 MB of it.
+const size_t kMaxDeviceBytes = 512u * 1024u * 1024u;
 
 // cuComplex and cufftComplex are the same type (cufft.h typedefs one to the
 // other), so buffers allocated here will feed the CAF stage with no
@@ -120,6 +158,73 @@ __global__ void buildSubspaceKernel(const DeviceComplex* pcRef,
         c = pcRef[uAbs - k];
 
     pcR[uIdx] = c;
+}
+
+// ---------------------------------------------------------------------------
+// Kernel 1b: share the chunk Grams out among the windows. ECA-S only.
+//
+// Window w's Gram is the sum of the M chunk Grams its estimation window
+// spans, starting at chunk a = clamp(w - (M-1)/2, 0, C - M). That is exactly
+// what dsiEstimationStart() computes in samples; repeating it here in chunks
+// rather than passing an index array keeps one rule in two places that cannot
+// drift, because the host asserts the two agree (see cancel()).
+//
+// Only the LOWER TRIANGLE is summed: cherk fills only that and potrfBatched
+// with FILL_MODE_LOWER reads only that, so the upper half is never
+// meaningful. The kernel is bound by reading the chunk Grams M times over, so
+// skipping it halves the runtime.
+//
+// The right-hand sides ride on the threads that land on the diagonal, which
+// saves a second launch and costs nothing -- there are K of them against K^2.
+// ---------------------------------------------------------------------------
+__global__ void accumulateWindowsKernel(const DeviceComplex* pcChunkGram,
+                                        const DeviceComplex* pcChunkRhs,
+                                        DeviceComplex* pcGram,
+                                        DeviceComplex* pcRhs,
+                                        uint32_t uTaps, uint32_t uWindows,
+                                        uint32_t uSpan)
+{
+    const uint32_t uIdx  = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t uEach = uTaps * uTaps;
+    if (uIdx >= uWindows * uEach)
+        return;
+
+    const uint32_t w = uIdx / uEach;
+    const uint32_t e = uIdx % uEach;
+    // Column-major, as cuBLAS left it: entry (i, j) sits at i + j * K.
+    const uint32_t i = e % uTaps;
+    const uint32_t j = e / uTaps;
+    if (j > i)
+        return;
+
+    // The chunk count equals the window count: the chunk length IS the
+    // update window length.
+    const uint32_t uBack = (uSpan - 1) / 2;
+    uint32_t a = (w > uBack) ? (w - uBack) : 0;
+    if (a + uSpan > uWindows)
+        a = uWindows - uSpan;
+
+    float fRe = 0.0f;
+    float fIm = 0.0f;
+    for (uint32_t m = 0; m < uSpan; ++m) {
+        const DeviceComplex c =
+            pcChunkGram[static_cast<size_t>(a + m) * uEach + e];
+        fRe += c.x;
+        fIm += c.y;
+    }
+    pcGram[static_cast<size_t>(w) * uEach + e] = make_cuComplex(fRe, fIm);
+
+    if (i == j) {
+        float fVr = 0.0f;
+        float fVi = 0.0f;
+        for (uint32_t m = 0; m < uSpan; ++m) {
+            const DeviceComplex c =
+                pcChunkRhs[static_cast<size_t>(a + m) * uTaps + i];
+            fVr += c.x;
+            fVi += c.y;
+        }
+        pcRhs[static_cast<size_t>(w) * uTaps + i] = make_cuComplex(fVr, fVi);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -225,7 +330,8 @@ private:
     uint64_t           muWindows      = 0;   // update windows per CPI
     uint64_t           muWindowSamples= 0;   // T_S, one set of weights applied
     uint64_t           muEstimateSamples = 0;// T_A, one Gram summed over
-    uint64_t           muChunkSamples = 0;
+    uint64_t           muSpan         = 0;   // M = T_A / T_S, chunks per estimate
+    uint64_t           muBuildSamples = 0;   // rows of R built per cuBLAS call
 
     cublasHandle_t     mhCublas       = nullptr;
     cusolverDnHandle_t mhCusolver     = nullptr;
@@ -233,9 +339,12 @@ private:
     DeviceComplex*     md_cRef        = nullptr;   // CPI samples, reference
     DeviceComplex*     md_cSur        = nullptr;   // CPI samples, surveillance
     DeviceComplex*     md_cOut        = nullptr;   // cleaned surveillance
-    DeviceComplex*     md_cSubspace   = nullptr;   // one chunk of R
+    DeviceComplex*     md_cSubspace   = nullptr;   // one slice of R
     DeviceComplex*     md_cGram       = nullptr;   // windows x K x K
     DeviceComplex*     md_cWeights    = nullptr;   // windows x K (RHS, then w)
+    // ECA-S only; null when M == 1, where the chunk IS the window.
+    DeviceComplex*     md_cChunkGram  = nullptr;   // chunks x K x K
+    DeviceComplex*     md_cChunkRhs   = nullptr;   // chunks x K
     DeviceComplex**    md_ppGram      = nullptr;   // pointer array for cuSOLVER
     DeviceComplex**    md_ppWeights   = nullptr;
     int*               md_piInfo      = nullptr;
@@ -262,6 +371,8 @@ void EcaGpu::release()
     if (md_cSubspace) cudaFree(md_cSubspace);
     if (md_cGram)     cudaFree(md_cGram);
     if (md_cWeights)  cudaFree(md_cWeights);
+    if (md_cChunkGram) cudaFree(md_cChunkGram);
+    if (md_cChunkRhs)  cudaFree(md_cChunkRhs);
     if (md_ppGram)    cudaFree(md_ppGram);
     if (md_ppWeights) cudaFree(md_ppWeights);
     if (md_piInfo)    cudaFree(md_piInfo);
@@ -269,6 +380,7 @@ void EcaGpu::release()
     if (mhCusolver)   cusolverDnDestroy(mhCusolver);
 
     md_cRef = md_cSur = md_cOut = md_cSubspace = md_cGram = md_cWeights = nullptr;
+    md_cChunkGram = md_cChunkRhs = nullptr;
     md_ppGram = md_ppWeights = nullptr;
     md_piInfo = nullptr;
     mhCublas  = nullptr;
@@ -306,6 +418,10 @@ bool EcaGpu::init(const DSIParams& oParams)
           "the estimation window cannot be longer than the CPI");
     CHECK(oParams.uCpiSamples % oParams.uUpdateSamples == 0,
           "the update window must divide the CPI exactly");
+    // The chunk sharing below needs the estimation window to be a whole
+    // number of update windows.
+    CHECK(oParams.uEstimateSamples % oParams.uUpdateSamples == 0,
+          "the update window must divide the estimation window exactly");
     CHECK(oParams.uEstimateSamples > oParams.uClutterTaps,
           "the estimation window must hold more samples than there are taps "
           "to solve for");
@@ -321,17 +437,44 @@ bool EcaGpu::init(const DSIParams& oParams)
     muWindowSamples   = oParams.uUpdateSamples;
     muEstimateSamples = oParams.uEstimateSamples;
     muWindows         = oParams.uCpiSamples / oParams.uUpdateSamples;
-    // The chunk buffer only ever holds a slice of an estimation window.
-    muChunkSamples    = (muEstimateSamples < kMaxChunkSamples) ? muEstimateSamples
-                                                               : kMaxChunkSamples;
+    muSpan            = oParams.uEstimateSamples / oParams.uUpdateSamples;
+    // A chunk is one update window long; the build buffer holds a slice of one.
+    muBuildSamples    = (muWindowSamples < kMaxBuildSamples) ? muWindowSamples
+                                                             : kMaxBuildSamples;
 
     CUBLAS_CHECK(cublasCreate(&mhCublas));
     CUSOLVER_CHECK(cusolverDnCreate(&mhCusolver));
 
     const size_t uCpiBytes  = static_cast<size_t>(oParams.uCpiSamples) * sizeof(DeviceComplex);
-    const size_t uSubBytes  = static_cast<size_t>(muChunkSamples * muTaps) * sizeof(DeviceComplex);
+    const size_t uSubBytes  = static_cast<size_t>(muBuildSamples * muTaps) * sizeof(DeviceComplex);
     const size_t uGramBytes = static_cast<size_t>(muWindows * muTaps * muTaps) * sizeof(DeviceComplex);
     const size_t uWBytes    = static_cast<size_t>(muWindows * muTaps) * sizeof(DeviceComplex);
+    // ECA-S alone needs somewhere to put the per-chunk Grams. With M == 1 the
+    // chunk is the window, so cherk writes straight into md_cGram and these
+    // are never allocated.
+    const bool   bShared    = (muSpan > 1);
+    const size_t uChunkGramBytes = bShared ? uGramBytes : 0;
+    const size_t uChunkRhsBytes  = bShared ? uWBytes    : 0;
+
+    // Refuse a footprint that would push the board into zram rather than
+    // failing cleanly. The arithmetic is dominated by the two Gram arrays,
+    // which grow as 1 / T_S.
+    {
+        const size_t uTotal = 3 * uCpiBytes + uSubBytes + uGramBytes + uWBytes +
+                              uChunkGramBytes + uChunkRhsBytes +
+                              static_cast<size_t>(muWindows) *
+                                  (2 * sizeof(DeviceComplex*) + sizeof(int));
+        char achMsg[256];
+        std::snprintf(achMsg, sizeof(achMsg),
+                      "this configuration needs %.0f MB of device memory, over "
+                      "the %.0f MB ceiling: %llu windows x %llu taps. Lengthen "
+                      "ECA_UPDATE_INTERVAL_s.",
+                      double(uTotal) / 1048576.0,
+                      double(kMaxDeviceBytes) / 1048576.0,
+                      static_cast<unsigned long long>(muWindows),
+                      static_cast<unsigned long long>(muTaps));
+        CHECK(uTotal <= kMaxDeviceBytes, achMsg);
+    }
 
     // Every allocation happens here and is reused for the life of the object.
     // Nothing allocates inside cancel(), or the benchmark would be timing
@@ -342,9 +485,29 @@ bool EcaGpu::init(const DSIParams& oParams)
     CUDA_CHECK(cudaMalloc(&md_cSubspace, uSubBytes));
     CUDA_CHECK(cudaMalloc(&md_cGram,     uGramBytes));
     CUDA_CHECK(cudaMalloc(&md_cWeights,  uWBytes));
+    if (bShared) {
+        CUDA_CHECK(cudaMalloc(&md_cChunkGram, uChunkGramBytes));
+        CUDA_CHECK(cudaMalloc(&md_cChunkRhs,  uChunkRhsBytes));
+    }
     CUDA_CHECK(cudaMalloc(&md_ppGram,    static_cast<size_t>(muWindows) * sizeof(DeviceComplex*)));
     CUDA_CHECK(cudaMalloc(&md_ppWeights, static_cast<size_t>(muWindows) * sizeof(DeviceComplex*)));
     CUDA_CHECK(cudaMalloc(&md_piInfo,    static_cast<size_t>(muWindows) * sizeof(int)));
+
+    // accumulateWindowsKernel recomputes each window's first chunk itself,
+    // in chunks, where dsiEstimationStart() works in samples. They are the
+    // same arithmetic and must stay that way -- a divergence would silently
+    // estimate from the wrong samples, and no output check would name the
+    // cause. Verified here, once, rather than in the timed path.
+    for (uint64_t w = 0; w < muWindows; ++w) {
+        const uint64_t uBack = (muSpan - 1) / 2;
+        uint64_t a = (w > uBack) ? (w - uBack) : 0;
+        if (a + muSpan > muWindows)
+            a = muWindows - muSpan;
+        CHECK(a * muWindowSamples ==
+                  dsiEstimationStart(w * muWindowSamples, muWindowSamples,
+                                     muEstimateSamples, oParams.uCpiSamples),
+              "the device window rule disagrees with dsiEstimationStart");
+    }
 
     // cuSOLVER's batched routines take an array of pointers, one per problem.
     // The pointers never change, so they are built once here rather than on
@@ -400,21 +563,21 @@ bool EcaGpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
     const float     fOne  = 1.0f;
     const float     fZero = 0.0f;
 
-    for (uint64_t b = 0; b < muWindows; ++b) {
-        // The samples the weights for window b are estimated from. Equal to
-        // the update window for ECA-m and ECA-B; longer, centred and clamped
-        // at the CPI edges for ECA-S. Same function as the CPU backend, so
-        // the two cannot disagree about the edges.
-        const uint64_t uEstStart = dsiEstimationStart(b * muWindowSamples,
-                                                      muWindowSamples,
-                                                      muEstimateSamples,
-                                                      moParams.uCpiSamples);
+    // One Gram per CHUNK of T_S samples. There are exactly muWindows of them,
+    // because a chunk is one update window long. With M == 1 these are the
+    // window Grams already and nothing more is needed; with M > 1 they are
+    // shared out by accumulateWindowsKernel below.
+    DeviceComplex* const pcGramDst = (muSpan > 1) ? md_cChunkGram : md_cGram;
+    DeviceComplex* const pcRhsDst  = (muSpan > 1) ? md_cChunkRhs  : md_cWeights;
 
-        for (uint64_t uOffset = 0; uOffset < muEstimateSamples; uOffset += muChunkSamples) {
-            const uint64_t uRows = (uOffset + muChunkSamples <= muEstimateSamples)
-                                 ? muChunkSamples
-                                 : (muEstimateSamples - uOffset);
-            const uint64_t uStart = uEstStart + uOffset;
+    for (uint64_t c = 0; c < muWindows; ++c) {
+        const uint64_t uChunkStart = c * muWindowSamples;
+
+        for (uint64_t uOffset = 0; uOffset < muWindowSamples; uOffset += muBuildSamples) {
+            const uint64_t uRows = (uOffset + muBuildSamples <= muWindowSamples)
+                                 ? muBuildSamples
+                                 : (muWindowSamples - uOffset);
+            const uint64_t uStart = uChunkStart + uOffset;
             const bool     bFirst = (uOffset == 0);
 
             const uint32_t uBlock = 256;
@@ -423,25 +586,36 @@ bool EcaGpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
                 static_cast<uint32_t>(uRows), static_cast<uint32_t>(muTaps));
             CUDA_CHECK(cudaGetLastError());
 
-            // G += R^H R over this chunk. cherk knows the result is Hermitian
+            // G += R^H R over this slice. cherk knows the result is Hermitian
             // and fills only the lower triangle, which is the same halving of
             // the work the CPU version does by hand. beta = 1 after the first
-            // chunk is what lets a long window be summed piece by piece.
+            // slice is what lets a long chunk be summed piece by piece.
             CUBLAS_CHECK(cublasCherk(mhCublas,
                                      CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_C,
                                      iTaps, static_cast<int>(uRows),
                                      &fOne, md_cSubspace, static_cast<int>(uRows),
                                      bFirst ? &fZero : &fOne,
-                                     md_cGram + b * muTaps * muTaps, iTaps));
+                                     pcGramDst + c * muTaps * muTaps, iTaps));
 
-            // v += R^H s over this chunk.
+            // v += R^H s over this slice.
             CUBLAS_CHECK(cublasCgemv(mhCublas, CUBLAS_OP_C,
                                      static_cast<int>(uRows), iTaps,
                                      &cOne, md_cSubspace, static_cast<int>(uRows),
                                      md_cSur + uStart, 1,
                                      bFirst ? &cZero : &cOne,
-                                     md_cWeights + b * muTaps, 1));
+                                     pcRhsDst + c * muTaps, 1));
         }
+    }
+
+    // ---- share the chunks out among the windows (ECA-S only) --------------
+    if (muSpan > 1) {
+        const uint32_t uBlock = 256;
+        accumulateWindowsKernel<<<blocksFor(muWindows * muTaps * muTaps, uBlock),
+                                  uBlock>>>(
+            md_cChunkGram, md_cChunkRhs, md_cGram, md_cWeights,
+            static_cast<uint32_t>(muTaps), static_cast<uint32_t>(muWindows),
+            static_cast<uint32_t>(muSpan));
+        CUDA_CHECK(cudaGetLastError());
     }
 
     // ---- diagonal loading --------------------------------------------------

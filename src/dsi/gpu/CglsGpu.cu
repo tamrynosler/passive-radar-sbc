@@ -301,18 +301,15 @@ bool CglsGpu::init(const DSIParams& oParams)
     CHECK(oParams.eAlgorithm == DSIAlgorithm::Cgls, "CglsGpu handles CGLS only");
     CHECK(oParams.uCpiSamples > 0, "CPI length must be non-zero");
     CHECK(oParams.uClutterTaps > 0, "clutter taps must be non-zero");
-    CHECK(oParams.uUpdateSamples > 0, "the update window must be non-zero");
+    CHECK(oParams.uCglsBatchSamples > 0, "the CGLS batch must be non-zero");
     CHECK(oParams.uMaxIterations > 0, "CGLS needs at least one iteration");
     CHECK(oParams.uDopplerTaps == 0,
           "ECA_DOPPLER_TAPS > 0 is not implemented; the clutter subspace is "
           "delay-only for now");
-    CHECK(oParams.uEstimateSamples == oParams.uUpdateSamples,
-          "CGLS estimates from the window it applies to; the estimation and "
-          "update windows must be equal");
-    CHECK(oParams.uCpiSamples % oParams.uUpdateSamples == 0,
-          "the update window must divide the CPI exactly");
-    CHECK(oParams.uUpdateSamples > oParams.uClutterTaps,
-          "the window must hold more samples than there are taps to solve for");
+    CHECK(oParams.uCpiSamples % oParams.uCglsBatchSamples == 0,
+          "the CGLS batch must divide the CPI exactly");
+    CHECK(oParams.uCglsBatchSamples > oParams.uClutterTaps,
+          "the CGLS batch must hold more samples than there are taps to solve for");
     CHECK(oParams.uClutterTaps <= kBlock,
           "the GPU adjoint kernel gives one thread per tap and has 256 threads");
     CHECK(oParams.uCpiSamples <= 2147483647ULL,
@@ -320,8 +317,8 @@ bool CglsGpu::init(const DSIParams& oParams)
 
     moParams        = oParams;
     muTaps          = oParams.uClutterTaps;
-    muWindowSamples = oParams.uUpdateSamples;
-    muWindows       = oParams.uCpiSamples / oParams.uUpdateSamples;
+    muWindowSamples = oParams.uCglsBatchSamples;
+    muWindows       = oParams.uCpiSamples / oParams.uCglsBatchSamples;
 
     CUBLAS_CHECK(cublasCreate(&mhCublas));
 

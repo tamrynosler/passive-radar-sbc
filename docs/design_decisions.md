@@ -468,6 +468,9 @@ Neither is implemented. The direct form is the correctness reference and has to
 be right before it is fast, and both are legitimate separate benchmark rows
 later rather than silent optimisations now.
 
+The exact 60x saving is partly taken up for ECA-S in §1d.9. The Toeplitz/FFT
+route remains unimplemented.
+
 ### 1d.8 Benchmark isolation
 
 Timing the canceller inside the live pipeline would measure the socket, the
@@ -485,6 +488,88 @@ should not.
 The same frozen CPI is what the MATLAB golden-file check will read, so both
 sides start from identical samples and the unresolved `.h5` amplitude scaling
 (§5.2, and `PLAN.md`) is out of the critical path entirely.
+
+### 1d.9 ECA-S: shared chunk Grams, and the half-chunk window quantisation
+
+ECA-S estimates each update window's weights from a longer window centred on
+it, so consecutive estimation windows overlap by (T_A - T_S)/T_A -- 90% at the
+shipped 25 ms / 2.5 ms. Summing each one from scratch recomputes nearly every
+product M = T_A/T_S times, measured at **1460 ms per CPI against ECA-B's 155**.
+
+The fix is to cut the CPI into chunks of T_S, compute one Gram per chunk (total
+sample-work then exactly equal to ECA-B's), and build each window's Gram by
+adding the M chunk Grams it spans.
+
+**Not** Colone's recursive slide (`G_{w+1} = G_w - leaving + entering`). That
+reads two chunks per window instead of M, but it serialises the windows and
+accumulates add/subtract rounding across all 400 steps in FP32, which then
+needs periodic re-anchoring to bound. Summing M chunks is fully parallel, has
+no drift, and is if anything slightly more accurate than the direct form, since
+M partial sums combined pairwise beat one serial sum over T_A. The extra reads
+cost ~12 ms against a Gram of ~143 ms. If that ever matters the recursion is
+the fallback.
+
+**The consequence, accepted deliberately (author, 2026-09-21):** chunk Grams
+can only be shared if every estimation window starts on a chunk boundary, so
+`dsiEstimationStart()` quantises the start to a multiple of T_S. When M is
+even there is no chunk boundary at the centre of the update window, so the
+estimation window sits **T_S/2 off-centre** -- 256 samples in 5120 at the
+shipped settings, a 5% asymmetry. M odd centres exactly. The alternative,
+exact centring with two partial chunks per window, gives back most of the
+saving. The asymmetry has no physical meaning: it shifts which 5% of a 25 ms
+stationarity window the weights favour.
+
+M = 1 returns the update window itself, so **ECA-m and ECA-B are unaffected**,
+bit for bit. That is asserted in `tests/test_eca.cpp` rather than argued.
+
+The CPU backend stays direct. It sums the estimation window in one go while
+the GPU sums it in M pieces, so the existing GPU-vs-CPU agreement test checks
+the chunk grouping independently instead of comparing an implementation with
+itself.
+
+### 1d.10 Device memory budget on the Nano, measured 2026-09-21
+
+The chunk Grams cost `C x K^2 x 8` bytes where `C = CPI/T_S`, so the footprint
+scales as 1/T_S and a mistyped T_S could ask for gigabytes. What ceiling is
+defensible? Measured on the board:
+
+| | MB |
+|---|---|
+| Total RAM, shared CPU+GPU | 3963 |
+| OS and daemons at idle | 268 |
+| Page cache (reclaimable) | 3451 |
+| MemAvailable | 3611 |
+| zram swap, 4 x 495 MB compressed | 1981 |
+| `pbr_run` peak RSS, ECA-B **or** ECA-S | 788 |
+| Largest single `cudaMalloc` that succeeds | 2988 |
+| `cudaMemGetInfo` free | 234 |
+
+Three findings that set the policy:
+
+1. **The CUDA context dominates.** ECA-B and ECA-S measured the *same* 788 MB
+   peak RSS despite a 10x difference in Gram array size. Roughly 780 MB of
+   that is context and runtime; our arrays are in the noise.
+2. **`cudaMemGetInfo` is useless as a budget here.** It reports 234 MB free
+   while a 2988 MB allocation succeeds, because the kernel evicts page cache
+   under pressure. An init-time check against it would wrongly refuse every
+   configuration.
+3. **There is swap, and it is the real hazard.** 1981 MB of zram means a large
+   allocation does not fail, it thrashes -- which during a live run means
+   missed CPIs rather than a clean error. So the guard must be a policy
+   ceiling, not an out-of-memory test.
+
+True headroom is therefore about 3963 - 268 - 788 = **2900 MB**.
+
+The cap is set at **512 MB for the canceller's total device allocation**, which
+is not a hardware limit -- anything from 256 MB to 1.5 GB would be safe -- but
+is chosen because it sits comfortably above the entire physically useful
+parameter range and comfortably below where the system starts reclaiming
+aggressively. At K = 120 it permits T_S down to 0.45 ms, while the useful range
+is 1-5 ms: T_S must be under 5 ms to put the 1/T_S comb outside the +-200 Hz
+shown, and well above the 0.6 ms clutter delay spread for the estimate to mean
+anything. The guard therefore never fires in legitimate use; it exists to turn
+a config typo into a named error instead of a thrash. ECA-S at the shipped
+settings allocates 114 MB of the 512.
 
 ---
 

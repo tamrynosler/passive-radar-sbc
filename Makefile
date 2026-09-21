@@ -85,9 +85,17 @@ run:
 	@ssh -t $(JETSON) 'cd $(REMOTE) && bash scripts/run_live.sh $(ARGS)'
 
 ## replay: run the recorded capture through the whole chain on the Jetson.
+##         Each run gets its own directory named after the algorithm and the
+##         time, with a copy of the config beside it, so runs of different
+##         algorithms can be pulled back and compared side by side.
 replay:
-	@ssh $(JETSON) 'cd $(REMOTE) && ./build/pbr_run \
-	    --file data/fers_capture.pbrcap --out /data/results/replay'
+	@ssh $(JETSON) 'cd $(REMOTE) && \
+	    A=$$(sed -n "s/^DSI_ALGORITHM *= *//p" config/prb.conf) && \
+	    OUT=/data/results/replay_$${A}_$$(date +%Y%m%d_%H%M%S) && \
+	    mkdir -p $$OUT && cp config/prb.conf $$OUT/prb.conf && \
+	    echo "output: $$OUT" && \
+	    ./build/pbr_run --file data/fers_capture.pbrcap --out $$OUT $(ARGS) \
+	        | tee $$OUT/run.log'
 
 ## verify: every golden-file check. Run after changing src/dsi or src/ard.
 verify:
@@ -103,9 +111,20 @@ bench:
 	@$(MAKE) pull
 
 ## pull: copy everything under the Jetson's /data/results to ./results.
+##
+##       Incremental: rsync skips what is already here, so the cost is the
+##       size of the NEW runs, not of the archive. The scp this replaced
+##       re-copied every byte of every past run on every invocation, which is
+##       why it grew slower with each run.
+##
+##       No --delete: removing a run on the board must not silently remove
+##       the local copy. Prune the two sides independently.
+##       --stats, not --info=stats1: macOS now ships openrsync, which speaks
+##       protocol 29 and does not know the newer flag.
 pull:
 	@mkdir -p results
-	@-scp -qr '$(JETSON):/data/results/*' results/ 2>/dev/null || true
+	@rsync -a --stats '$(JETSON):/data/results/' results/ \
+	    | grep -E "Number of files transferred|Total transferred file size|^sent" || true
 	@echo "results in ./results"
 
 shell:

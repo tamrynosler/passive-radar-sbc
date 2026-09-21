@@ -126,6 +126,7 @@ bool dsiParamsFromConfig(const PbrConfig& oConfig, DSIParams& oParams)
     oParams.uDopplerTaps     = oConfig.uEcaDopplerTaps;
     oParams.dDiagonalLoading = oConfig.dEcaDiagLoading;
     oParams.uMaxIterations   = oConfig.uCglsIterations;
+    oParams.uCglsBatchSamples= oConfig.uCglsBatchSamples;
     oParams.bCglsPrime       = oConfig.bCglsPrime;
     oParams.uCdBatchSamples  = oConfig.uCdBatchSamples;
     oParams.uCdDopplerTaps   = oConfig.uCdDopplerTaps;
@@ -153,16 +154,22 @@ bool dsiParamsFromConfig(const PbrConfig& oConfig, DSIParams& oParams)
 uint64_t dsiEstimationStart(uint64_t uUpdateStart, uint64_t uUpdateSamples,
                             uint64_t uEstimateSamples, uint64_t uCpiSamples)
 {
-    // Centre of the update window, then back by half the estimation window.
-    // Unsigned arithmetic, so the subtraction is guarded rather than allowed
-    // to wrap.
-    const uint64_t uCentre = uUpdateStart + uUpdateSamples / 2;
-    const uint64_t uHalf   = uEstimateSamples / 2;
+    // Everything in units of the update window, which is also the chunk the
+    // GPU shares its partial Grams at. Working in chunks rather than samples
+    // is what makes the result land on a chunk boundary by construction.
+    const uint64_t w = uUpdateStart / uUpdateSamples;      // this update window
+    const uint64_t M = uEstimateSamples / uUpdateSamples;  // chunks per estimate
+    const uint64_t C = uCpiSamples / uUpdateSamples;       // chunks per CPI
 
-    uint64_t uStart = (uCentre > uHalf) ? (uCentre - uHalf) : 0;
-    if (uStart + uEstimateSamples > uCpiSamples)
-        uStart = uCpiSamples - uEstimateSamples;
-    return uStart;
+    // Step back half the estimation window, rounding towards the start so an
+    // even M leans early rather than late. Unsigned, so the subtraction is
+    // guarded rather than allowed to wrap.
+    const uint64_t uBack = (M - 1) / 2;
+    uint64_t a = (w > uBack) ? (w - uBack) : 0;
+    if (a + M > C)
+        a = C - M;
+
+    return a * uUpdateSamples;
 }
 
 } // namespace pbr

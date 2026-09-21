@@ -58,6 +58,7 @@ struct PbrConfig {
     uint64_t    uCdDopplerTaps     = 0;     // ECA-CD P; subspace is 2P+1 wide
     uint64_t    uArdSnapshotEvery  = 0;     // 1 = every CPI
     uint64_t    uCglsIterations    = 0;
+    double      dCglsBatchSeconds  = 0.0;   // CGLS window, independent of ECA's
     bool        bCglsPrime         = false; // start from the previous CPI's weights
 
     // ---- detection -------------------------------------------------------
@@ -75,6 +76,7 @@ struct PbrConfig {
     uint64_t    uEcaEstimateSamples= 0;   // round(dEcaBatchSeconds * fs)
     uint64_t    uEcaUpdateSamples  = 0;   // round(dEcaUpdateSeconds * fs)
     uint64_t    uCdBatchSamples    = 0;   // round(dCdBatchSeconds * fs)
+    uint64_t    uCglsBatchSamples  = 0;   // round(dCglsBatchSeconds * fs)
 };
 
 // Load and validate a config file.

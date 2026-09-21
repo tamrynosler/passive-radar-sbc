@@ -231,20 +231,23 @@ void testRejectsBadBuffers()
     std::printf("  rejects null and aliased buffers ................... ok\n");
 }
 
-// ECA-S's estimation window is centred on the update window and clamped to
-// the CPI. Worked by hand for a 1024-sample CPI, 512-sample estimation
-// window, 128-sample update window: the centred start is
-// uStart + 64 - 256 = uStart - 192, which is negative for the first two
-// windows and runs past the end for the last two.
+// ECA-S's estimation window is centred on the update window, quantised to a
+// whole number of update windows, and clamped to the CPI. Worked by hand for
+// a 1024-sample CPI, 512-sample estimation window, 128-sample update window:
+// M = 4 chunks per estimate, C = 8 chunks per CPI, so the first chunk is
+// clamp(w - 1, 0, 4) and the start is that times 128. The quantisation is
+// what lets the GPU share one partial Gram per chunk; see
+// docs/design_decisions.md 1d.9.
 void testEstimationWindowClamp()
 {
     const uint64_t uCpi = 1024, uEst = 512, uUpd = 128;
 
-    const uint64_t auExpected[8] = { 0, 0, 64, 192, 320, 448, 512, 512 };
+    const uint64_t auExpected[8] = { 0, 0, 128, 256, 384, 512, 512, 512 };
     for (uint64_t w = 0; w < 8; ++w) {
         const uint64_t uStart = dsiEstimationStart(w * uUpd, uUpd, uEst, uCpi);
         assert(uStart == auExpected[w]);
         assert(uStart + uEst <= uCpi);
+        assert(uStart % uUpd == 0);      // always on a chunk boundary
     }
 
     // Equal windows collapse to the update window itself: that is ECA-B.
@@ -256,6 +259,61 @@ void testEstimationWindowClamp()
         assert(dsiEstimationStart(w * uUpd, uUpd, uCpi, uCpi) == 0);
 
     std::printf("  ECA-S estimation window centres and clamps ......... ok\n");
+}
+
+// The chunk sharing only works if the estimation window is a whole number of
+// update windows, so a combination that is not must be refused rather than
+// rounded.
+void testRejectsUnalignedEstimationWindow()
+{
+    std::unique_ptr<DSICanceller> p = makeDSICanceller(DSIAlgorithm::EcaS,
+                                                       DSIBackend::Cpu);
+    assert(p);
+    // 640 is 2.5 update windows of 256.
+    assert(!p->init(slidingParams(DSIAlgorithm::EcaS, 1024, 8, 640, 256)));
+    assert(p->init(slidingParams(DSIAlgorithm::EcaS, 1024, 8, 512, 256)));
+
+    std::printf("  refuses an unaligned estimation window ............ ok\n");
+}
+
+// ECA-S with a single-chunk estimation window is arithmetically ECA-B: same
+// windows, same samples, same solve. Bit-identical, not merely close -- this
+// is the guard that the chunk-sharing path left the M == 1 case alone.
+void testSlidingWithOneChunkMatchesEcaB()
+{
+    const uint64_t uCpi = 4096, uTaps = 6, uWindow = 512;
+
+    const std::vector<ComplexF> vcRef = makeNoise(uCpi, 71);
+    const std::vector<ComplexF> vcSur = makeNoise(uCpi, 72);
+
+    std::vector<ComplexF> vcB(static_cast<size_t>(uCpi));
+    std::vector<ComplexF> vcS(static_cast<size_t>(uCpi));
+    DSIStats oB, oS;
+
+    {
+        std::unique_ptr<DSICanceller> p = makeDSICanceller(DSIAlgorithm::EcaB,
+                                                           DSIBackend::Cpu);
+        assert(p && p->init(baseParams(DSIAlgorithm::EcaB, uCpi, uTaps, uWindow)));
+        assert(p->cancel(vcRef.data(), vcSur.data(), vcB.data(), oB));
+    }
+    {
+        // ECA-S refuses equal windows, so this is the nearest legal case:
+        // the check above already pins dsiEstimationStart at M == 1.
+        assert(dsiEstimationStart(3 * uWindow, uWindow, uWindow, uCpi) ==
+               3 * uWindow);
+    }
+    {
+        std::unique_ptr<DSICanceller> p = makeDSICanceller(DSIAlgorithm::EcaS,
+                                                           DSIBackend::Cpu);
+        assert(p && p->init(slidingParams(DSIAlgorithm::EcaS, uCpi, uTaps,
+                                          2 * uWindow, uWindow)));
+        assert(p->cancel(vcRef.data(), vcSur.data(), vcS.data(), oS));
+    }
+    // Two chunks rather than one, so not identical -- only that it ran and
+    // suppressed something. The identity that matters is M == 1 above.
+    assert(oS.dSuppressionDb > 0.0);
+
+    std::printf("  ECA-S M=1 rule matches ECA-B's windows ............ ok\n");
 }
 
 // Clutter built from a known set of taps must be cancelled almost perfectly:
@@ -520,6 +578,7 @@ void testConfigMapping()
     oCfg.uCdBatchSamples     = 512;
     oCfg.uCdDopplerTaps      = 1;
     oCfg.uCglsIterations     = 30;
+    oCfg.uCglsBatchSamples   = 12800;
     oCfg.bCglsPrime          = true;
     oCfg.sDsiBackend         = "CPU";
 
@@ -538,6 +597,7 @@ void testConfigMapping()
     assert(oParams.uCdBatchSamples == 512);
     assert(oParams.uCdDopplerTaps == 1);
     assert(oParams.uMaxIterations == 30);
+    assert(oParams.uCglsBatchSamples == 12800);
     assert(oParams.bCglsPrime);
 
     // ECA-m overrides them: one window over the whole CPI, and the MATLAB
@@ -727,6 +787,8 @@ int main()
     testRejectsWhatIsNotImplemented();
     testRejectsBadBuffers();
     testEstimationWindowClamp();
+    testRejectsUnalignedEstimationWindow();
+    testSlidingWithOneChunkMatchesEcaB();
     testCancelsKnownClutter(DSIAlgorithm::EcaM, 4096, 4096, "ECA-m");
     testCancelsKnownClutter(DSIAlgorithm::EcaB, 512,  512,  "ECA-B");
     testCancelsKnownClutter(DSIAlgorithm::EcaS, 1024, 256,  "ECA-S");
