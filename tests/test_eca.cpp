@@ -1,4 +1,4 @@
-// Unit tests for the CPU ECA cancellers (ECA-m and ECA-B).
+// Unit tests for the ECA cancellers (ECA-m, ECA-B and ECA-S).
 //
 // The golden-file comparison against MATLAB is a separate, larger check that
 // needs a real captured CPI. These tests cover what can be checked with
@@ -7,7 +7,11 @@
 //   * clutter built from a known set of taps is cancelled essentially to zero
 //   * a target outside the cancelled delay range survives
 //   * batching beats a single solve when the clutter changes during the CPI
+//   * ECA-S's estimation window lands where it should, including at the edges
 //   * every parameter that is not implemented is refused, not ignored
+//
+// The CPU runs in FP32 throughout, so every figure here is comparable with
+// the GPU, which has no other option.
 
 #include "pbr/Config.hpp"
 #include "pbr/DSICanceller.hpp"
@@ -82,20 +86,29 @@ double totalPower(const std::vector<ComplexF>& vc)
     return d;
 }
 
-DSIParams baseParams(DSIAlgorithm eAlgorithm, uint64_t uCpi, uint64_t uTaps,
-                     uint64_t uWindow)
+// Estimation and update windows given separately: ECA-S.
+DSIParams slidingParams(DSIAlgorithm eAlgorithm, uint64_t uCpi, uint64_t uTaps,
+                        uint64_t uEstimate, uint64_t uUpdate)
 {
     DSIParams o;
     o.eAlgorithm       = eAlgorithm;
     o.eBackend         = DSIBackend::Cpu;
     o.uCpiSamples      = uCpi;
     o.uClutterTaps     = uTaps;
-    o.uEstimateSamples = uWindow;
-    o.uUpdateSamples   = uWindow;
+    o.uEstimateSamples = uEstimate;
+    o.uUpdateSamples   = uUpdate;
     o.uDopplerTaps     = 0;
     o.dDiagonalLoading = 0.0;
     o.bAbsoluteLoading = false;
+    o.bFloat32Math     = true;
     return o;
+}
+
+// One window for both: ECA-m and ECA-B.
+DSIParams baseParams(DSIAlgorithm eAlgorithm, uint64_t uCpi, uint64_t uTaps,
+                     uint64_t uWindow)
+{
+    return slidingParams(eAlgorithm, uCpi, uTaps, uWindow, uWindow);
 }
 
 // ---------------------------------------------------------------------------
@@ -145,12 +158,6 @@ void testRngIsUsable()
 
 void testRejectsWhatIsNotImplemented()
 {
-    // Algorithms that do not exist yet must fail at the factory, not quietly
-    // become something else.
-    assert(!makeDSICanceller(DSIAlgorithm::EcaS,  DSIBackend::Cpu));
-    assert(!makeDSICanceller(DSIAlgorithm::EcaCd, DSIBackend::Cpu));
-    assert(!makeDSICanceller(DSIAlgorithm::Cgls,  DSIBackend::Cpu));
-
 #if !defined(PBR_WITH_CUDA)
     // No CUDA in this build: asking for the GPU must fail rather than hand
     // back a CPU canceller that would be labelled GPU in the results.
@@ -166,10 +173,21 @@ void testRejectsWhatIsNotImplemented()
     o.uDopplerTaps = 1;
     assert(!p->init(o));
 
-    // An estimation window longer than the update window is ECA-S.
+    // An estimation window longer than the update window is ECA-S, and equal
+    // windows are ECA-B. Each name is refused the other's windows, so a
+    // benchmark row cannot carry the wrong label.
     o = baseParams(DSIAlgorithm::EcaB, 1024, 8, 256);
     o.uEstimateSamples = 512;
     assert(!p->init(o));
+    {
+        std::unique_ptr<DSICanceller> pS = makeDSICanceller(DSIAlgorithm::EcaS,
+                                                            DSIBackend::Cpu);
+        assert(pS);
+        assert(!pS->init(baseParams(DSIAlgorithm::EcaS, 1024, 8, 256)));
+        // Nor can the estimation window be longer than the CPI it is cut from.
+        assert(!pS->init(slidingParams(DSIAlgorithm::EcaS, 1024, 8, 2048, 256)));
+        assert(pS->init(slidingParams(DSIAlgorithm::EcaS, 1024, 8, 512, 256)));
+    }
 
     // A window that does not divide the CPI leaves a short trailing fragment.
     o = baseParams(DSIAlgorithm::EcaB, 1024, 8, 300);
@@ -213,10 +231,37 @@ void testRejectsBadBuffers()
     std::printf("  rejects null and aliased buffers ................... ok\n");
 }
 
+// ECA-S's estimation window is centred on the update window and clamped to
+// the CPI. Worked by hand for a 1024-sample CPI, 512-sample estimation
+// window, 128-sample update window: the centred start is
+// uStart + 64 - 256 = uStart - 192, which is negative for the first two
+// windows and runs past the end for the last two.
+void testEstimationWindowClamp()
+{
+    const uint64_t uCpi = 1024, uEst = 512, uUpd = 128;
+
+    const uint64_t auExpected[8] = { 0, 0, 64, 192, 320, 448, 512, 512 };
+    for (uint64_t w = 0; w < 8; ++w) {
+        const uint64_t uStart = dsiEstimationStart(w * uUpd, uUpd, uEst, uCpi);
+        assert(uStart == auExpected[w]);
+        assert(uStart + uEst <= uCpi);
+    }
+
+    // Equal windows collapse to the update window itself: that is ECA-B.
+    for (uint64_t w = 0; w < 8; ++w)
+        assert(dsiEstimationStart(w * uUpd, uUpd, uUpd, uCpi) == w * uUpd);
+
+    // An estimation window as long as the CPI always starts at zero.
+    for (uint64_t w = 0; w < 8; ++w)
+        assert(dsiEstimationStart(w * uUpd, uUpd, uCpi, uCpi) == 0);
+
+    std::printf("  ECA-S estimation window centres and clamps ......... ok\n");
+}
+
 // Clutter built from a known set of taps must be cancelled almost perfectly:
 // the answer is exactly in the subspace the canceller searches.
-void testCancelsKnownClutter(DSIAlgorithm eAlgorithm, uint64_t uWindow,
-                             const char* pLabel)
+void testCancelsKnownClutter(DSIAlgorithm eAlgorithm, uint64_t uEstimate,
+                             uint64_t uWindow, const char* pLabel)
 {
     const uint64_t uCpi  = 4096;
     const uint64_t uTaps = 8;
@@ -246,7 +291,7 @@ void testCancelsKnownClutter(DSIAlgorithm eAlgorithm, uint64_t uWindow,
     assert(p);
     // No loading: the problem is well posed, and loading would deliberately
     // leave some clutter behind.
-    assert(p->init(baseParams(eAlgorithm, uCpi, uTaps, uWindow)));
+    assert(p->init(slidingParams(eAlgorithm, uCpi, uTaps, uEstimate, uWindow)));
 
     std::vector<ComplexF> vcOut(static_cast<size_t>(uCpi));
     DSIStats oStats;
@@ -256,9 +301,48 @@ void testCancelsKnownClutter(DSIAlgorithm eAlgorithm, uint64_t uWindow,
     assert(oStats.dSuppressionDb > 60.0);
     assert(totalPower(vcOut) < 1e-6 * totalPower(vcSur));
 
-    std::printf("  %s cancels known clutter (%.1f dB) %s ok\n",
-                pLabel, oStats.dSuppressionDb,
-                (eAlgorithm == DSIAlgorithm::EcaM) ? "........." : ".........");
+    std::printf("  %s cancels known clutter (%.1f dB) ......... ok\n",
+                pLabel, oStats.dSuppressionDb);
+}
+
+// With an estimation window as long as the CPI, every ECA-S update window is
+// solved from the same samples, [0, N), so every window gets the same
+// weights -- the ones ECA-m computes. Applying one set of weights in four
+// pieces or in one piece is the same arithmetic, so the outputs must be
+// identical, not merely close. This pins the estimation-window plumbing
+// without needing a reference implementation of ECA-S.
+void testSlidingWithCpiLongEstimateMatchesEcaM()
+{
+    const uint64_t uCpi  = 2048;
+    const uint64_t uTaps = 6;
+
+    const std::vector<ComplexF> vcRef = makeNoise(uCpi, 61);
+    const std::vector<ComplexF> vcSur = makeNoise(uCpi, 62);
+
+    std::vector<ComplexF> vcOutM(static_cast<size_t>(uCpi));
+    std::vector<ComplexF> vcOutS(static_cast<size_t>(uCpi));
+    DSIStats oStatsM, oStatsS;
+
+    {
+        std::unique_ptr<DSICanceller> p = makeDSICanceller(DSIAlgorithm::EcaM,
+                                                           DSIBackend::Cpu);
+        assert(p && p->init(baseParams(DSIAlgorithm::EcaM, uCpi, uTaps, uCpi)));
+        assert(p->cancel(vcRef.data(), vcSur.data(), vcOutM.data(), oStatsM));
+    }
+    {
+        std::unique_ptr<DSICanceller> p = makeDSICanceller(DSIAlgorithm::EcaS,
+                                                           DSIBackend::Cpu);
+        assert(p && p->init(slidingParams(DSIAlgorithm::EcaS, uCpi, uTaps,
+                                          uCpi, uCpi / 4)));
+        assert(p->cancel(vcRef.data(), vcSur.data(), vcOutS.data(), oStatsS));
+    }
+
+    for (uint64_t n = 0; n < uCpi; ++n) {
+        assert(vcOutS[n].real() == vcOutM[n].real());
+        assert(vcOutS[n].imag() == vcOutM[n].imag());
+    }
+
+    std::printf("  ECA-S with a CPI-long estimate matches ECA-m ....... ok\n");
 }
 
 // A target beyond the last cancelled delay bin is outside the clutter
@@ -433,6 +517,10 @@ void testConfigMapping()
     oCfg.uEcaUpdateSamples   = 5120;
     oCfg.uEcaDopplerTaps     = 0;
     oCfg.dEcaDiagLoading     = 1e-6;
+    oCfg.uCdBatchSamples     = 512;
+    oCfg.uCdDopplerTaps      = 1;
+    oCfg.uCglsIterations     = 30;
+    oCfg.bCglsPrime          = true;
     oCfg.sDsiBackend         = "CPU";
 
     DSIParams oParams;
@@ -446,6 +534,11 @@ void testConfigMapping()
     assert(oParams.uUpdateSamples == 5120);
     assert(!oParams.bAbsoluteLoading);
     assert(oParams.dDiagonalLoading == 1e-6);
+    // The other algorithms' fields ride along unchanged.
+    assert(oParams.uCdBatchSamples == 512);
+    assert(oParams.uCdDopplerTaps == 1);
+    assert(oParams.uMaxIterations == 30);
+    assert(oParams.bCglsPrime);
 
     // ECA-m overrides them: one window over the whole CPI, and the MATLAB
     // reference's absolute loading rather than a relative fraction.
@@ -484,10 +577,10 @@ void testConfigMapping()
 bool runBackend(DSIAlgorithm eAlgorithm, DSIBackend eBackend, bool bFloat32,
                 const std::vector<ComplexF>& vcRef,
                 const std::vector<ComplexF>& vcSur,
-                uint64_t uTaps, uint64_t uWindow,
+                uint64_t uTaps, uint64_t uEstimate, uint64_t uWindow,
                 std::vector<ComplexF>& vcOut, DSIStats& oStats)
 {
-    DSIParams o = baseParams(eAlgorithm, vcRef.size(), uTaps, uWindow);
+    DSIParams o = slidingParams(eAlgorithm, vcRef.size(), uTaps, uEstimate, uWindow);
     o.eBackend     = eBackend;
     o.bFloat32Math = bFloat32;
 
@@ -532,9 +625,9 @@ void testGpuMatchesCpuWithoutAmplification()
     std::vector<ComplexF> vcCpu, vcGpu;
     DSIStats oCpu, oGpu;
     assert(runBackend(DSIAlgorithm::EcaB, DSIBackend::Cpu, true,
-                      vcRef, vcSur, uTaps, uWindow, vcCpu, oCpu));
+                      vcRef, vcSur, uTaps, uWindow, uWindow, vcCpu, oCpu));
     assert(runBackend(DSIAlgorithm::EcaB, DSIBackend::Gpu, true,
-                      vcRef, vcSur, uTaps, uWindow, vcGpu, oGpu));
+                      vcRef, vcSur, uTaps, uWindow, uWindow, vcGpu, oGpu));
 
     const double dRel = relativeL2(vcGpu, vcCpu);
     std::printf("  GPU vs CPU-FP32, no amplification: relL2 %.2e, "
@@ -550,6 +643,18 @@ void testGpuMatchesCpuWithoutAmplification()
     // to ~1e-2, because the suppression ratio amplifies the difference in
     // cuBLAS's summation order.
     assert(dRel < 1e-6);
+
+    // ECA-S: the estimation window is 4x the update window, so the first two
+    // and last two windows are clamped and the rest centred. An edge mistake
+    // in either backend's chunk loop would show up here.
+    assert(runBackend(DSIAlgorithm::EcaS, DSIBackend::Cpu, true,
+                      vcRef, vcSur, uTaps, 4 * uWindow, uWindow, vcCpu, oCpu));
+    assert(runBackend(DSIAlgorithm::EcaS, DSIBackend::Gpu, true,
+                      vcRef, vcSur, uTaps, 4 * uWindow, uWindow, vcGpu, oGpu));
+    const double dRelS = relativeL2(vcGpu, vcCpu);
+    std::printf("  GPU vs CPU-FP32, ECA-S:            relL2 %.2e, "
+                "suppression %.3f dB\n", dRelS, oCpu.dSuppressionDb);
+    assert(dRelS < 1e-6);
 }
 
 // Clutter built from known taps must still cancel enormously on the GPU. An
@@ -575,7 +680,7 @@ void testGpuCancelsKnownClutter()
     std::vector<ComplexF> vcGpu;
     DSIStats oGpu;
     assert(runBackend(DSIAlgorithm::EcaB, DSIBackend::Gpu, true,
-                      vcRef, vcSur, uTaps, uWindow, vcGpu, oGpu));
+                      vcRef, vcSur, uTaps, uWindow, uWindow, vcGpu, oGpu));
     std::printf("  GPU cancels known clutter: %.1f dB\n", oGpu.dSuppressionDb);
     assert(oGpu.dSuppressionDb > 60.0);
 }
@@ -621,11 +726,14 @@ int main()
     testRngIsUsable();
     testRejectsWhatIsNotImplemented();
     testRejectsBadBuffers();
-    testCancelsKnownClutter(DSIAlgorithm::EcaM, 4096, "ECA-m");
-    testCancelsKnownClutter(DSIAlgorithm::EcaB, 512,  "ECA-B");
+    testEstimationWindowClamp();
+    testCancelsKnownClutter(DSIAlgorithm::EcaM, 4096, 4096, "ECA-m");
+    testCancelsKnownClutter(DSIAlgorithm::EcaB, 512,  512,  "ECA-B");
+    testCancelsKnownClutter(DSIAlgorithm::EcaS, 1024, 256,  "ECA-S");
     testPreservesTargetBeyondTaps();
     testBatchingBeatsSingleSolveOnVaryingClutter();
     testSingleWindowBatchMatchesEcaM();
+    testSlidingWithCpiLongEstimateMatchesEcaM();
     testConfigMapping();
 
 #if defined(PBR_WITH_CUDA)

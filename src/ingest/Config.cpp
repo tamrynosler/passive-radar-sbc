@@ -171,6 +171,8 @@ bool validate(PbrConfig& oConfig)
         { "DOPPLER_DECIMATION",   static_cast<double>(oConfig.uDopplerDecimation) },
         { "ECA_BATCH_LENGTH_s",   oConfig.dEcaBatchSeconds },
         { "ECA_UPDATE_INTERVAL_s", oConfig.dEcaUpdateSeconds },
+        { "ECA_CD_BATCH_s",       oConfig.dCdBatchSeconds },
+        { "CGLS_ITERATIONS",      static_cast<double>(oConfig.uCglsIterations) },
     };
     for (size_t u = 0; u < sizeof(aPositive) / sizeof(aPositive[0]); ++u) {
         if (aPositive[u].dValue <= 0.0) {
@@ -228,6 +230,12 @@ bool validate(PbrConfig& oConfig)
     // a value of 1 or more would swamp the signal entirely.
     if (oConfig.dEcaDiagLoading < 0.0 || oConfig.dEcaDiagLoading >= 1.0) {
         std::fprintf(stderr, "config: ECA_DIAGONAL_LOADING must be in [0, 1)\n");
+        bOk = false;
+    }
+    // The ECA-CD projection solves a (2P+1)-square system per carrier inside
+    // one GPU thread, sized for P <= 3 at compile time.
+    if (oConfig.uCdDopplerTaps > 3) {
+        std::fprintf(stderr, "config: ECA_CD_DOPPLER_TAPS must be at most 3\n");
         bOk = false;
     }
 
@@ -316,6 +324,27 @@ bool validate(PbrConfig& oConfig)
         return false;
     }
 
+    // ECA-CD batch. The CPU backend's FFT is radix-2, so the length must be a
+    // power of two; it must also tile the CPI exactly for the same reason the
+    // ECA update window must.
+    oConfig.uCdBatchSamples = toSamples(oConfig.dCdBatchSeconds, oConfig.uSampleRateHz);
+    if (oConfig.uCdBatchSamples == 0 ||
+        (oConfig.uCdBatchSamples & (oConfig.uCdBatchSamples - 1)) != 0) {
+        std::fprintf(stderr,
+                     "config: ECA_CD_BATCH_s gives %llu samples, which is not a "
+                     "power of two\n",
+                     static_cast<unsigned long long>(oConfig.uCdBatchSamples));
+        return false;
+    }
+    if (oConfig.uCpiSamples % oConfig.uCdBatchSamples != 0) {
+        std::fprintf(stderr,
+                     "config: ECA_CD_BATCH_s (%llu samples) does not divide the "
+                     "%llu samples per CPI exactly\n",
+                     static_cast<unsigned long long>(oConfig.uCdBatchSamples),
+                     static_cast<unsigned long long>(oConfig.uCpiSamples));
+        return false;
+    }
+
     if (oConfig.uBufferCapacity < 2 * oConfig.uCpiSamples) {
         std::fprintf(stderr,
                      "config: warning -- BUFFER_LENGTH_s (%.3f s) is less than twice "
@@ -374,9 +403,20 @@ bool loadPbrConfig(const char* pPath, PbrConfig& oConfig)
     getDouble(mValues, "ECA_UPDATE_INTERVAL_s", oConfig.dEcaUpdateSeconds, bOk);
     getUInt64(mValues, "ECA_DOPPLER_TAPS",     oConfig.uEcaDopplerTaps,    bOk);
     getDouble(mValues, "ECA_DIAGONAL_LOADING", oConfig.dEcaDiagLoading,    bOk);
+    getDouble(mValues, "ECA_CD_BATCH_s",       oConfig.dCdBatchSeconds,    bOk);
+    getUInt64(mValues, "ECA_CD_DOPPLER_TAPS",  oConfig.uCdDopplerTaps,     bOk);
     getUInt64(mValues, "ARD_SNAPSHOT_EVERY",   oConfig.uArdSnapshotEvery,  bOk);
     getUInt64(mValues, "CGLS_ITERATIONS",      oConfig.uCglsIterations,    bOk);
-    getDouble(mValues, "CGLS_TOLERANCE",       oConfig.dCglsTolerance,     bOk);
+
+    // 0 or 1, read as an integer so a typo like "yes" is a load error rather
+    // than a silent false.
+    uint64_t uPrime = 0;
+    getUInt64(mValues, "CGLS_PRIME", uPrime, bOk);
+    if (uPrime > 1) {
+        std::fprintf(stderr, "config: CGLS_PRIME must be 0 or 1\n");
+        bOk = false;
+    }
+    oConfig.bCglsPrime = (uPrime == 1);
 
     getDouble(mValues, "CFAR_PFA",             oConfig.dCfarPfa,           bOk);
     getUInt64(mValues, "CFAR_GUARD_RANGE",     oConfig.uCfarGuardRange,    bOk);
@@ -442,6 +482,13 @@ void printPbrConfig(const PbrConfig& oConfig)
     std::printf("  ECA loading        %g (relative), doppler taps %llu\n",
                 oConfig.dEcaDiagLoading,
                 static_cast<unsigned long long>(oConfig.uEcaDopplerTaps));
+    std::printf("  ECA-CD             batch %.4f s (%llu samples), doppler taps %llu\n",
+                oConfig.dCdBatchSeconds,
+                static_cast<unsigned long long>(oConfig.uCdBatchSamples),
+                static_cast<unsigned long long>(oConfig.uCdDopplerTaps));
+    std::printf("  CGLS               %llu iterations, %s\n",
+                static_cast<unsigned long long>(oConfig.uCglsIterations),
+                oConfig.bCglsPrime ? "primed from the previous CPI" : "cold start");
     std::printf("  CFAR               Pfa %g, guard %llux%llu, train %llux%llu\n",
                 oConfig.dCfarPfa,
                 static_cast<unsigned long long>(oConfig.uCfarGuardRange),

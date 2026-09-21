@@ -1,4 +1,4 @@
-// ECA-m and ECA-B on the GPU: the implementation the thesis measures.
+// ECA-m, ECA-B and ECA-S on the GPU: the implementation the thesis measures.
 //
 // Same algorithm as src/dsi/cpu/EcaCpu.cpp, which is the correctness
 // reference. Read that file first -- it explains what the algorithm does and
@@ -59,9 +59,13 @@
 //
 // Chunking is also what lets ECA-m (one window covering the whole CPI) use
 // exactly the same code as ECA-B: cherk accumulates with beta = 1, so a long
-// window is just more chunks summed into the same Gram matrix.
+// window is just more chunks summed into the same Gram matrix. ECA-S is the
+// same loop again with the chunks drawn from the estimation window rather
+// than the update window; the subtract kernel does not change at all.
 //
-// Total device memory is about 25 MB for the shipped parameters.
+// Total device memory is about 25 MB for the shipped ECA-B parameters. The
+// Gram buffer is one K x K matrix per UPDATE window, so ECA-S at 2.5 ms
+// updates holds 400 of them: 46 MB.
 
 #include <cublas_v2.h>
 #include <cusolverDn.h>
@@ -218,8 +222,9 @@ private:
 
     DSIParams          moParams;
     uint64_t           muTaps         = 0;
-    uint64_t           muWindows      = 0;
-    uint64_t           muWindowSamples= 0;
+    uint64_t           muWindows      = 0;   // update windows per CPI
+    uint64_t           muWindowSamples= 0;   // T_S, one set of weights applied
+    uint64_t           muEstimateSamples = 0;// T_A, one Gram summed over
     uint64_t           muChunkSamples = 0;
 
     cublasHandle_t     mhCublas       = nullptr;
@@ -276,8 +281,9 @@ bool EcaGpu::init(const DSIParams& oParams)
     CHECK(!mbReady, "EcaGpu::init called twice");
 
     CHECK(oParams.eAlgorithm == DSIAlgorithm::EcaM ||
-          oParams.eAlgorithm == DSIAlgorithm::EcaB,
-          "EcaGpu handles ECA-m and ECA-B only");
+          oParams.eAlgorithm == DSIAlgorithm::EcaB ||
+          oParams.eAlgorithm == DSIAlgorithm::EcaS,
+          "EcaGpu handles ECA-m, ECA-B and ECA-S only");
     CHECK(oParams.uCpiSamples > 0, "CPI length must be non-zero");
     CHECK(oParams.uClutterTaps > 0, "clutter taps must be non-zero");
     CHECK(oParams.uEstimateSamples > 0 && oParams.uUpdateSamples > 0,
@@ -285,9 +291,19 @@ bool EcaGpu::init(const DSIParams& oParams)
     CHECK(oParams.uDopplerTaps == 0,
           "ECA_DOPPLER_TAPS > 0 is not implemented; the clutter subspace is "
           "delay-only for now");
-    CHECK(oParams.uEstimateSamples == oParams.uUpdateSamples,
-          "an estimation window longer than the update window is ECA-S, which "
-          "is not implemented");
+    // Same window rule as the CPU backend: the name and the windows must
+    // agree, so a benchmark row cannot carry the wrong label.
+    if (oParams.eAlgorithm == DSIAlgorithm::EcaS) {
+        CHECK(oParams.uEstimateSamples > oParams.uUpdateSamples,
+              "ECA-S needs an estimation window longer than the update window; "
+              "equal windows are ECA-B");
+    } else {
+        CHECK(oParams.uEstimateSamples == oParams.uUpdateSamples,
+              "an estimation window longer than the update window is ECA-S, "
+              "not ECA-B");
+    }
+    CHECK(oParams.uEstimateSamples <= oParams.uCpiSamples,
+          "the estimation window cannot be longer than the CPI");
     CHECK(oParams.uCpiSamples % oParams.uUpdateSamples == 0,
           "the update window must divide the CPI exactly");
     CHECK(oParams.uEstimateSamples > oParams.uClutterTaps,
@@ -300,12 +316,14 @@ bool EcaGpu::init(const DSIParams& oParams)
           oParams.uCpiSamples  <= 2147483647ULL,
           "problem dimensions exceed what cuBLAS accepts as int");
 
-    moParams        = oParams;
-    muTaps          = oParams.uClutterTaps;
-    muWindowSamples = oParams.uUpdateSamples;
-    muWindows       = oParams.uCpiSamples / oParams.uUpdateSamples;
-    muChunkSamples  = (muWindowSamples < kMaxChunkSamples) ? muWindowSamples
-                                                           : kMaxChunkSamples;
+    moParams          = oParams;
+    muTaps            = oParams.uClutterTaps;
+    muWindowSamples   = oParams.uUpdateSamples;
+    muEstimateSamples = oParams.uEstimateSamples;
+    muWindows         = oParams.uCpiSamples / oParams.uUpdateSamples;
+    // The chunk buffer only ever holds a slice of an estimation window.
+    muChunkSamples    = (muEstimateSamples < kMaxChunkSamples) ? muEstimateSamples
+                                                               : kMaxChunkSamples;
 
     CUBLAS_CHECK(cublasCreate(&mhCublas));
     CUSOLVER_CHECK(cusolverDnCreate(&mhCusolver));
@@ -383,13 +401,20 @@ bool EcaGpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
     const float     fZero = 0.0f;
 
     for (uint64_t b = 0; b < muWindows; ++b) {
-        const uint64_t uWindowStart = b * muWindowSamples;
+        // The samples the weights for window b are estimated from. Equal to
+        // the update window for ECA-m and ECA-B; longer, centred and clamped
+        // at the CPI edges for ECA-S. Same function as the CPU backend, so
+        // the two cannot disagree about the edges.
+        const uint64_t uEstStart = dsiEstimationStart(b * muWindowSamples,
+                                                      muWindowSamples,
+                                                      muEstimateSamples,
+                                                      moParams.uCpiSamples);
 
-        for (uint64_t uOffset = 0; uOffset < muWindowSamples; uOffset += muChunkSamples) {
-            const uint64_t uRows = (uOffset + muChunkSamples <= muWindowSamples)
+        for (uint64_t uOffset = 0; uOffset < muEstimateSamples; uOffset += muChunkSamples) {
+            const uint64_t uRows = (uOffset + muChunkSamples <= muEstimateSamples)
                                  ? muChunkSamples
-                                 : (muWindowSamples - uOffset);
-            const uint64_t uStart = uWindowStart + uOffset;
+                                 : (muEstimateSamples - uOffset);
+            const uint64_t uStart = uEstStart + uOffset;
             const bool     bFirst = (uOffset == 0);
 
             const uint32_t uBlock = 256;
@@ -526,18 +551,26 @@ bool EcaGpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
 
 } // namespace
 
+// The other GPU algorithms live in their own files; this is the one place
+// that knows all of them.
+std::unique_ptr<DSICanceller> makeCglsCancellerGpu();
+std::unique_ptr<DSICanceller> makeEcaCdCancellerGpu();
+
 std::unique_ptr<DSICanceller> makeDSICancellerGpu(DSIAlgorithm eAlgorithm)
 {
     switch (eAlgorithm) {
     case DSIAlgorithm::EcaM:
     case DSIAlgorithm::EcaB:
+    case DSIAlgorithm::EcaS:
         return std::unique_ptr<DSICanceller>(new EcaGpu());
-    default:
-        break;
+    case DSIAlgorithm::EcaCd:
+        return makeEcaCdCancellerGpu();
+    case DSIAlgorithm::Cgls:
+        return makeCglsCancellerGpu();
     }
 
-    std::fprintf(stderr, "dsi: %s is not implemented on the GPU backend yet\n",
-                 dsiAlgorithmName(eAlgorithm));
+    std::fprintf(stderr, "dsi: unknown algorithm %d on the GPU backend\n",
+                 static_cast<int>(eAlgorithm));
     return std::unique_ptr<DSICanceller>();
 }
 

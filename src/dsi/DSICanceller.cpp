@@ -126,7 +126,9 @@ bool dsiParamsFromConfig(const PbrConfig& oConfig, DSIParams& oParams)
     oParams.uDopplerTaps     = oConfig.uEcaDopplerTaps;
     oParams.dDiagonalLoading = oConfig.dEcaDiagLoading;
     oParams.uMaxIterations   = oConfig.uCglsIterations;
-    oParams.dTolerance       = oConfig.dCglsTolerance;
+    oParams.bCglsPrime       = oConfig.bCglsPrime;
+    oParams.uCdBatchSamples  = oConfig.uCdBatchSamples;
+    oParams.uCdDopplerTaps   = oConfig.uCdDopplerTaps;
 
     if (oParams.eAlgorithm == DSIAlgorithm::EcaM) {
         // ECA-m is defined as "what the MATLAB reference chain does", so it
@@ -146,6 +148,21 @@ bool dsiParamsFromConfig(const PbrConfig& oConfig, DSIParams& oParams)
     }
 
     return true;
+}
+
+uint64_t dsiEstimationStart(uint64_t uUpdateStart, uint64_t uUpdateSamples,
+                            uint64_t uEstimateSamples, uint64_t uCpiSamples)
+{
+    // Centre of the update window, then back by half the estimation window.
+    // Unsigned arithmetic, so the subtraction is guarded rather than allowed
+    // to wrap.
+    const uint64_t uCentre = uUpdateStart + uUpdateSamples / 2;
+    const uint64_t uHalf   = uEstimateSamples / 2;
+
+    uint64_t uStart = (uCentre > uHalf) ? (uCentre - uHalf) : 0;
+    if (uStart + uEstimateSamples > uCpiSamples)
+        uStart = uCpiSamples - uEstimateSamples;
+    return uStart;
 }
 
 } // namespace pbr

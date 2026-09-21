@@ -134,6 +134,7 @@ LIB_SRC := src/ingest/CircularBuffer.cpp src/ingest/CpiFile.cpp \
            src/ingest/UdpReceiver.cpp src/ingest/ChannelIngest.cpp \
            src/ingest/CaptureFile.cpp \
            src/dsi/DSICanceller.cpp src/dsi/cpu/EcaCpu.cpp \
+           src/dsi/cpu/CglsCpu.cpp src/dsi/cpu/EcaCdCpu.cpp \
            src/ard/ArdProcessor.cpp src/ard/ArdFile.cpp src/ard/cpu/ArdCpu.cpp
 
 HOST_APPS  := src/app/pbr_run.cpp src/app/ingest_replay.cpp \
@@ -141,7 +142,8 @@ HOST_APPS  := src/app/pbr_run.cpp src/app/ingest_replay.cpp \
               src/app/ard_verify.cpp bench/dsi_bench.cpp bench/ard_bench.cpp
 HOST_TESTS := tests/test_circular_buffer.cpp tests/test_vita49_packet.cpp \
               tests/test_config.cpp tests/test_cpi_extraction.cpp \
-              tests/test_eca.cpp tests/test_ard.cpp
+              tests/test_eca.cpp tests/test_cgls.cpp tests/test_ecacd.cpp \
+              tests/test_ard.cpp
 
 ## host: build every tool locally into ./bin
 host:

@@ -42,9 +42,11 @@ const char* const kValidConfig =
     "ECA_UPDATE_INTERVAL_s = 0.025\n"
     "ECA_DOPPLER_TAPS = 0\n"
     "ECA_DIAGONAL_LOADING = 1e-6\n"
+    "ECA_CD_BATCH_s = 0.0025\n"
+    "ECA_CD_DOPPLER_TAPS = 1\n"
     "ARD_SNAPSHOT_EVERY = 1\n"
     "CGLS_ITERATIONS = 30\n"
-    "CGLS_TOLERANCE = 1e-6\n"
+    "CGLS_PRIME = 0\n"
     "\n"
     "CFAR_PFA = 1e-5\n"
     "CFAR_GUARD_RANGE = 2\n"
@@ -276,6 +278,26 @@ void testValidationRules()
     assert(loadPbrConfig(writeTemp(replaced(kValidConfig,
         "ECA_DIAGONAL_LOADING = 1e-6", "ECA_DIAGONAL_LOADING = 0")), oConfig));
 
+    // The ECA-CD batch must be a power of two (radix-2 FFT on the CPU) and
+    // tile the CPI. 0.003 s is 614 samples: neither.
+    assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "ECA_CD_BATCH_s = 0.0025", "ECA_CD_BATCH_s = 0.003")), oConfig));
+    // 0.0025 s is 512 samples and 204800 / 512 = 400 exactly.
+    assert(loadPbrConfig(writeTemp(kValidConfig), oConfig));
+    assert(oConfig.uCdBatchSamples == 512u);
+    assert(oConfig.uCdDopplerTaps == 1u);
+    assert(!oConfig.bCglsPrime);
+
+    assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "ECA_CD_DOPPLER_TAPS = 1", "ECA_CD_DOPPLER_TAPS = 4")), oConfig));
+    assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "CGLS_PRIME = 0", "CGLS_PRIME = 2")), oConfig));
+    assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "CGLS_ITERATIONS = 30", "CGLS_ITERATIONS = 0")), oConfig));
+    assert(loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "CGLS_PRIME = 0", "CGLS_PRIME = 1")), oConfig));
+    assert(oConfig.bCglsPrime);
+
     // ECA-m is the whole CPI in one window, so a short batch length must not
     // stop it loading -- the algorithm ignores those keys.
     assert(loadPbrConfig(writeTemp(replaced(kValidConfig,
@@ -309,9 +331,11 @@ void testWhitespaceAndCommentHandling()
         "ECA_UPDATE_INTERVAL_s = 0.025\n"
         "ECA_DOPPLER_TAPS = 0\n"
         "ECA_DIAGONAL_LOADING = 1e-6\n"
+        "ECA_CD_BATCH_s = 0.0025\n"
+        "ECA_CD_DOPPLER_TAPS = 1\n"
         "ARD_SNAPSHOT_EVERY = 1\n"
-    "CGLS_ITERATIONS = 30\n"
-        "CGLS_TOLERANCE = 1e-6\n"
+        "CGLS_ITERATIONS = 30\n"
+        "CGLS_PRIME = 0\n"
         "CFAR_PFA = 1e-5\n"
         "CFAR_GUARD_RANGE = 2\n"
         "CFAR_GUARD_DOPPLER = 2\n"

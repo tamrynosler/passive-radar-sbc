@@ -51,22 +51,27 @@ enum class DSIAlgorithm {
     // targets -- see the note on uUpdateSamples below.
     EcaB,
 
-    // Sliding [2]. Weights estimated over a long, overlapping window but
-    // applied to a short fragment, which decouples the estimation quality
-    // from the update rate and pushes the ambiguities out of the Doppler
-    // span of interest. NOT YET IMPLEMENTED.
+    // Sliding [2]. Weights estimated over a long window centred on a short
+    // fragment, applied to that fragment only, then slid on. Decouples the
+    // estimation quality from the update rate and pushes the ambiguities
+    // out of the Doppler span of interest. At the ends of the CPI the
+    // estimation window is clamped inside it -- see dsiEstimationStart().
+    // Same solve as ECA-B, so the same code; only the window bounds differ.
     EcaS,
 
     // By carrier and Doppler [3]. Works on batched FFTs rather than delayed
     // copies, because a delay in time is a phase shift in frequency. The
     // subspace shrinks from K(2P+1) columns to (2P+1), which is where its
-    // speed comes from. NOT YET IMPLEMENTED.
+    // speed comes from. Uses its own batch length and Doppler tap count,
+    // uCdBatchSamples and uCdDopplerTaps; ignores the ECA window fields.
     EcaCd,
 
-    // Conjugate gradient least squares. Iterative: steps towards the
-    // solution instead of solving directly, so a fixed iteration count buys
-    // a fixed execution time and a fixed memory footprint [4].
-    // NOT YET IMPLEMENTED.
+    // Conjugate gradient least squares. The same per-window least-squares
+    // problem as ECA-B, but stepped towards iteratively instead of solved
+    // directly, so a fixed iteration count buys a fixed execution time and a
+    // fixed memory footprint [4]. Uses uUpdateSamples as its window and
+    // uMaxIterations; ignores diagonal loading (stopping early is the
+    // regularisation).
     Cgls
 };
 
@@ -165,10 +170,21 @@ struct DSIParams {
     // (docs/design_decisions.md 1d.4).
     bool         bFloat32Math = false;
 
+    // ECA-CD: samples per batch (a power of two that divides the CPI), and
+    // Doppler columns either side of zero in the per-carrier subspace, so
+    // the projection removes 2P+1 columns per carrier. At most 3.
+    uint64_t     uCdBatchSamples = 0;
+    uint64_t     uCdDopplerTaps  = 0;
+
     // CGLS. Iterating a fixed number of times rather than to a tolerance is
-    // what gives a fixed, predictable execution time.
+    // what gives a fixed, predictable execution time, and it is also the
+    // regularisation: the iteration fits the strong, well-conditioned
+    // clutter first and the noise last, so more is not better.
     uint64_t     uMaxIterations = 0;
-    double       dTolerance     = 0.0;
+
+    // CGLS: start each window from the weights the same window reached in
+    // the previous CPI instead of from zero. Makes the canceller stateful.
+    bool         bCglsPrime     = false;
 };
 
 // What an algorithm reports about the work it just did. Intrinsic
@@ -264,6 +280,22 @@ const char* dsiBackendName(DSIBackend eBackend);
 // false, having logged the reason, if the configured windows do not divide
 // the CPI exactly or are otherwise inconsistent.
 bool dsiParamsFromConfig(const PbrConfig& oConfig, DSIParams& oParams);
+
+// Where the estimation window for one update window starts.
+//
+// ECA-S estimates the weights for the update window beginning at
+// uUpdateStart from a longer window centred on it. Near the ends of the CPI
+// a centred window would run off the edge, so it is clamped to stay inside:
+// the first and last few update windows share an estimation window that is
+// off-centre rather than short. Every window is therefore solved from
+// exactly uEstimateSamples samples, so conditioning and diagonal loading
+// mean the same thing everywhere in the CPI.
+//
+// With uEstimateSamples == uUpdateSamples this returns uUpdateStart, which
+// is ECA-B. Both backends call this, so they cannot disagree at the edges.
+// Requires uEstimateSamples <= uCpiSamples; init() checks that.
+uint64_t dsiEstimationStart(uint64_t uUpdateStart, uint64_t uUpdateSamples,
+                            uint64_t uEstimateSamples, uint64_t uCpiSamples);
 
 } // namespace pbr
 

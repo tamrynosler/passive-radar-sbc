@@ -1,4 +1,5 @@
-// ECA-m and ECA-B on the CPU: the correctness reference for DSI cancellation.
+// ECA-m, ECA-B and ECA-S on the CPU: the correctness reference for DSI
+// cancellation.
 //
 // ---------------------------------------------------------------------------
 // What the algorithm does
@@ -28,8 +29,11 @@
 //
 // ECA-m does this once over the whole CPI. ECA-B splits the CPI into
 // fragments and solves each independently, so the weights can follow clutter
-// that changes during the second. They are the same code; only the window
-// length differs.
+// that changes during the second. ECA-S solves for each fragment from a
+// LONGER window centred on it, so a short fragment (which pushes ECA-B's
+// Doppler ambiguities out of the span of interest) can still have its
+// weights estimated from enough samples. All three are the same code; only
+// the window bounds differ.
 //
 // ---------------------------------------------------------------------------
 // Two implementation choices worth knowing about
@@ -58,6 +62,11 @@
 // batching buys adaptivity, bounded memory and parallelism, not fewer
 // operations. Expect seconds per CPI. This is the correctness reference, not
 // a real-time implementation; that is what the GPU backend is for.
+//
+// ECA-S multiplies that by T_A / T_S, because consecutive estimation windows
+// overlap and each is summed from scratch. At 25 ms over 2.5 ms that is 10x
+// ECA-B. Colone's Section VI sliding update (subtract the samples leaving,
+// add the samples entering) removes the factor; deliberately not done yet.
 //
 // A roughly 60x exact saving is available (successive Gram entries share
 // almost all of their terms), and a ~100x approximate one via FFTs and the
@@ -123,8 +132,9 @@ bool EcaCpu::init(const DSIParams& oParams)
     CHECK(!mbReady, "EcaCpu::init called twice");
 
     CHECK(oParams.eAlgorithm == DSIAlgorithm::EcaM ||
-          oParams.eAlgorithm == DSIAlgorithm::EcaB,
-          "EcaCpu handles ECA-m and ECA-B only");
+          oParams.eAlgorithm == DSIAlgorithm::EcaB ||
+          oParams.eAlgorithm == DSIAlgorithm::EcaS,
+          "EcaCpu handles ECA-m, ECA-B and ECA-S only");
     CHECK(oParams.uCpiSamples > 0, "CPI length must be non-zero");
     CHECK(oParams.uClutterTaps > 0, "clutter taps must be non-zero");
     CHECK(oParams.uEstimateSamples > 0 && oParams.uUpdateSamples > 0,
@@ -137,12 +147,21 @@ bool EcaCpu::init(const DSIParams& oParams)
           "ECA_DOPPLER_TAPS > 0 is not implemented; the clutter subspace is "
           "delay-only for now");
 
-    // ECA-S is the same solve with a longer, overlapping estimation window.
-    // Not implemented yet, and a silent downgrade to ECA-B would be invisible
-    // in the results.
-    CHECK(oParams.uEstimateSamples == oParams.uUpdateSamples,
-          "an estimation window longer than the update window is ECA-S, which "
-          "is not implemented");
+    // The window rule is what separates the names. ECA-m and ECA-B estimate
+    // from the window they apply to; ECA-S estimates from a longer one.
+    // Neither is allowed to masquerade as the other, or a benchmark row would
+    // carry the wrong label.
+    if (oParams.eAlgorithm == DSIAlgorithm::EcaS) {
+        CHECK(oParams.uEstimateSamples > oParams.uUpdateSamples,
+              "ECA-S needs an estimation window longer than the update window; "
+              "equal windows are ECA-B");
+    } else {
+        CHECK(oParams.uEstimateSamples == oParams.uUpdateSamples,
+              "an estimation window longer than the update window is ECA-S, "
+              "not ECA-B");
+    }
+    CHECK(oParams.uEstimateSamples <= oParams.uCpiSamples,
+          "the estimation window cannot be longer than the CPI");
 
     CHECK(oParams.uCpiSamples % oParams.uUpdateSamples == 0,
           "the update window must divide the CPI exactly");
@@ -384,16 +403,21 @@ bool EcaCpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
 
     oStats = DSIStats();
 
-    const uint64_t uUpdate = moParams.uUpdateSamples;
+    const uint64_t uUpdate   = moParams.uUpdateSamples;
+    const uint64_t uEstimate = moParams.uEstimateSamples;
 
     for (uint64_t w = 0; w < muWindows; ++w) {
         const uint64_t uStart = w * uUpdate;
         const uint64_t uEnd   = uStart + uUpdate;
 
-        // With ECA-B the weights are estimated from, and applied to, the same
-        // fragment. ECA-S will separate these two ranges; everything else
-        // stays as it is.
-        buildNormalEquations(pcRef, pcSur, uStart, uEnd);
+        // ECA-m and ECA-B estimate the weights from the window they are
+        // applied to. ECA-S estimates them from a longer window centred on it,
+        // clamped at the ends of the CPI -- see dsiEstimationStart(). The
+        // weights are applied to [uStart, uEnd) in every case, so each output
+        // sample is written exactly once.
+        const uint64_t uEstStart = dsiEstimationStart(uStart, uUpdate, uEstimate,
+                                                      moParams.uCpiSamples);
+        buildNormalEquations(pcRef, pcSur, uEstStart, uEstStart + uEstimate);
         if (!solveWeights(w))
             return false;
         applyWeights(pcRef, pcSur, pcOut, uStart, uEnd);
@@ -422,18 +446,26 @@ bool EcaCpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
 
 } // namespace
 
+// The other CPU algorithms live in their own files; this is the one place
+// that knows all of them.
+std::unique_ptr<DSICanceller> makeCglsCancellerCpu();
+std::unique_ptr<DSICanceller> makeEcaCdCancellerCpu();
+
 std::unique_ptr<DSICanceller> makeDSICancellerCpu(DSIAlgorithm eAlgorithm)
 {
     switch (eAlgorithm) {
     case DSIAlgorithm::EcaM:
     case DSIAlgorithm::EcaB:
+    case DSIAlgorithm::EcaS:
         return std::unique_ptr<DSICanceller>(new EcaCpu());
-    default:
-        break;
+    case DSIAlgorithm::EcaCd:
+        return makeEcaCdCancellerCpu();
+    case DSIAlgorithm::Cgls:
+        return makeCglsCancellerCpu();
     }
 
-    std::fprintf(stderr, "dsi: %s is not implemented on the CPU backend yet\n",
-                 dsiAlgorithmName(eAlgorithm));
+    std::fprintf(stderr, "dsi: unknown algorithm %d on the CPU backend\n",
+                 static_cast<int>(eAlgorithm));
     return std::unique_ptr<DSICanceller>();
 }
 
