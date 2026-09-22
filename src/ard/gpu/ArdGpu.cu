@@ -38,6 +38,8 @@
 #include <cublas_v2.h>
 #include <cufft.h>
 
+#include "BatchesArdGpu.cuh"
+
 #include "pbr/ArdProcessor.hpp"
 #include "pbr/check.hpp"   // must follow the library headers: see check.hpp
 
@@ -285,7 +287,11 @@ private:
 
     uint64_t       muDetectCapacity = 0;
 
-    char           machName[32];
+    // Only initialised when eAlgorithm is Batches. Holds its own cuFFT plan
+    // and scratch; the Direct path never touches it.
+    BatchesArdGpu  moBatches;
+
+    char           machName[48];
     bool           mbReady        = false;
 };
 
@@ -384,7 +390,16 @@ bool ArdGpu::init(const ArdParams& oParams)
     CUDA_CHECK(cudaMalloc(&md_oDetections, uDetBytes));
     CUDA_CHECK(cudaMalloc(&md_uCounters,   3 * sizeof(uint32_t)));
 
-    std::snprintf(machName, sizeof(machName), "ARD (GPU)");
+    if (oParams.eAlgorithm == ArdAlgorithm::Batches) {
+        if (!moBatches.init(oParams.uCpiSamples, oParams.uDopplerDecimation,
+                            oParams.uRangeBins))
+            return false;
+        std::snprintf(machName, sizeof(machName), "ARD-Batches (GPU, L=%llu)",
+                      static_cast<unsigned long long>(moBatches.transformLength()));
+    } else {
+        std::snprintf(machName, sizeof(machName), "ARD-Direct (GPU)");
+    }
+
     mbReady = true;
     return true;
 }
@@ -395,10 +410,17 @@ bool ArdGpu::buildMap(const cufftComplex* pdRef, const cufftComplex* pdCleaned)
     const uint32_t uBlocks  = static_cast<uint32_t>(moParams.uDopplerBins);
     const uint32_t uBlock   = 256;
 
-    lagProductKernel<<<blocksFor(muCells, uBlock), uBlock>>>(
-        pdRef, pdCleaned, md_cDecimated, uRanges, uBlocks,
-        static_cast<uint32_t>(moParams.uDopplerDecimation));
-    CUDA_CHECK(cudaGetLastError());
+    // Two routes to the same correlation matrix; see ArdAlgorithm in
+    // ArdProcessor.hpp. Everything after this point is shared.
+    if (moParams.eAlgorithm == ArdAlgorithm::Batches) {
+        if (!moBatches.correlate(pdRef, pdCleaned, md_cDecimated))
+            return false;
+    } else {
+        lagProductKernel<<<blocksFor(muCells, uBlock), uBlock>>>(
+            pdRef, pdCleaned, md_cDecimated, uRanges, uBlocks,
+            static_cast<uint32_t>(moParams.uDopplerDecimation));
+        CUDA_CHECK(cudaGetLastError());
+    }
 
     // In place: the transform overwrites the decimated lag products, which are
     // not needed again.

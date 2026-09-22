@@ -34,6 +34,7 @@ const char* const kValidConfig =
     "DOPPLER_HALF_SPAN_Hz = 200\n"
     "DOPPLER_DECIMATION = 128\n"
     "MIN_CPI_COVERAGE = 0.99\n"
+    "ARD_ALGORITHM = Direct\n"
     "\n"
     "DSI_ALGORITHM = ECA-B\n"
     "DSI_BACKEND = CPU\n"
@@ -229,6 +230,17 @@ void testValidationRules()
         "DOPPLER_DECIMATION = 128", "DOPPLER_DECIMATION = 100")), oConfig));
     assert(oConfig.uDopplerBins == 2048u);
 
+    // The ARD algorithm must be one of the two names, spelled exactly. A
+    // typo that silently fell back to a default would make a benchmark row
+    // claim an algorithm that never ran.
+    assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "ARD_ALGORITHM = Direct", "ARD_ALGORITHM = XF")), oConfig));
+    assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "ARD_ALGORITHM = Direct", "ARD_ALGORITHM = batches")), oConfig));
+    assert(loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "ARD_ALGORITHM = Direct", "ARD_ALGORITHM = Batches")), oConfig));
+    assert(oConfig.sArdAlgorithm == "Batches");
+
     // The buffer must hold at least one whole CPI.
     assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
         "BUFFER_LENGTH_s = 2.0", "BUFFER_LENGTH_s = 0.5")), oConfig));
@@ -335,6 +347,7 @@ void testWhitespaceAndCommentHandling()
         "DOPPLER_HALF_SPAN_Hz = 200\n"
         "DOPPLER_DECIMATION = 128\n"
         "MIN_CPI_COVERAGE = 0.99\n"
+        "ARD_ALGORITHM = Direct\n"
         "DSI_ALGORITHM = ECA-B\n"
         "DSI_BACKEND = CPU\n"
         "DSI_MATH_PRECISION = FP64\n"

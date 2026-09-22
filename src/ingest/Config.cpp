@@ -222,6 +222,12 @@ bool validate(PbrConfig& oConfig)
         std::fprintf(stderr, "config: ARD_SNAPSHOT_EVERY must be at least 1\n");
         bOk = false;
     }
+    if (oConfig.sArdAlgorithm != "Direct" && oConfig.sArdAlgorithm != "Batches") {
+        std::fprintf(stderr,
+                     "config: ARD_ALGORITHM must be Direct or Batches, not \"%s\"\n",
+                     oConfig.sArdAlgorithm.c_str());
+        bOk = false;
+    }
     if (oConfig.sDsiMathPrecision != "FP64" && oConfig.sDsiMathPrecision != "FP32") {
         std::fprintf(stderr, "config: DSI_MATH_PRECISION must be FP64 or FP32, not \"%s\"\n",
                      oConfig.sDsiMathPrecision.c_str());
@@ -430,6 +436,8 @@ bool loadPbrConfig(const char* pPath, PbrConfig& oConfig)
     getUInt64(mValues, "DOPPLER_DECIMATION",   oConfig.uDopplerDecimation, bOk);
     getDouble(mValues, "MIN_CPI_COVERAGE",     oConfig.dMinCpiCoverage,    bOk);
 
+    getString(mValues, "ARD_ALGORITHM",        oConfig.sArdAlgorithm,      bOk);
+
     getString(mValues, "DSI_ALGORITHM",        oConfig.sDsiAlgorithm,      bOk);
     getString(mValues, "DSI_BACKEND",          oConfig.sDsiBackend,        bOk);
     getString(mValues, "DSI_MATH_PRECISION",   oConfig.sDsiMathPrecision,  bOk);
@@ -494,6 +502,9 @@ void printPbrConfig(const PbrConfig& oConfig)
                 static_cast<unsigned long long>(oConfig.uDopplerDecimation),
                 oConfig.dDopplerHalfSpanHz);
     std::printf("  min CPI coverage   %.1f%%\n", 100.0 * oConfig.dMinCpiCoverage);
+    // The two ARD algorithms produce the same map; the backend logs the
+    // transform length it derived, which is the only thing Batches adds.
+    std::printf("  ARD                %s\n", oConfig.sArdAlgorithm.c_str());
     // The GPU ignores DSI_MATH_PRECISION -- Maxwell runs FP64 at 1/32 the
     // FP32 rate, so single precision is forced. Printing the configured value
     // unqualified next to "on GPU" would read as a claim about what will

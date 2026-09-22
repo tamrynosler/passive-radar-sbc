@@ -25,6 +25,11 @@ const struct { ArdBackend eValue; const char* pName; } kBackends[] = {
     { ArdBackend::Gpu, "GPU" },
 };
 
+const struct { ArdAlgorithm eValue; const char* pName; } kAlgorithms[] = {
+    { ArdAlgorithm::Direct,  "Direct"  },
+    { ArdAlgorithm::Batches, "Batches" },
+};
+
 } // namespace
 
 bool ardBackendFromString(const char* pName, ArdBackend& eBackend)
@@ -52,6 +57,53 @@ const char* ardBackendName(ArdBackend eBackend)
     return "unknown";
 }
 
+bool ardAlgorithmFromString(const char* pName, ArdAlgorithm& eAlgorithm)
+{
+    if (pName == nullptr) {
+        std::fprintf(stderr, "ard: null algorithm name\n");
+        return false;
+    }
+    for (size_t u = 0; u < sizeof(kAlgorithms) / sizeof(kAlgorithms[0]); ++u) {
+        if (std::strcmp(pName, kAlgorithms[u].pName) == 0) {
+            eAlgorithm = kAlgorithms[u].eValue;
+            return true;
+        }
+    }
+    std::fprintf(stderr,
+                 "ard: unknown algorithm \"%s\"; expected Direct or Batches\n",
+                 pName);
+    return false;
+}
+
+const char* ardAlgorithmName(ArdAlgorithm eAlgorithm)
+{
+    for (size_t u = 0; u < sizeof(kAlgorithms) / sizeof(kAlgorithms[0]); ++u) {
+        if (kAlgorithms[u].eValue == eAlgorithm)
+            return kAlgorithms[u].pName;
+    }
+    return "unknown";
+}
+
+uint64_t ardBatchTransformLength(uint64_t uStride, uint64_t uRangeBins)
+{
+    if (uStride == 0 || uRangeBins == 0)
+        return 0;
+
+    // The wrapped tail of the reference block must not run into the head, so
+    // the transform has to hold one block plus the K-1 samples of history the
+    // deepest delay reaches back for. See ArdAlgorithm::Batches.
+    const uint64_t uNeeded = uStride + uRangeBins - 1;
+
+    uint64_t uL = 1;
+    while (uL < uNeeded) {
+        // Refuse to wrap rather than return a nonsense length.
+        if (uL > (~uint64_t(0)) / 2)
+            return 0;
+        uL <<= 1;
+    }
+    return uL;
+}
+
 std::unique_ptr<ArdProcessor> makeArdProcessor(ArdBackend eBackend)
 {
     if (eBackend == ArdBackend::Cpu)
@@ -75,6 +127,8 @@ bool ardParamsFromConfig(const PbrConfig& oConfig, ArdParams& oParams)
     oParams = ArdParams();
 
     if (!ardBackendFromString(oConfig.sDsiBackend.c_str(), oParams.eBackend))
+        return false;
+    if (!ardAlgorithmFromString(oConfig.sArdAlgorithm.c_str(), oParams.eAlgorithm))
         return false;
 
     oParams.uCpiSamples        = oConfig.uCpiSamples;

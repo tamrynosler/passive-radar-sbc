@@ -61,16 +61,56 @@ namespace pbr {
 //       reproduces on embedded GPU hardware, including its CA-CFAR settings.
 
 enum class ArdBackend {
-    // Plain C++14 reference. Uses a direct DFT rather than a fast transform:
-    // the Doppler length is not a power of two, and an independent, obviously
-    // correct algorithm is worth more here than speed. Slow on purpose.
+    // Plain C++14 reference. The Doppler transform is a direct DFT rather
+    // than a fast one: 1600 is not a power of two, and an independent,
+    // obviously correct algorithm is worth more here than speed. Slow on
+    // purpose. FP32 throughout, so that a CPU-vs-GPU comparison measures the
+    // backend rather than the precision.
     Cpu,
-    // What the thesis measures. cuFFT plus three custom kernels.
+    // What the thesis measures. cuFFT plus custom kernels.
     Gpu
 };
 
+// How the correlation matrix that feeds the Doppler transform is built.
+//
+// BOTH PRODUCE THE SAME MAP. This is not an accuracy trade-off and not an
+// approximation: with the transform long enough (see below) the Batches route
+// computes exactly the same sums as Direct, in exact arithmetic, and the two
+// differ only by floating-point rounding. Only the cost differs.
+enum class ArdAlgorithm {
+    // For each delay, multiply the cleaned signal by the delayed reference and
+    // sum each block of uDopplerDecimation samples. One pass, no transform,
+    // trivially parallel. Cost is uRangeBins * uCpiSamples multiply-adds.
+    Direct,
+
+    // The same correlation done one block at a time with a short FFT, so all
+    // uRangeBins delays for a block come out of one transform instead of
+    // uRangeBins separate sums (Petri et al., TIWDC/ESAV 2011).
+    //
+    // Circular correlation of length L gives
+    //     Z[r] = sum_i X[i] conj(Y[(i - r) mod L]).
+    // Packing a block starting at n0 = b * S (S = uDopplerDecimation) as
+    //     X[i] = cleaned[n0 + i]      i in [0, S),     zero elsewhere
+    //     Y[j] = ref[n0 + j]          j in [0, S)
+    //     Y[j] = ref[n0 + j - L]      j in [L-K+1, L), zero elsewhere
+    // makes Z[r] equal the Direct sum for every r in [0, K), K = uRangeBins.
+    // The wrapped tail of Y supplies the K-1 reference samples from BEFORE
+    // the block, which is exactly what the Direct form reaches back for; the
+    // zeros in X mean only S surveillance samples contribute, so the
+    // integration length -- and therefore the map -- is unchanged.
+    //
+    // That requires L >= S + K - 1, rounded up to a power of two. Derived,
+    // not configured: any larger L gives the same answer and costs more.
+    //
+    // Batches wins when uRangeBins is large relative to log2(L). At the
+    // shipped 120 bins and L = 256 it is roughly 4x fewer operations; at a
+    // handful of range bins Direct would be cheaper.
+    Batches
+};
+
 struct ArdParams {
-    ArdBackend eBackend           = ArdBackend::Gpu;
+    ArdBackend   eBackend         = ArdBackend::Gpu;
+    ArdAlgorithm eAlgorithm       = ArdAlgorithm::Direct;
 
     uint64_t   uCpiSamples        = 0;   // 204800
     uint64_t   uSampleRateHz      = 0;   // 204800
@@ -178,8 +218,15 @@ std::unique_ptr<ArdProcessor> makeArdProcessor(ArdBackend eBackend);
 bool ardBackendFromString(const char* pName, ArdBackend& eBackend);
 const char* ardBackendName(ArdBackend eBackend);
 
-// Fill oParams from a loaded config. Every value it needs is already in
-// prb.conf; this stage introduced no new keys.
+bool ardAlgorithmFromString(const char* pName, ArdAlgorithm& eAlgorithm);
+const char* ardAlgorithmName(ArdAlgorithm eAlgorithm);
+
+// Transform length for ArdAlgorithm::Batches: the smallest power of two that
+// is at least uStride + uRangeBins - 1. Both backends and the tests derive it
+// here so there is one definition of the rule. Returns 0 on bad arguments.
+uint64_t ardBatchTransformLength(uint64_t uStride, uint64_t uRangeBins);
+
+// Fill oParams from a loaded config.
 bool ardParamsFromConfig(const PbrConfig& oConfig, ArdParams& oParams);
 
 // ---- axes ------------------------------------------------------------------

@@ -42,6 +42,12 @@ struct PbrConfig {
     uint64_t    uDopplerDecimation = 0;
     double      dMinCpiCoverage    = 0.0;
 
+    // ---- range-Doppler map formation -------------------------------------
+    // How the CAF is computed. Both routes produce the SAME map; see
+    // ArdProcessor.hpp. A string here for the same reason the DSI names are:
+    // an ingest-only tool never has to know the algorithm names.
+    std::string sArdAlgorithm;              // Direct or Batches
+
     // ---- DSI cancellation ------------------------------------------------
     // Kept as strings here and turned into enums by dsiAlgorithmFromString /
     // dsiBackendFromString, so this struct stays free of DSICanceller.hpp and

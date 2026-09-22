@@ -689,6 +689,96 @@ cancellation map has neither (correlated neighbouring cells from the ambiguity
 function, residual clutter structure, and genuine target smear all count).
 Worth stating plainly when reporting detection results.
 
+### 1e.8 The batches algorithm is exact, not an approximation (2026-09-22)
+
+`ARD_ALGORITHM` selects how the correlation matrix that feeds the Doppler
+transform is built. `Direct` is the original: for each delay, multiply by the
+delayed reference and sum each block of `DOPPLER_DECIMATION` samples.
+`Batches` does the same correlation one block at a time with a short FFT, so
+all `N_RANGE_BINS` delays come out of one transform (Petri et al., TIWDC/ESAV
+2011).
+
+The decision worth recording is that these produce the **same map**, not
+similar maps. Circular correlation of length L gives
+`Z[r] = sum_i X[i] conj(Y[(i-r) mod L])`. Packing a block at `n0 = b*S` as
+
+```
+X[i] = cleaned[n0 + i]      i in [0, S),     zero elsewhere
+Y[j] = ref[n0 + j]          j in [0, S)
+Y[j] = ref[n0 + j - L]      j in [L-K+1, L), zero elsewhere
+```
+
+makes `Z[r]` equal the direct sum for every `r` in `[0, K)`. The wrapped tail
+of Y supplies the K-1 reference samples from before the block, which is what
+the direct form reaches back for; the zeros in X mean only S surveillance
+samples contribute, so the **integration length is unchanged and so is the
+map**. The condition is `L >= S + K - 1`, rounded up to a power of two: 256
+for the shipped 128 and 120.
+
+Two consequences that shaped the implementation:
+
+- **L is derived, never configured** (`ardBatchTransformLength`). There is no
+  tuning freedom: a longer transform gives the same answer and costs more.
+  Exposing it would only let a user break the exactness.
+- **The zero-padding is not a longer integration.** It is tempting to read
+  L = 256 as "a 256-sample batch", which would lengthen the boxcar and add
+  high-Doppler droop. It does not. The legacy `Batches_ARD.m` *does* overlap
+  its blocks (500 samples at stride 100), which is a different algorithm with
+  a real droop/anti-alias trade; that is deliberately not what this is.
+
+`Batches` therefore adds no new parameter. `DOPPLER_DECIMATION` and
+`N_RANGE_BINS` already determine everything.
+
+The legacy reference correlates circularly with no padding
+(`Batches_ARD.m:38`), so its short lags are contaminated by wrapped terms --
+the same "no cyclic prefix" error ECA-CD has. Zero-padding to 256 buys
+exactness for one doubling of the transform.
+
+**Measured, 2026-09-22, Jetson, clocks NOT pinned -- provisional.**
+
+Replay of `fers_capture.pbrcap`, the real `processDevice` path, 3 CPIs:
+
+| `ARD_ALGORITHM` | ard stage | peak (CPI 0/1/2) | detections |
+|---|---|---|---|
+| Direct | 17.5 / 15.5 / 15.7 ms | 51.83 / 51.70 / 51.66 dB | 82 / 83 / 67 |
+| Batches | 11.3 / 11.0 / 10.5 ms | 51.83 / 51.70 / 51.66 dB | 82 / 83 / 67 |
+
+1.4x on the stage, ~4.7 ms of a ~229 ms CPI, so about 2% of the chain -- the
+DSI stage is where the time is. Identical peaks and detection counts on every
+CPI, which is the property that matters more than the speed.
+
+`ard_bench` shows a much wider gap (median 33.4 vs 12.4 ms) because it uses
+`process()` with host-to-device copies rather than `processDevice()`, and runs
+30 iterations back to back on unpinned clocks. The replay figures are the
+honest ones.
+
+Agreement against the MATLAB golden map, `cleaned_0000.bin`, all four
+combinations, tolerance 1e-4:
+
+| | GPU | CPU |
+|---|---|---|
+| Direct | 3.20e-07 | 6.79e-07 |
+| Batches | 3.54e-07 | 6.77e-07 |
+
+### 1e.9 The CPU ARD reference is FP32 (2026-09-22)
+
+`ArdCpu` accumulated in double until now. It does not any more: the lag
+products, the direct DFT, the power map and the CFAR sums are all float, and
+the CFAR scale factor is narrowed once at init exactly as the GPU passes it
+into the kernel.
+
+The reason is benchmark isolation, the same argument as 1d.8. A double CPU
+reference makes every CPU-vs-GPU comparison measure two things at once -- the
+backend and the arithmetic width -- and the thesis needs it to measure one.
+The direct DFT is still an independent algorithm from cuFFT; only its width
+changed. Cost: the golden-map agreement moved from ~3e-7 to ~6.8e-7, still
+150x inside the 1e-4 tolerance.
+
+Unlike the DSI stage there is no `ArdParams` precision flag. `DSI_MATH_PRECISION` exists because ECA's normal equations are genuinely
+ill-conditioned and the author wanted to see the difference; nothing in the
+ARD stage amplifies rounding that way, so a flag would be a knob with no
+question behind it.
+
 ---
 
 ## 2. Memory layout on the Jetson Nano
