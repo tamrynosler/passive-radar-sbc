@@ -35,7 +35,7 @@ RSYNC := rsync -a --delete \
          --exclude '.git' --exclude '.DS_Store'
 
 .PHONY: help build sync test run replay verify bench pull shell clean \
-        host host-test
+        view host host-test host-view
 
 help:
 	@echo "passive-radar-sbc"
@@ -45,6 +45,7 @@ help:
 	@echo "  make test       run the unit tests on the Jetson"
 	@echo "  make run        live run against FERS, clocks pinned"
 	@echo "  make replay     replay the recorded capture on the Jetson"
+	@echo "  make view       watch the newest run in a browser (second terminal)"
 	@echo "  make verify     golden-file checks against MATLAB"
 	@echo "  make bench      DSI + ARD timing sweeps, clocks pinned"
 	@echo "  make pull       copy results back to ./results"
@@ -53,6 +54,7 @@ help:
 	@echo
 	@echo "  make host       build every tool locally into ./bin (no CUDA)"
 	@echo "  make host-test  run the unit tests locally"
+	@echo "  make host-view  serve the ARD viewer locally against ./data"
 	@echo
 	@echo "  ARGS=... passes extra arguments to run and bench, e.g."
 	@echo "    make run ARGS='--seconds 145'"
@@ -96,6 +98,30 @@ replay:
 	    echo "output: $$OUT" && \
 	    ./build/pbr_run --file data/fers_capture.pbrcap --out $$OUT $(ARGS) \
 	        | tee $$OUT/run.log'
+
+## view: watch the newest run in a browser, live. Run this ON THE MAC, like
+##       every other target, in a second terminal alongside `make run` or
+##       `make replay`. The sidecar reads the files pbr_run already writes,
+##       so it cannot add latency to a CPI.
+##
+##       Forwarded over the existing ssh path rather than served straight to
+##       the subnet: the board's firewall blocks ICMP and may block inbound
+##       8080 too, and forwarding needs no board configuration. Where the
+##       firewall allows it, http://<board-ip>:8080 also works directly.
+##
+##       A viewer left running on the board from an earlier session holds
+##       8080, so any old instance is stopped first. The [.] in the pattern
+##       stops pkill -f matching the very shell that runs it (Linux pkill
+##       does not exclude its ancestors; it would kill the ssh command).
+##
+##       ExitOnForwardFailure: if 8080 is taken on the Mac (a `make host-view`
+##       still running, say) fail loudly. Otherwise ssh carries on and the
+##       browser silently talks to the wrong server.
+view:
+	@ssh $(JETSON) 'pkill -f "scripts/ard_viewer[.]py" || true'
+	@echo "open http://localhost:8080 -- Ctrl-C here to stop"
+	@ssh -o ExitOnForwardFailure=yes -L 8080:localhost:8080 $(JETSON) \
+	    'cd $(REMOTE) && python3 scripts/ard_viewer.py --root /data/results'
 
 ## verify: every golden-file check. Run after changing src/dsi or src/ard.
 verify:
@@ -184,3 +210,11 @@ host-test:
 	        || { echo "  FAILED  $$n"; ./$(HOST_BIN)/$$n; exit 1; }; \
 	    echo "  ok      $$n"; \
 	done
+	@python3 tests/test_ard_viewer.py > /dev/null 2>&1 \
+	    || { echo "  FAILED  test_ard_viewer"; python3 tests/test_ard_viewer.py; exit 1; }
+	@echo "  ok      test_ard_viewer"
+
+## host-view: serve the ARD viewer locally against the fixture in ./data, for
+##            working on the page without the board.
+host-view:
+	@python3 scripts/ard_viewer.py --dir data --port 8080

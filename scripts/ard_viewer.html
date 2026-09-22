@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ARD viewer</title>
+<style>
+  body {
+    margin: 0;
+    background: #101014;
+    color: #d8d8e0;
+    font: 13px/1.4 -apple-system, "Segoe UI", "DejaVu Sans", sans-serif;
+  }
+  header, .controls {
+    padding: 8px 12px;
+    background: #17171d;
+    border-bottom: 1px solid #2a2a33;
+  }
+  .controls { border-bottom: none; border-top: 1px solid #2a2a33; }
+  .row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 16px; }
+  .field { white-space: nowrap; }
+  .field .label {
+    color: #7d7d8c;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-right: 5px;
+  }
+  .field .value { color: #f0f0f4; font-variant-numeric: tabular-nums; }
+  #runName { font-weight: 600; }
+  #message { color: #e0b050; min-height: 1.4em; padding: 4px 12px 0; }
+  #message.error { color: #e06060; }
+  .plot { padding: 10px 12px; }
+  canvas { display: block; width: 100%; height: 560px; background: #101014; }
+  input[type=number] {
+    width: 74px;
+    background: #22222b;
+    color: #f0f0f4;
+    border: 1px solid #3a3a46;
+    border-radius: 3px;
+    padding: 3px 5px;
+    font: inherit;
+  }
+  button {
+    background: #2c2c38;
+    color: #f0f0f4;
+    border: 1px solid #3a3a46;
+    border-radius: 3px;
+    padding: 3px 10px;
+    font: inherit;
+    cursor: pointer;
+  }
+  button:hover { background: #3a3a48; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="row">
+    <span class="field"><span class="label">run</span><span class="value" id="runName">&mdash;</span></span>
+    <span class="field"><span class="label">cpi</span><span class="value" id="fCpi">&mdash;</span></span>
+    <span class="field"><span class="label">t</span><span class="value" id="fTime">&mdash;</span></span>
+    <span class="field"><span class="label">lag</span><span class="value" id="fLag">&mdash;</span></span>
+    <span class="field"><span class="label">dsi</span><span class="value" id="fDsi">&mdash;</span></span>
+    <span class="field"><span class="label">ard</span><span class="value" id="fArd">&mdash;</span></span>
+    <span class="field"><span class="label">total</span><span class="value" id="fTotal">&mdash;</span></span>
+    <span class="field"><span class="label">supp</span><span class="value" id="fSupp">&mdash;</span></span>
+    <span class="field"><span class="label">peak</span><span class="value" id="fPeak">&mdash;</span></span>
+    <span class="field"><span class="label">det</span><span class="value" id="fDet">&mdash;</span></span>
+    <span class="field"><span class="label">config</span><span class="value" id="fConfig">&mdash;</span></span>
+  </div>
+</header>
+
+<div id="message">starting&hellip;</div>
+
+<div class="plot"><canvas id="view"></canvas></div>
+
+<div class="controls">
+  <div class="row">
+    <span class="field">
+      <span class="label">doppler &plusmn;Hz</span>
+      <input type="number" id="fdMax" value="400" min="1" step="50">
+    </span>
+    <span class="field">
+      <span class="label">floor dB</span>
+      <input type="number" id="floorDb" value="-50" max="-1" step="5">
+    </span>
+    <span class="field">
+      <span class="label">0 dB reference</span>
+      <span class="value" id="refValue">&mdash;</span>
+      <button id="resetRef">Reset</button>
+    </span>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+// Format: include/pbr/ArdFile.hpp. Little-endian throughout.
+//
+//   offset  size  contents
+//        0     8  magic "PBRARD01"
+//        8     8  uint64 rangeBins           R
+//       16     8  uint64 dopplerBins         D
+//       24     8  uint64 sampleRateHz        fs
+//       32     8  uint64 dopplerDecimation   dec
+//       40     8  uint64 cpiStartIndex
+//       48     8  uint64 detections          N
+//       56     8  reserved
+//       64  8*R*D map, interleaved float32 I,Q, map[doppler*R + range]
+//      ...    48  per detection: uint64 rangeBin, uint64 dopplerBin,
+//                 float64 rangeKm, dopplerHz, powerDb, snrDb
+
+var HEADER_SIZE = 64;
+var DETECTION_SIZE = 48;
+var C_LIGHT = 299792458;
+var POLL_MS = 500;
+var STALE_S = 3;
+
+var state = {
+  runName: null,
+  latestCpi: null,
+  shownCpi: null,
+  cpiChangedAt: 0,
+  refDb: null,          // running maximum frame peak, the 0 dB reference
+  frame: null,
+  telemetry: null,
+  config: null,
+  fetching: false
+};
+
+// --- format helpers --------------------------------------------------------
+
+function el(id) { return document.getElementById(id); }
+
+// Little-endian uint64 as a JS Number. Exact below 2^53, which covers every
+// field here: uCpiStartIndex is a sample index in the 1e14 range, the rest
+// are small. A high word at or above 2^21 would lose precision, and no real
+// file produces one, so treat it as a corrupt header.
+function readU64(view, offset) {
+  var high = view.getUint32(offset + 4, true);
+  if (high >= 0x200000) {
+    throw new Error("64-bit field at offset " + offset + " is too large");
+  }
+  return high * 4294967296 + view.getUint32(offset, true);
+}
+
+function fixed(value, digits, suffix) {
+  if (typeof value !== "number") { return "—"; }
+  return value.toFixed(digits) + (suffix || "");
+}
+
+// --- colour ----------------------------------------------------------------
+
+// Turbo, as eight linear segments between sampled anchors. Close enough to
+// MATLAB's turbo that a map looks the same in both.
+var TURBO_ANCHORS = [
+  [48, 18, 59], [70, 107, 227], [41, 168, 255], [26, 217, 190],
+  [122, 242, 105], [225, 220, 55], [254, 151, 43], [218, 66, 13], [122, 4, 3]
+];
+
+function buildLut() {
+  var lut = new Uint8Array(256 * 3);
+  var segments = TURBO_ANCHORS.length - 1;
+  for (var i = 0; i < 256; i++) {
+    var t = (i / 255) * segments;
+    var lower = Math.min(Math.floor(t), segments - 1);
+    var frac = t - lower;
+    for (var k = 0; k < 3; k++) {
+      var a = TURBO_ANCHORS[lower][k];
+      var b = TURBO_ANCHORS[lower + 1][k];
+      lut[i * 3 + k] = Math.round(a + (b - a) * frac);
+    }
+  }
+  return lut;
+}
+
+var LUT = buildLut();
+
+// --- parsing ---------------------------------------------------------------
+
+function parseFrame(buffer) {
+  var view = new DataView(buffer);
+  var magic = "";
+  for (var i = 0; i < 8; i++) { magic += String.fromCharCode(view.getUint8(i)); }
+  if (magic !== "PBRARD01") { throw new Error("not an ARD file"); }
+
+  var frame = {
+    rangeBins: readU64(view, 8),
+    dopplerBins: readU64(view, 16),
+    sampleRateHz: readU64(view, 24),
+    dopplerDecimation: readU64(view, 32),
+    cpiStartIndex: readU64(view, 40),
+    detectionCount: readU64(view, 48)
+  };
+
+  var cells = frame.rangeBins * frame.dopplerBins;
+  var expected = HEADER_SIZE + 8 * cells + DETECTION_SIZE * frame.detectionCount;
+  if (buffer.byteLength !== expected) {
+    throw new Error("frame is " + buffer.byteLength + " bytes, expected " + expected);
+  }
+
+  frame.map = new Float32Array(buffer, HEADER_SIZE, 2 * cells);
+
+  var base = HEADER_SIZE + 8 * cells;
+  frame.detections = [];
+  for (var d = 0; d < frame.detectionCount; d++) {
+    var rec = base + DETECTION_SIZE * d;
+    frame.detections.push({
+      rangeBin: readU64(view, rec),
+      dopplerBin: readU64(view, rec + 8),
+      rangeKm: view.getFloat64(rec + 16, true),
+      dopplerHz: view.getFloat64(rec + 24, true),
+      powerDb: view.getFloat64(rec + 32, true),
+      snrDb: view.getFloat64(rec + 40, true)
+    });
+  }
+
+  // Peak over the whole map, as play_ard.m does, not over the visible window.
+  var peak2 = 0;
+  for (var j = 0; j < frame.map.length; j += 2) {
+    var re = frame.map[j];
+    var im = frame.map[j + 1];
+    var mag2 = re * re + im * im;
+    if (mag2 > peak2) { peak2 = mag2; }
+  }
+  frame.peakDb = 10 * Math.log10(peak2 + 1e-300);
+  return frame;
+}
+
+// --- axes ------------------------------------------------------------------
+
+function rangeKm(frame, r) {
+  return r * C_LIGHT / frame.sampleRateHz / 1000;
+}
+
+function binHz(frame) {
+  return frame.sampleRateHz / (frame.dopplerDecimation * frame.dopplerBins);
+}
+
+// Row 0 is the most negative Doppler: the map is stored fftshifted.
+function dopplerHz(frame, d) {
+  return (d - frame.dopplerBins / 2) * binHz(frame);
+}
+
+// The rows with |doppler| <= fdMax, the same window play_ard.m keeps.
+function dopplerWindow(frame, fdMax) {
+  var half = fdMax / binHz(frame);
+  var lo = Math.max(0, Math.ceil(frame.dopplerBins / 2 - half));
+  var hi = Math.min(frame.dopplerBins - 1, Math.floor(frame.dopplerBins / 2 + half));
+  if (hi < lo) { hi = lo; }
+  return {lo: lo, hi: hi, count: hi - lo + 1};
+}
+
+// Bin centres, not bin edges: imagesc puts the centre of bin r at the axis
+// value, so a tick and a detection ring at the same bin must land on the same
+// pixel. Both go through these two.
+function binToX(frame, bin, left, plotW) {
+  return left + ((bin + 0.5) / frame.rangeBins) * plotW;
+}
+
+function binToY(win, bin, top, plotH) {
+  return top + ((win.hi - bin + 0.5) / win.count) * plotH;
+}
+
+function tickStep(span, target) {
+  var rough = span / target;
+  if (!(rough > 0)) { return 1; }
+  var power = Math.pow(10, Math.floor(Math.log10(rough)));
+  var steps = [1, 2, 5, 10];
+  for (var i = 0; i < steps.length; i++) {
+    if (steps[i] * power >= rough) { return steps[i] * power; }
+  }
+  return 10 * power;
+}
+
+// --- drawing ---------------------------------------------------------------
+
+var offscreen = document.createElement("canvas");
+
+function drawMap(frame, win, floorDb, refDb) {
+  var R = frame.rangeBins;
+  offscreen.width = R;
+  offscreen.height = win.count;
+  var ctx = offscreen.getContext("2d");
+  var image = ctx.createImageData(R, win.count);
+  var pixels = image.data;
+  var scale = 1 / (0 - floorDb);
+
+  for (var d = win.lo; d <= win.hi; d++) {
+    // Canvas y grows downward and positive Doppler is up, so the top row of
+    // the image is the highest Doppler in the window.
+    var y = win.hi - d;
+    var rowIn = 2 * d * R;
+    var rowOut = 4 * y * R;
+    for (var r = 0; r < R; r++) {
+      var re = frame.map[rowIn + 2 * r];
+      var im = frame.map[rowIn + 2 * r + 1];
+      var db = 10 * Math.log10(re * re + im * im + 1e-300) - refDb;
+      var t = (db - floorDb) * scale;
+      if (t < 0) { t = 0; } else if (t > 1) { t = 1; }
+      var entry = 3 * ((t * 255) | 0);
+      var out = rowOut + 4 * r;
+      pixels[out] = LUT[entry];
+      pixels[out + 1] = LUT[entry + 1];
+      pixels[out + 2] = LUT[entry + 2];
+      pixels[out + 3] = 255;
+    }
+  }
+  ctx.putImageData(image, 0, 0);
+}
+
+function render() {
+  var canvas = el("view");
+  var ctx = canvas.getContext("2d");
+  var width = canvas.clientWidth;
+  var height = canvas.clientHeight;
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+
+  ctx.fillStyle = "#101014";
+  ctx.fillRect(0, 0, width, height);
+
+  var frame = state.frame;
+  if (frame === null) { return; }
+
+  var fdMax = Number(el("fdMax").value);
+  var floorDb = Number(el("floorDb").value);
+  if (!(fdMax > 0)) { fdMax = 400; }
+  if (!(floorDb < 0)) { floorDb = -50; }
+
+  var win = dopplerWindow(frame, fdMax);
+  drawMap(frame, win, floorDb, state.refDb);
+
+  var left = 62;
+  var right = 92;
+  var top = 12;
+  var bottom = 44;
+  var plotW = Math.max(10, width - left - right);
+  var plotH = Math.max(10, height - top - bottom);
+
+  ctx.imageSmoothingEnabled = false;   // blocky like imagesc, not blurred
+  ctx.drawImage(offscreen, left, top, plotW, plotH);
+
+  ctx.strokeStyle = "#5a5a68";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(left + 0.5, top + 0.5, plotW - 1, plotH - 1);
+
+  drawAxes(ctx, frame, win, left, top, plotW, plotH);
+  drawDetections(ctx, frame, win, left, top, plotW, plotH);
+  drawColorBar(ctx, floorDb, left + plotW + 18, top, 14, plotH);
+}
+
+function drawAxes(ctx, frame, win, left, top, plotW, plotH) {
+  var R = frame.rangeBins;
+  ctx.fillStyle = "#b0b0be";
+  ctx.strokeStyle = "#5a5a68";
+  ctx.font = "11px sans-serif";
+
+  // Range on x.
+  var maxKm = rangeKm(frame, R - 1);
+  var kmPerBin = rangeKm(frame, 1);
+  var rStep = tickStep(maxKm, 8);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  for (var km = 0; km <= maxKm; km += rStep) {
+    var x = binToX(frame, km / kmPerBin, left, plotW);
+    ctx.beginPath();
+    ctx.moveTo(x, top + plotH);
+    ctx.lineTo(x, top + plotH + 5);
+    ctx.stroke();
+    ctx.fillText(km.toFixed(rStep < 1 ? 1 : 0), x, top + plotH + 8);
+  }
+  ctx.fillText("Bistatic range (km)", left + plotW / 2, top + plotH + 26);
+
+  // Doppler on y, positive up.
+  var loHz = dopplerHz(frame, win.lo);
+  var hiHz = dopplerHz(frame, win.hi);
+  var hzPerBin = binHz(frame);
+  var dStep = tickStep(hiHz - loHz, 8);
+  var first = Math.ceil(loHz / dStep) * dStep;
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  for (var hz = first; hz <= hiHz; hz += dStep) {
+    var y = binToY(win, hz / hzPerBin + frame.dopplerBins / 2, top, plotH);
+    ctx.beginPath();
+    ctx.moveTo(left - 5, y);
+    ctx.lineTo(left, y);
+    ctx.stroke();
+    ctx.fillText(hz.toFixed(0), left - 8, y);
+  }
+  ctx.save();
+  ctx.translate(14, top + plotH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("Bistatic Doppler (Hz)", 0, 0);
+  ctx.restore();
+}
+
+// Rings at the bin indices from the record, not at its km/Hz values: the bins
+// are exact.
+function drawDetections(ctx, frame, win, left, top, plotW, plotH) {
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 1.3;
+  for (var i = 0; i < frame.detections.length; i++) {
+    var det = frame.detections[i];
+    if (det.dopplerBin < win.lo || det.dopplerBin > win.hi) { continue; }
+    if (det.rangeBin >= frame.rangeBins) { continue; }
+    var x = binToX(frame, det.rangeBin, left, plotW);
+    var y = binToY(win, det.dopplerBin, top, plotH);
+    ctx.beginPath();
+    ctx.arc(x, y, 5, 0, 2 * Math.PI);
+    ctx.stroke();
+  }
+}
+
+function drawColorBar(ctx, floorDb, x, y, barW, barH) {
+  for (var i = 0; i < barH; i++) {
+    var t = 1 - i / (barH - 1);
+    var entry = 3 * ((t * 255) | 0);
+    ctx.fillStyle = "rgb(" + LUT[entry] + "," + LUT[entry + 1] + "," + LUT[entry + 2] + ")";
+    ctx.fillRect(x, y + i, barW, 1);
+  }
+  ctx.strokeStyle = "#5a5a68";
+  ctx.strokeRect(x + 0.5, y + 0.5, barW - 1, barH - 1);
+
+  ctx.fillStyle = "#b0b0be";
+  ctx.font = "11px sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  var step = tickStep(-floorDb, 5);
+  for (var db = 0; db >= floorDb; db -= step) {
+    var frac = (db - floorDb) / (0 - floorDb);
+    ctx.fillText(db.toFixed(0), x + barW + 4, y + barH * (1 - frac));
+  }
+}
+
+// --- header strip ----------------------------------------------------------
+
+function pick(row, key) {
+  if (row === null || row === undefined) { return null; }
+  var value = row[key];
+  return (typeof value === "number") ? value : null;
+}
+
+function updateHeader() {
+  var tel = state.telemetry;
+  var cfg = state.config;
+
+  el("runName").textContent = state.runName || "—";
+  el("fCpi").textContent = (state.shownCpi === null) ? "—" : String(state.shownCpi);
+  el("fTime").textContent = fixed(pick(tel, "signalTimeS"), 1, " s");
+  el("fLag").textContent = fixed(pick(tel, "lagS"), 2, " s");
+  el("fDsi").textContent = fixed(pick(tel, "dsiMs"), 1, " ms");
+  el("fArd").textContent = fixed(pick(tel, "ardMs"), 1, " ms");
+  el("fTotal").textContent = fixed(pick(tel, "totalMs"), 1, " ms");
+  el("fSupp").textContent = fixed(pick(tel, "suppressionDb"), 1, " dB");
+  el("fPeak").textContent = fixed(pick(tel, "peakDb"), 1, " dB");
+
+  var det = pick(tel, "detections");
+  var border = pick(tel, "borderDetections");
+  if (det === null) {
+    el("fDet").textContent = "—";
+  } else {
+    el("fDet").textContent = det.toFixed(0) +
+        (border === null ? "" : " [" + border.toFixed(0) + "]");
+  }
+
+  if (cfg === null || cfg === undefined) {
+    el("fConfig").textContent = "—";
+  } else {
+    el("fConfig").textContent = [cfg.DSI_ALGORITHM, cfg.DSI_BACKEND,
+        cfg.ARD_ALGORITHM, cfg.CFAR_PFA].map(function (v) {
+      return v ? v : "—";
+    }).join(" / ");
+  }
+
+  el("refValue").textContent =
+      (state.refDb === null) ? "—" : state.refDb.toFixed(1) + " dB";
+}
+
+function setMessage(text, isError) {
+  var node = el("message");
+  node.textContent = text;
+  node.className = isError ? "error" : "";
+}
+
+function updateMessage() {
+  if (state.latestCpi === null) {
+    setMessage("waiting for frames…", false);
+    return;
+  }
+  var age = (Date.now() - state.cpiChangedAt) / 1000;
+  if (age > STALE_S) {
+    setMessage("stale — no new CPI for " + age.toFixed(0) + " s", false);
+  } else {
+    setMessage("", false);
+  }
+}
+
+// --- polling ---------------------------------------------------------------
+
+function onStatus(status) {
+  if (status.runName !== state.runName) {
+    // A new run: the old running peak belongs to different data.
+    state.runName = status.runName;
+    state.refDb = null;
+    state.frame = null;
+    state.shownCpi = null;
+  }
+  state.telemetry = status.telemetry;
+  state.config = status.config;
+
+  if (status.latestCpi !== state.latestCpi) {
+    state.latestCpi = status.latestCpi;
+    state.cpiChangedAt = Date.now();
+  }
+
+  if (state.latestCpi !== null && state.latestCpi !== state.shownCpi &&
+      !state.fetching) {
+    fetchFrame();
+  }
+  updateHeader();
+  updateMessage();
+}
+
+function fetchFrame() {
+  state.fetching = true;
+  var cpi = null;
+  var wantRun = state.runName;
+  fetch("/api/frame/latest", {cache: "no-store"}).then(function (response) {
+    if (!response.ok) { throw new Error("frame request returned " + response.status); }
+    cpi = parseInt(response.headers.get("X-Pbr-Cpi"), 10);
+    return response.arrayBuffer();
+  }).then(function (buffer) {
+    if (state.runName !== wantRun) {
+      // The run changed while this was in flight; it belongs to the old one.
+      state.fetching = false;
+      return;
+    }
+    var frame = parseFrame(buffer);
+    state.frame = frame;
+    state.shownCpi = cpi;
+    if (state.refDb === null || frame.peakDb > state.refDb) {
+      state.refDb = frame.peakDb;
+    }
+    state.fetching = false;
+    updateHeader();
+    render();
+  }).catch(function (err) {
+    state.fetching = false;
+    setMessage(String(err.message || err), true);
+  });
+}
+
+function pollStatus() {
+  fetch("/api/status", {cache: "no-store"}).then(function (response) {
+    return response.json();
+  }).then(function (status) {
+    onStatus(status);
+  }).catch(function (err) {
+    setMessage("no server: " + String(err.message || err), true);
+  });
+}
+
+// --- wiring ----------------------------------------------------------------
+
+el("fdMax").addEventListener("change", render);
+el("floorDb").addEventListener("change", render);
+el("resetRef").addEventListener("click", function () {
+  state.refDb = (state.frame === null) ? null : state.frame.peakDb;
+  updateHeader();
+  render();
+});
+window.addEventListener("resize", render);
+
+pollStatus();
+setInterval(pollStatus, POLL_MS);
+</script>
+</body>
+</html>
