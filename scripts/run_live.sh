@@ -24,7 +24,7 @@ set -euo pipefail
 
 # Everything about the processing comes from config/prb.conf. The only thing
 # this script decides is how long to run and where to put the output.
-SECONDS_TO_RUN=30
+SECONDS_TO_RUN=180
 OUTROOT="${OUTROOT:-/data/results}"
 
 while [[ $# -gt 0 ]]; do
@@ -60,7 +60,7 @@ echo "Setting nvpmodel mode 0 (max)"
 sudo nvpmodel -m 0 || echo "  (nvpmodel failed; continuing)"
 echo "Pinning clocks"
 sudo jetson_clocks || echo "  (jetson_clocks failed; continuing UNPINNED -- not citable)"
-echo 255 | sudo tee /sys/devices/pwm-fan/target_pwm >/dev/null || true
+echo 100 | sudo tee /sys/devices/pwm-fan/target_pwm >/dev/null || true
 sudo jetson_clocks --show > "${OUTDIR}/clocks.txt" 2>&1 || true
 
 sudo tegrastats --interval 1000 --logfile "${OUTDIR}/tegrastats.log" &

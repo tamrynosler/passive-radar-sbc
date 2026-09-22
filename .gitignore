@@ -44,6 +44,7 @@ venv/
 
 # Legacy code
 legacy/
+matlab/legacy/
 
 # Agent standards + session records (local only, not for the repo or Jetson)
 CLAUDE.md

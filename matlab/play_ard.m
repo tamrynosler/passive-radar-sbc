@@ -23,7 +23,7 @@ function play_ard(dirPath, fdMax, fps, videoPath)
     if nargin < 1 || isempty(dirPath),   dirPath   = '../data/ard_live'; end
     if nargin < 2 || isempty(fdMax),     fdMax     = 400;        end
     if nargin < 3 || isempty(fps),       fps       = 8;          end
-    if nargin < 4,                       videoPath = 'flight_test_4.mp4';         end
+    if nargin < 4,                       videoPath = 'flight_test_wgn_1.mp4';         end
 
     files = dir(fullfile(dirPath, 'ard_*.bin'));
     assert(~isempty(files), 'no ard_*.bin files in %s', dirPath);
