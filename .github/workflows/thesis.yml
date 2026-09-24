@@ -1,0 +1,28 @@
+name: thesis
+
+# Compiles the thesis on every push that touches Report/, so a broken
+# \include or a missing figure is caught immediately rather than the week
+# before submission. Runs latexmk inside Report/ so it reads Report/latexmkrc.
+
+on:
+  push:
+    paths: ['Report/**', '.github/workflows/thesis.yml']
+  pull_request:
+    paths: ['Report/**', '.github/workflows/thesis.yml']
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile thesis
+        uses: xu-cheng/latex-action@v3
+        with:
+          working_directory: Report
+          root_file: 0_main.tex
+          latexmk_use_lualatex: false
+          args: -pdf -interaction=nonstopmode -file-line-error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: thesis
+          path: Report/0_main.pdf

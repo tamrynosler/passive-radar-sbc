@@ -1,0 +1,58 @@
+%=====================================================================
+%   LITERATURE REVIEW
+%=====================================================================
+%   Replace this chapter with your own. What is here is a demonstration of
+%   how to cite, kept because it is the thing people get wrong.
+%
+%   The keys cited below are PLACEHOLDERS from thesis.bib. They exist to show
+%   the citation commands working. Do not leave them in your thesis.
+%=====================================================================
+\chapter{Literature review}
+\label{ch:review}
+
+%---------------------------------------------------------------------
+%   HOW TO CITE
+%---------------------------------------------------------------------
+%   natbib gives you two forms, and they are NOT interchangeable.
+%
+%     \citet{key}   TEXTUAL. The author becomes part of the sentence.
+%                   "As \citet{shannon1948} showed, ..."
+%                   -> As Shannon (1948) showed, ...
+%
+%     \citep{key}   PARENTHETICAL. The whole citation sits in brackets at
+%                   the end of a clause.
+%                   "...is a solved problem \citep{shannon1948}."
+%                   -> ...is a solved problem (Shannon, 1948).
+%
+%   \cite{key} behaves like \citet in author-year mode and like a numeric
+%   citation in IEEE mode, so it reads differently depending on the switch at
+%   the top of 0_main.tex. Prefer \citet and \citep: they always mean what
+%   they say.
+%
+%   In IEEE mode both come out as [1], which is why IEEE citations are easier
+%   to write and harder to read.
+%---------------------------------------------------------------------
+
+Textual, where the author is the subject of the sentence:
+\citet{shannon1948} established the information-theoretic limits that still
+bound modern communication systems.
+
+Parenthetical, at the end of a clause:
+The effect is well documented \citep{placeholder_article}.
+
+Several sources at once, which natbib sorts and compresses:
+The same conclusion is reached by three independent routes
+\citep{placeholder_article,placeholder_book,placeholder_conference}.
+
+A page, chapter or section within a source:
+The register map is given in full \citep[Ch.~8]{placeholder_website}.
+
+The year alone, where the sentence already names the author:
+Shannon's channel capacity theorem \citeyearpar{shannon1948} is the origin of
+the result.
+
+%---------------------------------------------------------------------
+%   thesis.bib ships with one example of each entry type: article, book,
+%   chapter in an edited book, conference paper, thesis, technical report and
+%   website. Copy the nearest one and edit it.
+%---------------------------------------------------------------------

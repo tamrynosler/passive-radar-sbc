@@ -29,6 +29,10 @@ results/
 # from the ARD snapshots, so not worth version controlling.
 *.mp4
 *.png
+# ...except thesis figures and input PDFs, which are source assets. See
+# Report/.gitignore. The CI build fails on a clean clone without them.
+!Report/figs/**
+!Report/pdfs/**
 
 # Editor / OS
 .vscode/
