@@ -123,6 +123,20 @@ foreach(app_src ${APP_SOURCES})
   target_link_libraries(${app_name} ${PBR_LIB} ${PBR_CUDA_LIBS})
 endforeach()
 
+# uhd_to_vita49 is the one executable that talks to the USRP. UHD (apt
+# libuhd-dev on the Nano, approved 2026-09-25) is optional: without it the
+# driver still builds and offers --synth only, so the transport can be tested
+# on any machine. UHD 3.10 ships UHDConfig.cmake, hence find_package.
+find_package(UHD QUIET)
+if(UHD_FOUND)
+  target_compile_definitions(uhd_to_vita49 PRIVATE PBR_HAVE_UHD)
+  target_include_directories(uhd_to_vita49 PRIVATE ${UHD_INCLUDE_DIRS})
+  target_link_libraries(uhd_to_vita49 ${UHD_LIBRARIES})
+  message(STATUS "UHD ${UHD_VERSION} found: uhd_to_vita49 has USRP support")
+else()
+  message(STATUS "UHD not found: uhd_to_vita49 built with --synth only")
+endif()
+
 # ---------------------------------------------------------------------------
 # Tests (MATLAB-vs-CUDA validation) — enabled once tests/ gains sources
 # ---------------------------------------------------------------------------

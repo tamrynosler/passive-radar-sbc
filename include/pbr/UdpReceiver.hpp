@@ -39,6 +39,11 @@ public:
     // what was really allocated, and raise net.core.rmem_max if it is short.
     bool open(uint16_t uPort, int iRequestedRcvBufBytes = 4 * 1024 * 1024);
 
+    // Join an IPv4 multicast group (224.0.0.0/4) on the open socket, so a
+    // stream sent to that group by uhd_to_vita49 arrives here alongside any
+    // other client that joined it. Unicast traffic to the port still arrives.
+    bool joinMulticastGroup(const char* pGroup);
+
     void close();
     bool isOpen() const { return miSocket >= 0; }
 

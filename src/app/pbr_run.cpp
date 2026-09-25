@@ -73,6 +73,7 @@ struct Options {
     std::string sCapturePath;       // empty means live
     std::string sConfigPath = kDefaultConfigPath;
     std::string sOutDir;            // empty means console only
+    std::string sMulticastGroup;    // empty means plain unicast on UDP_PORT
     double      dSeconds    = 0.0;  // 0 means "until the source ends"
     bool        bLive       = false;
 };
@@ -83,6 +84,8 @@ void printUsage(const char* pProgram)
     std::printf("  --live           receive from FERS over UDP\n");
     std::printf("  --file FILE      replay a .pbrcap capture instead\n");
     std::printf("  --seconds N      stop after N seconds (live only)\n");
+    std::printf("  --group ADDR     also join this multicast group (live only), the\n");
+    std::printf("                   way uhd_to_vita49 feeds several clients at once\n");
     std::printf("  --out DIR        write results here: ard/ snapshots,\n");
     std::printf("                   telemetry.csv and detections.csv\n");
     std::printf("  --config FILE    configuration (default %s)\n", kDefaultConfigPath);
@@ -105,6 +108,7 @@ bool parseArgs(int argc, char* argv[], Options& o)
         else if (sArg == "--config" && bV)      o.sConfigPath = argv[++i];
         else if (sArg == "--out" && bV)         o.sOutDir = argv[++i];
         else if (sArg == "--seconds" && bV)     o.dSeconds = std::atof(argv[++i]);
+        else if (sArg == "--group" && bV)       o.sMulticastGroup = argv[++i];
         else {
             std::fprintf(stderr, "unrecognised or incomplete argument: %s\n", sArg.c_str());
             return false;
@@ -265,6 +269,11 @@ int main(int argc, char* argv[])
     if (oOptions.bLive) {
         if (!oReceiver.open(oCfg.uUdpPort))
             return 1;
+        if (!oOptions.sMulticastGroup.empty()) {
+            if (!oReceiver.joinMulticastGroup(oOptions.sMulticastGroup.c_str()))
+                return 1;
+            std::printf("joined multicast group %s\n", oOptions.sMulticastGroup.c_str());
+        }
         // The single-threaded design rests on this buffer absorbing the
         // ~272 KB that arrives while a CPI is being processed, so report what
         // the kernel actually granted rather than what was asked for.
@@ -275,7 +284,7 @@ int main(int argc, char* argv[])
         if (dSlackSeconds < 1.0)
             std::printf("  WARNING: under 1 s of slack. Raise "
                         "net.core.rmem_max on the board.\n");
-        std::printf("listening on UDP port %u -- start fers-cli now\n\n",
+        std::printf("listening on UDP port %u -- start fers-cli or uhd_to_vita49 now\n\n",
                     static_cast<unsigned>(oCfg.uUdpPort));
     } else if (!oReader.open(oOptions.sCapturePath.c_str())) {
         return 1;

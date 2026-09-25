@@ -80,6 +80,32 @@ bool UdpReceiver::open(uint16_t uPort, int iRequestedRcvBufBytes)
     return true;
 }
 
+bool UdpReceiver::joinMulticastGroup(const char* pGroup)
+{
+    CHECK(miSocket >= 0, "joinMulticastGroup before open");
+    CHECK(pGroup != nullptr && pGroup[0] != '\0', "joinMulticastGroup with an empty group");
+
+    ip_mreq oReq;
+    std::memset(&oReq, 0, sizeof(oReq));
+    if (::inet_pton(AF_INET, pGroup, &oReq.imr_multiaddr) != 1) {
+        std::fprintf(stderr, "UdpReceiver: multicast group %s is not dotted IPv4\n", pGroup);
+        return false;
+    }
+    if ((ntohl(oReq.imr_multiaddr.s_addr) >> 28) != 0xEu) {
+        std::fprintf(stderr, "UdpReceiver: %s is not a multicast address\n", pGroup);
+        return false;
+    }
+    // INADDR_ANY: the kernel joins on the interface its routing table picks
+    // for the group, which on a single-homed board is the only one.
+    oReq.imr_interface.s_addr = htonl(INADDR_ANY);
+
+    if (::setsockopt(miSocket, IPPROTO_IP, IP_ADD_MEMBERSHIP, &oReq, sizeof(oReq)) < 0) {
+        std::fprintf(stderr, "UdpReceiver: joining %s failed: %s\n", pGroup, std::strerror(errno));
+        return false;
+    }
+    return true;
+}
+
 void UdpReceiver::close()
 {
     if (miSocket >= 0) {
