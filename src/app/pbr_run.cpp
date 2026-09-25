@@ -378,6 +378,7 @@ std::string configDiff(const PbrConfig& oOld, const PbrConfig& oNew,
 // the main loop's thread (servePending is polled), so no locking.
 struct Control {
     const PbrConfig* pCurrent = nullptr;
+    const PbrConfig* pInitial = nullptr;   // the file's set, as loaded at startup
     PbrConfig        oPending;
     bool             bPending = false;
     std::string      sPendingDiff;
@@ -396,6 +397,35 @@ bool controlHandler(const std::string& sMethod, const std::string& sPath,
 
     if (sPath == "/api/config" && sMethod == "GET") {
         setText(oResponse, pbrConfigToText(*pCtl->pCurrent));
+        return true;
+    }
+
+    if (sPath == "/api/reset" && sMethod == "POST") {
+        // Back to the config file's values. If the source's sample rate made
+        // the chain adapt, the file's windows are re-adapted the same way, so
+        // the reset lands on what the file would have meant at this rate.
+        PbrConfig   oCandidate = *pCtl->pInitial;
+        std::string sReport;
+        if (oCandidate.uSampleRateHz != pCtl->pCurrent->uSampleRateHz &&
+            !adaptPbrConfigToSampleRate(*pCtl->pInitial, pCtl->pCurrent->uSampleRateHz,
+                                        oCandidate, sReport)) {
+            oResponse.iStatus = 400;
+            setText(oResponse, "refused: the file's settings cannot be adapted to the "
+                               "source's rate:\n" + sReport);
+            return true;
+        }
+        std::vector<std::string> vKeys;
+        const std::string sDiff = configDiff(*pCtl->pCurrent, oCandidate, &vKeys);
+        if (vKeys.empty()) {
+            pCtl->bPending = false;
+            setText(oResponse, "already at the config file's values\n");
+            return true;
+        }
+        pCtl->oPending     = oCandidate;
+        pCtl->bPending     = true;
+        pCtl->sPendingDiff = sDiff;
+        setText(oResponse, "reset accepted; applies at the next CPI boundary (after CPI " +
+                           std::to_string(pCtl->uCpiIndex) + "):\n" + sDiff);
         return true;
     }
 
@@ -569,13 +599,15 @@ int main(int argc, char* argv[])
     }
 
     // ---- the control port ---------------------------------------------------
+    const PbrConfig oInitialCfg = oCfg;   // the file's set, for the Reset button
     Control    oControl;
     oControl.pCurrent = &oCfg;
+    oControl.pInitial = &oInitialCfg;
     HttpServer oControlServer;
     if (oCfg.uControlPort != 0) {
         if (!oControlServer.open(oCfg.uControlPort))
             return 1;
-        std::printf("  control       http://<this host>:%u  (GET /api/config, POST /api/apply)\n",
+        std::printf("  control       http://<this host>:%u  (GET /api/config, POST /api/apply, POST /api/reset)\n",
                     static_cast<unsigned>(oCfg.uControlPort));
     }
     std::printf("\n");

@@ -14,6 +14,7 @@
 //   GET  /api/config         the chain's live parameter set (forwarded)
 //   POST /api/apply          KEY = VALUE lines for the chain (forwarded);
 //                            the chain's answer comes back as the body
+//   POST /api/reset          back to the chain's config file values (forwarded)
 //
 // The last two are forwarded to pbr_run's control port. Its address is
 // learnt, not configured: the host is whoever sends the frames, the port is
@@ -303,6 +304,11 @@ bool handleRequest(const std::string& sMethod, const std::string& sPath,
 
     if (sPath == "/api/apply" && sMethod == "POST") {
         forwardToChain(pShared, "POST", "/api/apply", sBody, oResponse);
+        return true;
+    }
+
+    if (sPath == "/api/reset" && sMethod == "POST") {
+        forwardToChain(pShared, "POST", "/api/reset", "", oResponse);
         return true;
     }
 

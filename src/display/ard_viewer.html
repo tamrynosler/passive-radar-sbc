@@ -81,6 +81,7 @@
     <span class="field"><span class="label">parameters</span>
       <button id="cfgLoad">Load</button>
       <button id="cfgApply">Apply</button>
+      <button id="cfgReset">Reset to file</button>
       <span class="value" id="cfgResult">&mdash;</span>
     </span>
   </div>
@@ -644,8 +645,23 @@ function applyConfig() {
   });
 }
 
+function resetConfig() {
+  setCfgResult("resetting…", false);
+  fetch("/api/reset", {method: "POST", cache: "no-store", body: ""}).then(function (response) {
+    return response.text().then(function (text) {
+      setCfgResult(text.trim().split("\n")[0], !response.ok);
+      if (!response.ok) { window.alert(text); }
+      // The chain applies at the next boundary; refetch after it has.
+      setTimeout(loadConfig, 2500);
+    });
+  }).catch(function (err) {
+    setCfgResult(String(err.message || err), true);
+  });
+}
+
 el("cfgLoad").addEventListener("click", loadConfig);
 el("cfgApply").addEventListener("click", applyConfig);
+el("cfgReset").addEventListener("click", resetConfig);
 
 el("fdMax").addEventListener("change", render);
 el("floorDb").addEventListener("change", render);
