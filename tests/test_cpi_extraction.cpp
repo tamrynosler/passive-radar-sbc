@@ -85,10 +85,12 @@ void buildHeader(std::vector<uint8_t>& v, uint32_t uType, uint32_t uStreamId,
     putBe64(&v[20], uPs);
 }
 
-std::vector<uint8_t> makeContext(uint32_t uStreamId, const char* pName)
+std::vector<uint8_t> makeContext(uint32_t uStreamId, const char* pName,
+                                 const char* pSession = "s1")
 {
     const std::string sJson =
-        std::string("{\"receiver\":{\"mode\":\"cw\",\"name\":\"") + pName + "\"}}";
+        std::string("{\"receiver\":{\"mode\":\"cw\",\"name\":\"") + pName +
+        "\",\"session\":\"" + pSession + "\"}}";
     const size_t uPadded = (sJson.size() + 1 + 3) & ~size_t(3);
 
     std::vector<uint8_t> v(92 + uPadded, 0);
@@ -292,6 +294,90 @@ void testGapSkippedForCoverage()
     assert(oStats.uCpisEmitted == 1);
 }
 
+// The no-antenna case: every sample is exactly zero, but every sample came
+// from a packet. Coverage is about packets, not values, so this is Ready.
+// Under the old value-based test this window was rejected as 0% covered.
+void testAllZeroSamplesWithFullCoverageIsReady()
+{
+    ChannelIngest oIngest(makeConfig());
+    resolveRoles(oIngest);
+
+    std::vector<uint8_t> v;
+    for (uint64_t u = 0; u < kCpi; u += kPacket) {
+        for (int i = 0; i < 2; ++i) {
+            v = makeData(i == 0 ? kRefId : kSurId, 1000 + u, kPacket);
+            // Overwrite the payload with zeros; header and trailer stay.
+            for (size_t k = 28; k < v.size() - 4; ++k) v[k] = 0;
+            feed(oIngest, v);
+        }
+    }
+
+    std::vector<ComplexF> vcRef(kCpi), vcSur(kCpi);
+    uint64_t uStart = 0;
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uStart)
+           == CpiStatus::Ready);
+    assert(uStart == 1000);
+    for (uint64_t u = 0; u < kCpi; ++u)
+        assert(vcRef[u] == ComplexF(0.0f, 0.0f) && vcSur[u] == ComplexF(0.0f, 0.0f));
+    assert(oIngest.stats().uCpisSkippedCoverage == 0);
+    assert(oIngest.stats().uCpisEmitted == 1);
+}
+
+// A driver restarted from another clock sends indices far behind what the
+// buffers hold. Rather than reject every packet until wall time catches up
+// (days, if the clock was wrong), the ingest forgets the old timeline and
+// anchors again at the new one.
+void testBackwardsJumpReanchors()
+{
+    ChannelIngest oIngest(makeConfig());
+    resolveRoles(oIngest);
+
+    // Two CPIs at a high index, both handed over.
+    feedRange(oIngest, 100000, 2 * kCpi);
+    std::vector<ComplexF> vcRef(kCpi), vcSur(kCpi);
+    uint64_t uStart = 0;
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uStart) == CpiStatus::Ready);
+    assert(uStart == 100000);
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uStart) == CpiStatus::Ready);
+    assert(oIngest.stats().uReanchors == 0);
+
+    // A packet slightly late (inside one buffer length) is still just a
+    // stale write, no re-anchor.
+    feed(oIngest, makeData(kRefId, 100000 + 2 * kCpi - kCap - 5, kPacket));
+    assert(oIngest.stats().uReanchors == 0);
+
+    // Now the timeline goes back by far more than a buffer: re-anchor, and
+    // the next CPI comes out at the new start with correct samples.
+    feedRange(oIngest, 5000, kCpi + kPacket);
+    assert(oIngest.stats().uReanchors >= 1);
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uStart) == CpiStatus::Ready);
+    assert(uStart == 5000);
+    expectWindow(vcRef, 5000);
+    expectWindow(vcSur, 5000);
+}
+
+// A new driver session id on a stream is reported and counted; the same id
+// again is not.
+void testSessionChangeIsCounted()
+{
+    ChannelIngest oIngest(makeConfig());
+    feed(oIngest, makeContext(kRefId, kRefName, "aaaa"));
+    feed(oIngest, makeContext(kSurId, kSurName, "aaaa"));
+    feed(oIngest, makeContext(kRefId, kRefName, "aaaa"));
+    assert(oIngest.stats().uSessionChanges == 0);
+    feed(oIngest, makeContext(kRefId, kRefName, "bbbb"));
+    assert(oIngest.stats().uSessionChanges == 1);
+    feed(oIngest, makeContext(kSurId, kSurName, "bbbb"));
+    assert(oIngest.stats().uSessionChanges == 2);
+    assert(oIngest.rolesResolved());
+
+    // The summary names both streams with their roles.
+    const std::string sSummary = oIngest.streamSummary();
+    assert(sSummary.find("RefRx") != std::string::npos);
+    assert(sSummary.find("(reference)") != std::string::npos);
+    assert(sSummary.find("(surveillance)") != std::string::npos);
+}
+
 void testOvertakenWindowIsSkipped()
 {
     ChannelIngest oIngest(makeConfig());
@@ -418,6 +504,9 @@ int main()
     testSequentialCpisOnTheHopLattice();
     testAnchorUsesTheLaterChannel();
     testGapSkippedForCoverage();
+    testAllZeroSamplesWithFullCoverageIsReady();
+    testBackwardsJumpReanchors();
+    testSessionChangeIsCounted();
     testOvertakenWindowIsSkipped();
     testOverlappingHop();
     testRejectsBadArguments();

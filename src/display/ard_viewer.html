@@ -68,12 +68,27 @@
     <span class="field"><span class="label">peak</span><span class="value" id="fPeak">&mdash;</span></span>
     <span class="field"><span class="label">det</span><span class="value" id="fDet">&mdash;</span></span>
     <span class="field"><span class="label">config</span><span class="value" id="fConfig">&mdash;</span></span>
+    <span class="field"><span class="label">dropped</span><span class="value" id="fDropped">&mdash;</span></span>
   </div>
 </header>
 
 <div id="message">starting&hellip;</div>
 
 <div class="plot"><canvas id="view"></canvas></div>
+
+<div class="controls" id="params">
+  <div class="row">
+    <span class="field"><span class="label">parameters</span>
+      <button id="cfgLoad">Load</button>
+      <button id="cfgApply">Apply</button>
+      <span class="value" id="cfgResult">&mdash;</span>
+    </span>
+  </div>
+  <textarea id="cfgText" rows="10" spellcheck="false"
+    style="width:100%; box-sizing:border-box; font-family:monospace; font-size:12px;
+           background:#101014; color:#ddd; border:1px solid #333; margin-top:6px;"
+    placeholder="Load fetches the chain's live KEY = VALUE set; edit values; Apply sends the whole set back. Changes take effect at the next CPI boundary. The config file is never written."></textarea>
+</div>
 
 <div class="controls">
   <div class="row">
@@ -106,7 +121,8 @@
 //       32     8  uint64 dopplerDecimation   dec
 //       40     8  uint64 cpiStartIndex
 //       48     8  uint64 detections          N
-//       56     8  reserved
+//       56     8  uint64 status: 0 processed, 1 null input, 2 stage failed
+//                 (a blank frame: all-zero map, no detections)
 //       64  8*R*D map, interleaved float32 I,Q, map[doppler*R + range]
 //      ...    48  per detection: uint64 rangeBin, uint64 dopplerBin,
 //                 float64 rangeKm, dopplerHz, powerDb, snrDb
@@ -124,8 +140,11 @@ var state = {
   cpiChangedAt: 0,
   refDb: null,          // running maximum frame peak, the 0 dB reference
   frame: null,
-  telemetry: null,
+  telemetry: null,       // the status JSON pbr_run streamed with the frame
   config: null,
+  streamStatus: 0,       // 0 processed, 1 null input, 2 a stage failed
+  reason: "",
+  framesDropped: 0,
   fetching: false
 };
 
@@ -191,7 +210,8 @@ function parseFrame(buffer) {
     sampleRateHz: readU64(view, 24),
     dopplerDecimation: readU64(view, 32),
     cpiStartIndex: readU64(view, 40),
-    detectionCount: readU64(view, 48)
+    detectionCount: readU64(view, 48),
+    status: readU64(view, 56)
   };
 
   var cells = frame.rangeBins * frame.dopplerBins;
@@ -286,6 +306,7 @@ function drawMap(frame, win, floorDb, refDb) {
   var image = ctx.createImageData(R, win.count);
   var pixels = image.data;
   var scale = 1 / (0 - floorDb);
+  if (refDb === null || !isFinite(refDb)) { refDb = 0; }   // nothing to reference yet
 
   for (var d = win.lo; d <= win.hi; d++) {
     // Canvas y grows downward and positive Doppler is up, so the top row of
@@ -480,6 +501,7 @@ function updateHeader() {
 
   el("refValue").textContent =
       (state.refDb === null) ? "—" : state.refDb.toFixed(1) + " dB";
+  el("fDropped").textContent = String(state.framesDropped);
 }
 
 function setMessage(text, isError) {
@@ -496,6 +518,12 @@ function updateMessage() {
   var age = (Date.now() - state.cpiChangedAt) / 1000;
   if (age > STALE_S) {
     setMessage("stale — no new CPI for " + age.toFixed(0) + " s", false);
+  } else if (state.streamStatus === 1) {
+    // Frames are arriving, so the chain is alive; the input is what is
+    // wrong (no antenna, dead front end). The map is blank on purpose.
+    setMessage("receiving, nothing to process: " + (state.reason || "null input"), true);
+  } else if (state.streamStatus === 2) {
+    setMessage("receiving, processing failed: " + (state.reason || "stage error"), true);
   } else {
     setMessage("", false);
   }
@@ -504,15 +532,22 @@ function updateMessage() {
 // --- polling ---------------------------------------------------------------
 
 function onStatus(status) {
-  if (status.runName !== state.runName) {
+  // ard_view relays pbr_run's status datagram verbatim as "stream"; its keys
+  // are the telemetry column names plus runName, status, reason and config.
+  var stream = status.stream || null;
+  var runName = stream ? stream.runName : null;
+  if (runName !== state.runName) {
     // A new run: the old running peak belongs to different data.
-    state.runName = status.runName;
+    state.runName = runName;
     state.refDb = null;
     state.frame = null;
     state.shownCpi = null;
   }
-  state.telemetry = status.telemetry;
-  state.config = status.config;
+  state.telemetry = stream;
+  state.config = stream ? (stream.config || null) : null;
+  state.streamStatus = stream ? (stream.status || 0) : 0;
+  state.reason = stream ? (stream.reason || "") : "";
+  state.framesDropped = status.framesDropped || 0;
 
   if (status.latestCpi !== state.latestCpi) {
     state.latestCpi = status.latestCpi;
@@ -544,7 +579,9 @@ function fetchFrame() {
     var frame = parseFrame(buffer);
     state.frame = frame;
     state.shownCpi = cpi;
-    if (state.refDb === null || frame.peakDb > state.refDb) {
+    // A blank frame has no peak; it must not set (or reset) the reference.
+    if (frame.status === 0 && isFinite(frame.peakDb) &&
+        (state.refDb === null || frame.peakDb > state.refDb)) {
       state.refDb = frame.peakDb;
     }
     state.fetching = false;
@@ -567,6 +604,48 @@ function pollStatus() {
 }
 
 // --- wiring ----------------------------------------------------------------
+
+// --- live parameters ---------------------------------------------------------
+//
+// The viewer forwards these to the chain's control port (learnt from the
+// stream). Apply sends the whole edited set; the chain validates it as one,
+// applies at the next CPI boundary, or answers with the reason it refused.
+
+function setCfgResult(text, isError) {
+  var node = el("cfgResult");
+  node.textContent = text;
+  node.style.color = isError ? "#f88" : "#8f8";
+}
+
+function loadConfig() {
+  setCfgResult("loading…", false);
+  fetch("/api/config", {cache: "no-store"}).then(function (response) {
+    return response.text().then(function (text) {
+      if (!response.ok) { throw new Error(text); }
+      el("cfgText").value = text;
+      setCfgResult("loaded " + new Date().toLocaleTimeString(), false);
+    });
+  }).catch(function (err) {
+    setCfgResult(String(err.message || err), true);
+  });
+}
+
+function applyConfig() {
+  setCfgResult("applying…", false);
+  fetch("/api/apply", {method: "POST", cache: "no-store", body: el("cfgText").value,
+                       headers: {"Content-Type": "text/plain"}}).then(function (response) {
+    return response.text().then(function (text) {
+      setCfgResult(text.trim().split("\n")[0], !response.ok);
+      if (text.indexOf("\n") > 0) { el("cfgText").placeholder = text; }
+      if (!response.ok) { window.alert(text); }
+    });
+  }).catch(function (err) {
+    setCfgResult(String(err.message || err), true);
+  });
+}
+
+el("cfgLoad").addEventListener("click", loadConfig);
+el("cfgApply").addEventListener("click", applyConfig);
 
 el("fdMax").addEventListener("change", render);
 el("floorDb").addEventListener("change", render);

@@ -65,6 +65,7 @@ Vita49StreamInfo makeInfo(uint32_t uStreamId, const char* pName, unsigned uChann
     oInfo.bExtRef        = false;
     oInfo.sDevice        = "USRP N210 BasicRX";
     oInfo.sDriverVersion = "3.10.3";
+    oInfo.sSessionId     = "cafe1234";
     return oInfo;
 }
 
@@ -286,6 +287,8 @@ void testContextPacketParsesAndNames()
 
     const std::string sJson(oPacket.pJson, oPacket.uJsonLength);
     assert(sJson.find("\"context_flags\":8") != std::string::npos);
+    assert(findJsonString(oPacket.pJson, oPacket.uJsonLength, "session", sValue, uReceiverAt));
+    assert(sValue == "cafe1234");
     assert(sJson.find("\"schema\":\"fers-vita49-context-v1\"") != std::string::npos);
 
     // Sample-loss flag sets both the JSON flag and the state indicator bit.

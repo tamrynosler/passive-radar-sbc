@@ -1,11 +1,17 @@
 // uhd_to_vita49 -- two channels from a USRP N210 over UHD, streamed as
 // VITA 49.2 UDP in the FERS profile that pbr_run --live already accepts.
 //
-//   USRP N210, BasicRX: RX-A = reference (ch 0), RX-B = surveillance (ch 1)
+//   USRP2 / N210 with BasicRX: RX-A = reference (ch 0), RX-B = surveillance (ch 1)
 //       -> UHD sc16 recv()  ->  Vita49Writer  ->  UdpSender  ->  pbr_run --live
 //
+// The lab's board (probed 2026-09-25) is a USRP2 r4, serial 627, at its
+// factory address 192.168.10.2, FW 12.4 / FPGA 10.1 on its SD card, ltc2284
+// 14-bit ADC, BasicRX on slot A. UHD treats the USRP2 and the N2x0 the same
+// way and everything here applies to both; the device name in the context
+// packets is read from the board rather than assumed.
+//
 // Usage:
-//   ./uhd_to_vita49 --config config/usrp.conf                    # the USRP
+//   ./uhd_to_vita49 --config config/prb.conf                    # the USRP
 //   ./uhd_to_vita49 --synth --dest 127.0.0.1:4991 --seconds 30   # no hardware
 //   ./uhd_to_vita49 --args addr=192.168.10.2 --fc 89e6 --ext-ref
 //
@@ -42,6 +48,7 @@
 #include "pbr/Vita49Writer.hpp"
 #include "pbr/check.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <csignal>
@@ -52,6 +59,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <unistd.h>
 
 #ifdef PBR_HAVE_UHD
 #include <uhd/exception.hpp>
@@ -88,6 +97,7 @@ struct Options {
     std::string sSurName  = "ArmasuisseSurRxClean";
     double      dSeconds  = 0.0;                // 0 = until Ctrl-C
     bool        bSynth    = false;
+    bool        bSynthSilent = false;           // all-zero samples: tests the chain's blank-frame path
     uint64_t    uSynthDelay   = 20;             // planted target, samples
     int64_t     iSynthDoppler = 37;             // planted target, Hz
 
@@ -115,6 +125,7 @@ void printUsage(const char* pProgram)
     std::printf("  --sur-name NAME   receiver.name for stream 2 (default FERS's)\n");
     std::printf("  --seconds N       stop after N seconds (default: until Ctrl-C)\n");
     std::printf("  --synth           synthetic two-channel signal instead of the USRP\n");
+    std::printf("  --synth-silent    with --synth: send exact zeros (a dead front end)\n");
     std::printf("  --synth-delay N   planted target delay in samples (default 20)\n");
     std::printf("  --synth-doppler HZ planted target Doppler, whole Hz (default 37)\n");
 }
@@ -156,6 +167,7 @@ bool parseArgs(int argc, char* argv[], Options& o)
         else if (sArg == "--sur-name" && bV)        { o.sSurName = argv[++i]; o.bSurNameGiven = true; }
         else if (sArg == "--seconds" && bV)           o.dSeconds = std::atof(argv[++i]);
         else if (sArg == "--synth")                   o.bSynth = true;
+        else if (sArg == "--synth-silent")            o.bSynthSilent = true;
         else if (sArg == "--synth-delay" && bV)       o.uSynthDelay = std::strtoull(argv[++i], nullptr, 10);
         else if (sArg == "--synth-doppler" && bV)     o.iSynthDoppler = std::strtoll(argv[++i], nullptr, 10);
         else {
@@ -164,6 +176,13 @@ bool parseArgs(int argc, char* argv[], Options& o)
         }
     }
     return true;
+}
+
+// Whole seconds of host time, for the session id.
+long hostNowSecondsCoarse()
+{
+    return static_cast<long>(std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
 // Ctrl-C sets a flag; the loop notices, closes the streams and reports.
@@ -198,7 +217,10 @@ public:
           mbExtRef(false),
           mbRefLocked(false),
           muMaxSamps(0),
+          mbFirstRecv(true),
           muTimeouts(0),
+          muConsecutiveTimeouts(0),
+          muRestarts(0),
           muOverflows(0),
           muOtherErrors(0),
           mbHaveTimeoutLog(false)
@@ -217,6 +239,9 @@ public:
     double sampleRateHz() const override { return mdActualRateHz; }
     bool referenceLocked() const override { return mbExtRef && mbRefLocked; }
 
+    // UHD's name for the motherboard, e.g. "USRP2 r4" or "N210r4".
+    const std::string& mboardName() const { return msMboardName; }
+
     uint64_t timeouts()    const { return muTimeouts; }
     uint64_t overflows()   const { return muOverflows; }
     uint64_t otherErrors() const { return muOtherErrors; }
@@ -225,18 +250,28 @@ private:
     uhd::usrp::multi_usrp::sptr mpUsrp;
     uhd::rx_streamer::sptr      mpRx;
     std::vector<void*>          mvBuffs;
+    std::string                 msMboardName;
 
     double   mdActualRateHz;
     bool     mbExtRef;
     bool     mbRefLocked;
     size_t   muMaxSamps;
+    bool     mbFirstRecv;
 
     uint64_t muTimeouts;
+    uint64_t muConsecutiveTimeouts;
+    uint64_t muRestarts;
     uint64_t muOverflows;
     uint64_t muOtherErrors;
     std::chrono::steady_clock::time_point moLastTimeoutLog;
     bool     mbHaveTimeoutLog;
 };
+
+// Timeouts in a row before the stream command is re-issued. With a 1 s
+// receive timeout this is ten seconds of silence: a pulled cable, a power
+// cycle. The driver never gives up on its own (author's rule: no timeouts
+// that end a program); it keeps re-issuing and keeps saying so.
+const uint64_t kTimeoutsBeforeRestart = 10;
 
 bool UsrpSource::open(const std::string& sArgs, double dFs, double dFc,
                       double dGain0, double dGain1, bool bExtRef)
@@ -250,6 +285,7 @@ bool UsrpSource::open(const std::string& sArgs, double dFs, double dFc,
         // Two ADC channels through separate DDCs: RX-A and RX-B of the BasicRX.
         mpUsrp->set_rx_subdev_spec(uhd::usrp::subdev_spec_t("A:A A:B"));
         std::printf("%s\n", mpUsrp->get_pp_string().c_str());
+        msMboardName = mpUsrp->get_mboard_name();
         CHECK(mpUsrp->get_rx_num_channels() == 2,
               "expected two RX channels from subdev A:A A:B");
 
@@ -349,9 +385,16 @@ bool UsrpSource::receive(int16_t* pRef, int16_t* pSur, uint64_t uWant,
 
         // One metadata for both channels: UHD aligns them, and the timestamp
         // is that of the first sample of both.
+        // The first recv() also waits out the timed start, so it gets the
+        // start margin on top of the normal timeout; otherwise every run
+        // opens with one spurious "timeout" line.
+        const double dTimeout = mbFirstRecv ? kStartDelaySeconds + kRecvTimeoutSeconds
+                                            : kRecvTimeoutSeconds;
+        mbFirstRecv = false;
+
         uhd::rx_metadata_t oMd;
         const size_t uGot = mpRx->recv(mvBuffs, static_cast<size_t>(uWant), oMd,
-                                       kRecvTimeoutSeconds, false);
+                                       dTimeout, false);
 
         switch (oMd.error_code) {
         case uhd::rx_metadata_t::ERROR_CODE_NONE:
@@ -360,13 +403,31 @@ bool UsrpSource::receive(int16_t* pRef, int16_t* pSur, uint64_t uWant,
         case uhd::rx_metadata_t::ERROR_CODE_TIMEOUT: {
             // No data, no packets: the ingest sees a gap. Log once a second.
             ++muTimeouts;
+            ++muConsecutiveTimeouts;
             const std::chrono::steady_clock::time_point oNow = std::chrono::steady_clock::now();
             if (!mbHaveTimeoutLog ||
                 std::chrono::duration<double>(oNow - moLastTimeoutLog).count() >= 1.0) {
-                std::fprintf(stderr, "UsrpSource: recv timeout (%llu so far)\n",
+                std::fprintf(stderr, "UsrpSource: recv timeout (%llu so far); is the USRP "
+                                     "still connected?\n",
                              static_cast<unsigned long long>(muTimeouts));
                 moLastTimeoutLog = oNow;
                 mbHaveTimeoutLog = true;
+            }
+            // A quiet USRP gets its stream command again, as often as it
+            // takes. When the board comes back it starts on a new tick and
+            // the caller's index check re-anchors.
+            if (muConsecutiveTimeouts % kTimeoutsBeforeRestart == 0) {
+                ++muRestarts;
+                std::fprintf(stderr, "UsrpSource: %llu s without samples; re-issuing the "
+                                     "stream command (restart %llu)\n",
+                             static_cast<unsigned long long>(muConsecutiveTimeouts),
+                             static_cast<unsigned long long>(muRestarts));
+                mpRx->issue_stream_cmd(uhd::stream_cmd_t(uhd::stream_cmd_t::STREAM_MODE_STOP_CONTINUOUS));
+                uhd::stream_cmd_t oCmd(uhd::stream_cmd_t::STREAM_MODE_START_CONTINUOUS);
+                oCmd.stream_now = false;
+                oCmd.time_spec  = mpUsrp->get_time_now() + kStartDelaySeconds;
+                mpRx->issue_stream_cmd(oCmd);
+                mbFirstRecv = true;   // give the timed start its margin again
             }
             return true;
         }
@@ -393,6 +454,7 @@ bool UsrpSource::receive(int16_t* pRef, int16_t* pSur, uint64_t uWant,
         }
 
         if (uGot > 0) {
+            muConsecutiveTimeouts = 0;
             if (!oMd.has_time_spec) {
                 std::fprintf(stderr, "UsrpSource: %zu samples without a timestamp; dropped\n", uGot);
                 return true;
@@ -418,8 +480,10 @@ void UsrpSource::stop()
     } catch (const std::exception& e) {
         std::fprintf(stderr, "UsrpSource: UHD failed during stop: %s\n", e.what());
     }
-    std::printf("UsrpSource: %llu timeouts, %llu overflows, %llu other errors\n",
+    std::printf("UsrpSource: %llu timeouts, %llu stream restarts, %llu overflows, "
+                "%llu other errors\n",
                 static_cast<unsigned long long>(muTimeouts),
+                static_cast<unsigned long long>(muRestarts),
                 static_cast<unsigned long long>(muOverflows),
                 static_cast<unsigned long long>(muOtherErrors));
 }
@@ -535,7 +599,7 @@ int main(int argc, char* argv[])
         pSource.reset(pUsrp);
         if (!pUsrp->open(o.sArgs, o.dFs, o.dFc, o.dGain0, o.dGain1, o.bExtRef))
             return 2;
-        sDevice        = "USRP N210 BasicRX";
+        sDevice        = "USRP " + pUsrp->mboardName() + " BasicRX";
         sDriverVersion = uhd::get_version_string();
 #else
         std::fprintf(stderr,
@@ -554,6 +618,15 @@ int main(int argc, char* argv[])
         return 2;
     }
 
+    // A session id that changes on every start, so the ingest can tell a
+    // driver restart, or a second driver on the same group, from a gap.
+    char achSession[16];
+    std::snprintf(achSession, sizeof(achSession), "%08x",
+                  static_cast<unsigned>(
+                      (static_cast<uint64_t>(hostNowSecondsCoarse()) * 2654435761ULL) ^
+                      (static_cast<uint64_t>(getpid()) << 16)) & 0xFFFFFFFFu);
+    const std::string sSessionId = achSession;
+
     // ---- the two streams ----------------------------------------------------
     StreamState aStreams[2];
     for (unsigned u = 0; u < 2; ++u) {
@@ -571,6 +644,7 @@ int main(int argc, char* argv[])
         oInfo.bExtRef        = o.bExtRef;
         oInfo.sDevice        = sDevice;
         oInfo.sDriverVersion = sDriverVersion;
+        oInfo.sSessionId     = sSessionId;
     }
 
     UdpSender oSender;
@@ -583,6 +657,7 @@ int main(int argc, char* argv[])
     std::printf("  centre freq   %.1f Hz\n", o.dFc);
     std::printf("  streams       1 \"%s\" (ref)  2 \"%s\" (sur)\n",
                 o.sRefName.c_str(), o.sSurName.c_str());
+    std::printf("  session       %s\n", sSessionId.c_str());
     std::printf("  packet        %llu samples, %llu bytes, %.2f ms\n",
                 static_cast<unsigned long long>(o.uSamples),
                 static_cast<unsigned long long>(kVita49DataOverheadBytes + 4 * o.uSamples),
@@ -631,6 +706,13 @@ int main(int argc, char* argv[])
             ++uOverflows;
         if (uGot == 0)
             continue;
+
+        // A dead front end delivers packets full of zeros. The packets are
+        // valid and the chain must say "nothing to process", not crash.
+        if (o.bSynthSilent) {
+            std::fill(vRef.begin(), vRef.end(), int16_t(0));
+            std::fill(vSur.begin(), vSur.end(), int16_t(0));
+        }
 
         // Anchor the counter from the source's tick, and afterwards trust the
         // counter unless the source disagrees: a disagreement is a gap.

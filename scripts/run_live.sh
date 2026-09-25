@@ -37,8 +37,8 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       echo "usage: $0 [--seconds N] [--config FILE] [--group MCAST_ADDR]"
       echo "Algorithm, backend, full scale and CFAR settings come from the"
-      echo "config file (default config/prb.conf; config/usrp.conf for the"
-      echo "USRP). Edit that and 'make sync' to change them. --group joins"
+      echo "config file (default config/prb.conf, the USRP; config/fers.conf"
+      echo "for FERS). Edit that and 'make sync' to change them. --group joins"
       echo "the multicast group uhd_to_vita49 sends to."
       exit 0 ;;
     *) echo "unrecognised argument: $1" >&2; exit 1 ;;
@@ -91,4 +91,8 @@ echo
 
 echo
 echo "Results  : ${OUTDIR}"
-echo "Play it  : matlab -batch \"addpath('matlab'); play_ard('${OUTDIR}/ard')\""
+if [[ -d "${OUTDIR}/ard" ]]; then
+  echo "Play it  : matlab -batch \"addpath('matlab'); play_ard('${OUTDIR}/ard')\""
+else
+  echo "Frames   : streamed to the viewer, not written (ARD_WRITE_FILES = 0)"
+fi

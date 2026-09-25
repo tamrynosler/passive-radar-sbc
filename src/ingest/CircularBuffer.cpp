@@ -11,6 +11,7 @@ namespace pbr {
 
 CircularBuffer::CircularBuffer(uint64_t uCapacity)
     : mh_cBuffer(nullptr),
+      mh_uValid(nullptr),
       muCapacity(uCapacity),
       muWriteEnd(0),
       mbValid(false)
@@ -31,12 +32,24 @@ CircularBuffer::CircularBuffer(uint64_t uCapacity)
         return;
     }
 
+    // Validity flags start clear: nothing has been written. The () makes
+    // new[] zero-initialise the array.
+    mh_uValid = new (std::nothrow) uint8_t[uCapacity]();
+    if (mh_uValid == nullptr) {
+        std::fprintf(stderr, "CircularBuffer: allocation of %llu validity flags failed\n",
+                     static_cast<unsigned long long>(uCapacity));
+        delete[] mh_cBuffer;
+        mh_cBuffer = nullptr;
+        return;
+    }
+
     mbValid = true;
 }
 
 CircularBuffer::~CircularBuffer()
 {
     delete[] mh_cBuffer;
+    delete[] mh_uValid;
 }
 
 void CircularBuffer::zeroSpan(uint64_t uAbsIndex, uint64_t uCount)
@@ -49,11 +62,14 @@ void CircularBuffer::zeroSpan(uint64_t uAbsIndex, uint64_t uCount)
     std::fill(mh_cBuffer + uOffset,
               mh_cBuffer + uOffset + uFirst,
               ComplexF(0.0f, 0.0f));
+    std::memset(mh_uValid + uOffset, 0, static_cast<size_t>(uFirst));
 
-    if (uCount > uFirst)
+    if (uCount > uFirst) {
         std::fill(mh_cBuffer,
                   mh_cBuffer + (uCount - uFirst),
                   ComplexF(0.0f, 0.0f));
+        std::memset(mh_uValid, 0, static_cast<size_t>(uCount - uFirst));
+    }
 }
 
 bool CircularBuffer::write(uint64_t uAbsIndex, const ComplexF* pcSrc, uint64_t uCount)
@@ -107,10 +123,13 @@ bool CircularBuffer::write(uint64_t uAbsIndex, const ComplexF* pcSrc, uint64_t u
     const uint64_t uFirst  = std::min(uCount, muCapacity - uOffset);
 
     std::memcpy(mh_cBuffer + uOffset, pcSrc, uFirst * sizeof(ComplexF));
+    std::memset(mh_uValid + uOffset, 1, static_cast<size_t>(uFirst));
 
-    if (uCount > uFirst)
+    if (uCount > uFirst) {
         std::memcpy(mh_cBuffer, pcSrc + uFirst,
                     (uCount - uFirst) * sizeof(ComplexF));
+        std::memset(mh_uValid, 1, static_cast<size_t>(uCount - uFirst));
+    }
 
     // Out-of-order writes must not rewind the window.
     const uint64_t uEnd = uAbsIndex + uCount;
@@ -118,6 +137,37 @@ bool CircularBuffer::write(uint64_t uAbsIndex, const ComplexF* pcSrc, uint64_t u
         muWriteEnd = uEnd;
 
     return true;
+}
+
+void CircularBuffer::reset()
+{
+    if (!mbValid)
+        return;
+    std::fill(mh_cBuffer, mh_cBuffer + muCapacity, ComplexF(0.0f, 0.0f));
+    std::memset(mh_uValid, 0, static_cast<size_t>(muCapacity));
+    muWriteEnd = 0;
+}
+
+uint64_t CircularBuffer::validCount(uint64_t uAbsIndex, uint64_t uCount) const
+{
+    // Same residency rules as read(); a window this cannot vouch for counts
+    // as having no valid samples, which is the safe answer.
+    if (!mbValid || uCount == 0 || uCount > muCapacity ||
+        uAbsIndex > UINT64_MAX - uCount ||
+        uAbsIndex < oldestValid() || uAbsIndex + uCount > muWriteEnd)
+        return 0;
+
+    // The same split as read(): up to the wrap point, then from the start.
+    const uint64_t uOffset = uAbsIndex % muCapacity;
+    const uint64_t uFirst  = std::min(uCount, muCapacity - uOffset);
+
+    uint64_t uValid = 0;
+    for (uint64_t u = 0; u < uFirst; ++u)
+        uValid += mh_uValid[uOffset + u];
+    for (uint64_t u = 0; u < uCount - uFirst; ++u)
+        uValid += mh_uValid[u];
+
+    return uValid;
 }
 
 bool CircularBuffer::read(uint64_t uAbsIndex, ComplexF* pcDst, uint64_t uCount) const

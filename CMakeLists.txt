@@ -126,13 +126,21 @@ endforeach()
 # uhd_to_vita49 is the one executable that talks to the USRP. UHD (apt
 # libuhd-dev on the Nano, approved 2026-09-25) is optional: without it the
 # driver still builds and offers --synth only, so the transport can be tested
-# on any machine. UHD 3.10 ships UHDConfig.cmake, hence find_package.
-find_package(UHD QUIET)
+# on any machine.
+#
+# Ubuntu 18.04's libuhd-dev 3.10.3 ships uhd.pc and no UHDConfig.cmake, so
+# find_package(UHD) can never succeed there; pkg-config is the route that
+# works on the board (and on a Mac with Homebrew's UHD, where the host
+# Makefile uses the same file).
+find_package(PkgConfig QUIET)
+if(PKG_CONFIG_FOUND)
+  pkg_check_modules(UHD QUIET uhd)
+endif()
 if(UHD_FOUND)
   target_compile_definitions(uhd_to_vita49 PRIVATE PBR_HAVE_UHD)
   target_include_directories(uhd_to_vita49 PRIVATE ${UHD_INCLUDE_DIRS})
   target_link_libraries(uhd_to_vita49 ${UHD_LIBRARIES})
-  message(STATUS "UHD ${UHD_VERSION} found: uhd_to_vita49 has USRP support")
+  message(STATUS "UHD ${UHD_VERSION} found via pkg-config: uhd_to_vita49 has USRP support")
 else()
   message(STATUS "UHD not found: uhd_to_vita49 built with --synth only")
 endif()

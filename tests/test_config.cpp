@@ -24,6 +24,7 @@ const char* const kValidConfig =
     "SURVEILLANCE_RECEIVER_NAME = ArmasuisseSurRxClean\n"
     "\n"
     "UDP_PORT = 4991\n"
+    "CONTROL_PORT = 4993\n"
     "VITA49_FULLSCALE = 0.0022\n"
     "BUFFER_LENGTH_s = 2.0\n"
     "\n"
@@ -46,6 +47,9 @@ const char* const kValidConfig =
     "ECA_CD_BATCH_s = 0.0025\n"
     "ECA_CD_DOPPLER_TAPS = 1\n"
     "ARD_SNAPSHOT_EVERY = 1\n"
+    "ARD_WRITE_FILES = 1\n"
+    "ARD_STREAM = 0\n"
+    "ARD_STREAM_DEST = 127.0.0.1:4992\n"
     "CGLS_BATCH_s = 0.025\n"
     "CGLS_ITERATIONS = 30\n"
     "CGLS_PRIME = 0\n"
@@ -338,6 +342,7 @@ void testWhitespaceAndCommentHandling()
         "  REFERENCE_RECEIVER_NAME   =   RefName   \n"  // padded everywhere
         "SURVEILLANCE_RECEIVER_NAME = SurName\n"
         "UDP_PORT = 4991\n"
+    "CONTROL_PORT = 4993\n"
         "VITA49_FULLSCALE = 0.0022\n"
         "BUFFER_LENGTH_s = 2.0\n"
         "CPI_LENGTH_s = 1.0\n"
@@ -358,6 +363,9 @@ void testWhitespaceAndCommentHandling()
         "ECA_CD_BATCH_s = 0.0025\n"
         "ECA_CD_DOPPLER_TAPS = 1\n"
         "ARD_SNAPSHOT_EVERY = 1\n"
+    "ARD_WRITE_FILES = 1\n"
+    "ARD_STREAM = 0\n"
+    "ARD_STREAM_DEST = 127.0.0.1:4992\n"
         "CGLS_BATCH_s = 0.025\n"
         "CGLS_ITERATIONS = 30\n"
         "CGLS_PRIME = 0\n"
@@ -372,10 +380,108 @@ void testWhitespaceAndCommentHandling()
     assert(oConfig.sReferenceName == "RefName");   // padding stripped
 }
 
+// The live parameter set: text out, text in, same derived values.
+void testTextRoundTrip()
+{
+    PbrConfig oCfg;
+    assert(loadPbrConfig(writeTemp(kValidConfig), oCfg));
+    const std::string sText = pbrConfigToText(oCfg);
+    assert(sText.find("SAMPLE_RATE_Hz = 204800\n") != std::string::npos);
+    assert(sText.find("CONTROL_PORT = 4993\n") != std::string::npos);
+
+    PbrConfig oBack;
+    std::string sMessages;
+    assert(loadPbrConfigFromText(sText, oBack, &sMessages));
+    assert(sMessages.empty());
+    assert(oBack.uCpiSamples == oCfg.uCpiSamples);
+    assert(oBack.uEcaUpdateSamples == oCfg.uEcaUpdateSamples);
+    assert(oBack.uCdBatchSamples == oCfg.uCdBatchSamples);
+    assert(oBack.dCfarPfa == oCfg.dCfarPfa);
+    assert(oBack.sDsiAlgorithm == oCfg.sDsiAlgorithm);
+    assert(oBack.uControlPort == 4993);
+    assert(oBack.sArdStreamHost == "127.0.0.1" && oBack.uArdStreamPort == 4992);
+}
+
+// A live change is laid over the current set and validated as a whole; the
+// reason for a refusal comes back as text.
+void testApplyLines()
+{
+    PbrConfig oCfg;
+    assert(loadPbrConfig(writeTemp(kValidConfig), oCfg));
+
+    PbrConfig oNew;
+    std::string sWhy;
+
+    // A scalar knob.
+    assert(applyPbrConfigLines(oCfg, "CFAR_PFA = 1e-7\n", oNew, sWhy));
+    assert(oNew.dCfarPfa == 1e-7);
+    assert(oNew.uCpiSamples == oCfg.uCpiSamples);   // everything else carried over
+
+    // A structural one that still divides.
+    assert(applyPbrConfigLines(oCfg, "CPI_LENGTH_s = 2.0\nCPI_HOP_s = 2.0\n"
+                                     "BUFFER_LENGTH_s = 4.5\n", oNew, sWhy));
+    assert(oNew.uCpiSamples == 409600 && oNew.uHopSamples == 409600);
+
+    // Refused: an unknown key, a bad value, an impossible combination. The
+    // message names the problem and oNew is left as it was.
+    const uint64_t uBefore = oNew.uCpiSamples;
+    assert(!applyPbrConfigLines(oCfg, "NO_SUCH_KEY = 1\n", oNew, sWhy));
+    assert(sWhy.find("unknown key NO_SUCH_KEY") != std::string::npos);
+    assert(!applyPbrConfigLines(oCfg, "CFAR_PFA = 2\n", oNew, sWhy));
+    assert(sWhy.find("CFAR_PFA") != std::string::npos);
+    assert(!applyPbrConfigLines(oCfg, "ECA_CD_BATCH_s = 0.003\n", oNew, sWhy));
+    assert(sWhy.find("power of two") != std::string::npos);
+    assert(!applyPbrConfigLines(oCfg, "\n# nothing\n", oNew, sWhy));
+    assert(oNew.uCpiSamples == uBefore);
+}
+
+// A source at another rate: every window re-expressed at that rate, snapped
+// to what the validator allows, and the result validates.
+void testAdaptToSampleRate()
+{
+    PbrConfig oCfg;
+    assert(loadPbrConfig(writeTemp(kValidConfig), oCfg));   // 204800 Hz, 1 s CPI
+
+    PbrConfig oSame;
+    std::string sReport;
+    assert(adaptPbrConfigToSampleRate(oCfg, 204800, oSame, sReport));
+    assert(oSame.uCpiSamples == oCfg.uCpiSamples);
+
+    // The USRP2 rate. The ECA-CD batch snaps to 512 samples, the CPI to the
+    // nearest multiple of 512 that the decimation also divides, within a
+    // percent of the configured second; the ECA and CGLS windows divide it.
+    PbrConfig oUsrp;
+    assert(adaptPbrConfigToSampleRate(oCfg, 200000, oUsrp, sReport));
+    assert(sReport.find("Warning") != std::string::npos);
+    assert(oUsrp.uSampleRateHz == 200000);
+    assert(oUsrp.uCdBatchSamples == 512);
+    assert(oUsrp.uCpiSamples % 128 == 0 && oUsrp.uCpiSamples % 512 == 0);
+    assert(oUsrp.uCpiSamples == oUsrp.uHopSamples);
+    assert(oUsrp.uCpiSamples % oUsrp.uEcaUpdateSamples == 0);
+    assert(oUsrp.uEcaEstimateSamples % oUsrp.uEcaUpdateSamples == 0);
+    assert(oUsrp.uCpiSamples % oUsrp.uCglsBatchSamples == 0);
+    assert(oUsrp.uCpiSamples > 198000 && oUsrp.uCpiSamples < 202000);
+    assert(oUsrp.uEcaEstimateSamples > oUsrp.uClutterTaps);
+
+    // The other way: a 200 kHz set meeting FERS at 204800 Hz.
+    PbrConfig oFers;
+    assert(adaptPbrConfigToSampleRate(oUsrp, 204800, oFers, sReport));
+    assert(oFers.uSampleRateHz == 204800);
+    assert(oFers.uCdBatchSamples == 512);
+    assert(oFers.uCpiSamples % 512 == 0 && oFers.uCpiSamples % 128 == 0);
+    assert(oFers.uCpiSamples % oFers.uEcaUpdateSamples == 0);
+    assert(oFers.uCpiSamples % oFers.uCglsBatchSamples == 0);
+    // Near one second, not wildly off.
+    assert(oFers.uCpiSamples > 190000 && oFers.uCpiSamples < 220000);
+}
+
 } // namespace
 
 int main()
 {
+    testTextRoundTrip();
+    testApplyLines();
+    testAdaptToSampleRate();
     testValidConfig();
     testShippedConfigLoads();
     testMissingKeyIsFatal();

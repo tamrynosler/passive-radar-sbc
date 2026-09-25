@@ -157,6 +157,7 @@ bool writeVita49Context(uint8_t* pOut, size_t uCapacity,
     CHECK(isSafeJsonString(oInfo.sReceiverName), "receiver name is not plain ASCII");
     CHECK(isSafeJsonString(oInfo.sDevice), "device string is not plain ASCII");
     CHECK(isSafeJsonString(oInfo.sDriverVersion), "driver version is not plain ASCII");
+    CHECK(isSafeJsonString(oInfo.sSessionId), "session id is not plain ASCII");
 
     // The JSON the ingest reads: "receiver" first, then "name" and "mode"
     // inside it, before any other key called name or mode. Everything else is
@@ -167,11 +168,12 @@ bool writeVita49Context(uint8_t* pOut, size_t uCapacity,
         "{\"schema\":\"fers-vita49-context-v1\","
         "\"simulation_name\":\"uhd_to_vita49\","
         "\"receiver\":{\"id\":%llu,\"name\":\"%s\",\"mode\":\"cw\","
-        "\"adc_bits\":%u,\"context_flags\":%u},"
+        "\"session\":\"%s\",\"adc_bits\":%u,\"context_flags\":%u},"
         "\"source\":{\"device\":\"%s\",\"channel\":%u,\"fc_hz\":%.1f,"
         "\"gain_db\":%.2f,\"ext_ref\":%s,\"uhd\":\"%s\"}}",
         static_cast<unsigned long long>(oInfo.uReceiverId),
         oInfo.sReceiverName.c_str(),
+        oInfo.sSessionId.c_str(),
         oInfo.uAdcBits,
         static_cast<unsigned>(uContextFlags),
         oInfo.sDevice.c_str(),

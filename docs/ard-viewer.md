@@ -1,5 +1,12 @@
 # ARD web viewer — design note (v1, 2026-09-22)
 
+> **Superseded 2026-09-25.** The Python sidecar and its file tailing are
+> gone. `pbr_run` now streams each frame over UDP multicast and the C++
+> `ard_view` (`src/app/ard_view.cpp`) serves the same page from memory; see
+> `docs/ard-stream-design.md`. The page's rendering rules below (format,
+> axes, colour scale, polling) still apply; the page lives in
+> `src/display/ard_viewer.html`.
+
 A sidecar that lets a browser watch a `pbr_run` run as it happens. It reads
 the files `pbr_run --out DIR` already writes and serves them over HTTP; the
 browser does every pixel of the rendering. Nothing in the C++ changes.

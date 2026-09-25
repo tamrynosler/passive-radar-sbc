@@ -27,7 +27,8 @@ struct ChannelIngestConfig {
     // whole PbrConfig, so ChannelIngest stays testable without a config file.
     uint64_t    uCpiSamples;          // window length handed to the DSP chain
     uint64_t    uHopSamples;          // step between consecutive CPI starts
-    double      dMinCpiCoverage;      // fraction that must be non-zero, e.g. 0.99
+    double      dMinCpiCoverage;      // fraction that must have come from
+                                      // packets (not gap fill), e.g. 0.99
 };
 
 // Outcome of one CPI extraction attempt.
@@ -82,6 +83,12 @@ public:
     CpiStatus tryExtractCpi(ComplexF* pcRef, ComplexF* pcSur, uint64_t uCount,
                             uint64_t& uCpiStartOut);
 
+    // Change the window length and hop for every CPI from the next one on,
+    // keeping the buffered samples and the current start pointer. For a live
+    // parameter change at a CPI boundary. Refused (false, logged) if the
+    // window would not fit the buffer or either value is zero.
+    bool setCpi(uint64_t uCpiSamples, uint64_t uHopSamples);
+
     // True once both reference and surveillance stream IDs are known.
     bool rolesResolved() const;
 
@@ -102,11 +109,22 @@ public:
         uint64_t uOversizePackets;    // more samples than kMaxSamplesPerPacket
 
         uint64_t uCpisEmitted;          // handed over as Ready
-        uint64_t uCpisSkippedCoverage;  // too many zero samples to trust
+        uint64_t uCpisSkippedCoverage;  // too few packet-written samples
         uint64_t uCpisOvertaken;        // overwritten before both channels
                                         // completed them
+
+        uint64_t uSessionChanges;       // a stream's driver session id changed
+        uint64_t uReanchors;            // the timeline jumped backwards; buffers reset
     };
     const Stats& stats() const { return mStats; }
+
+    // One line naming every stream seen so far, its receiver name and role,
+    // for the "packets arrive but names do not match" reminder.
+    std::string streamSummary() const;
+
+    // The sample rate the source declares in its context packets, 0 until
+    // one has arrived. The caller compares it with the configured rate.
+    double sourceSampleRateHz() const { return mdSourceSampleRateHz; }
 
 private:
     bool handleContext(const Vita49Packet& oPacket);
@@ -124,16 +142,20 @@ private:
         bool        bHavePacketCount;
         uint32_t    uLastPacketCount;
         bool        bModeReported;
+        std::string sName;          // receiver.name last seen, may not match either config name
+        std::string sSession;       // receiver.session last seen
     };
+
+    // Forget the timeline: both buffers reset, first-index tracking and the
+    // CPI anchor cleared. Roles and packet counters are kept.
+    void resetTimeline();
 
     StreamState* findStream(uint32_t uStreamId);
     StreamState& findOrAddStream(uint32_t uStreamId);
 
-    // Fraction of a window that is non-zero.
-    static double coverage(const ComplexF* pcSamples, uint64_t uCount);
-
     ChannelIngestConfig mConfig;
     double              mdCodeToVolts;   // dFullScale / 32767
+    double              mdSourceSampleRateHz;
 
     CircularBuffer mRefBuffer;
     CircularBuffer mSurBuffer;

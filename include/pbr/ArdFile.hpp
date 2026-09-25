@@ -26,7 +26,9 @@ namespace pbr {
 //       32     8  uDopplerDecimation
 //       40     8  uCpiStartIndex (0 if unknown)
 //       48     8  uDetections
-//       56     8  reserved, zero
+//       56     8  uStatus: 0 processed, 1 null input (blank frame), 2 a
+//                 processing stage failed (blank frame). Was reserved/zero
+//                 before 2026-09-25, so older files read as "processed".
 //       64  8*R*D map, interleaved float32 I,Q
 //      ...    48  per detection
 //
@@ -37,6 +39,13 @@ namespace pbr {
 // Detection records are fixed 48-byte: two uint64 bin indices then four
 // float64 (range km, Doppler Hz, power dB, SNR dB).
 
+// Values of uStatus. A blank frame (all-zero map, no detections) with a
+// non-zero status is how the chain says "I received a CPI but could not
+// process it", so a viewer shows that rather than a stale or missing frame.
+constexpr uint64_t kArdStatusOk        = 0;
+constexpr uint64_t kArdStatusNullInput = 1;   // a channel was all zeros or non-finite
+constexpr uint64_t kArdStatusFailed    = 2;   // cancellation or map/CFAR returned false
+
 struct ArdFileHeader {
     uint64_t uRangeBins         = 0;
     uint64_t uDopplerBins       = 0;
@@ -44,9 +53,37 @@ struct ArdFileHeader {
     uint64_t uDopplerDecimation = 0;
     uint64_t uCpiStartIndex     = 0;
     uint64_t uDetections        = 0;
+    uint64_t uStatus            = kArdStatusOk;
 };
 
+constexpr size_t kArdHeaderBytes    = 64;
+constexpr size_t kArdCellBytes      = 8;    // float32 I, float32 Q
+constexpr size_t kArdDetectionBytes = 48;
+
+// Size of a whole frame in the layout above, for this header.
+size_t ardFrameBytes(const ArdFileHeader& oHeader);
+
+// Serialise a frame into caller memory, byte for byte what writeArdFile puts
+// on disk. This is the one place the layout is produced: the file writer and
+// the UDP stream (ArdStream.hpp) both use it, so they cannot disagree.
+bool serialiseArdFrame(const ArdFileHeader& oHeader, const ComplexF* pcMap,
+                       const Detection* pDetections,
+                       uint8_t* pOut, size_t uCapacity, size_t& uLengthOut);
+
+// Decode the header at the front of a serialised frame, with the same
+// plausibility bounds the file reader applies, and require uLength to be
+// exactly ardFrameBytes() for it. A frame off the wire passes this or is
+// dropped.
+bool parseArdFrameHeader(const uint8_t* pBytes, size_t uLength,
+                         ArdFileHeader& oHeader);
+
+// Write an already-serialised frame to disk in one call.
+bool writeArdFrameBytes(const char* pPath, const uint8_t* pBytes, size_t uLength);
+
 // Write a map and its detections. pcMap holds uRangeBins * uDopplerBins cells.
+// Serialises into a temporary buffer and calls writeArdFrameBytes(); the
+// chain does not use this on its timed path (it serialises once and keeps
+// the bytes), the verification tools and MATLAB comparisons do.
 bool writeArdFile(const char* pPath, const ArdFileHeader& oHeader,
                   const ComplexF* pcMap,
                   const Detection* pDetections);

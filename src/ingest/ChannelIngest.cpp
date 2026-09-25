@@ -97,6 +97,7 @@ bool findJsonString(const char* pJson, size_t uLength, const char* pKey,
 ChannelIngest::ChannelIngest(const ChannelIngestConfig& oConfig)
     : mConfig(oConfig),
       mdCodeToVolts(0.0),
+      mdSourceSampleRateHz(0.0),
       mRefBuffer(oConfig.uBufferCapacity),
       mSurBuffer(oConfig.uBufferCapacity),
       mbRefSeen(false),
@@ -168,6 +169,8 @@ ChannelIngest::StreamState& ChannelIngest::findOrAddStream(uint32_t uStreamId)
     oNew.bHavePacketCount = false;
     oNew.uLastPacketCount = 0;
     oNew.bModeReported    = false;
+    oNew.sName.clear();
+    oNew.sSession.clear();
     mvStreams.push_back(oNew);
 
     return mvStreams.back();
@@ -180,6 +183,48 @@ ChannelRole ChannelIngest::roleOf(uint32_t uStreamId) const
             return mvStreams[u].eRole;
     }
     return ChannelRole::Unknown;
+}
+
+bool ChannelIngest::setCpi(uint64_t uCpiSamples, uint64_t uHopSamples)
+{
+    CHECK(mbValid, "setCpi on an invalid ChannelIngest");
+    CHECK(uCpiSamples > 0 && uHopSamples > 0, "setCpi: CPI and hop must be non-zero");
+    CHECK(uCpiSamples <= mConfig.uBufferCapacity,
+          "setCpi: the new CPI does not fit the channel buffers");
+    mConfig.uCpiSamples = uCpiSamples;
+    mConfig.uHopSamples = uHopSamples;
+    return true;
+}
+
+std::string ChannelIngest::streamSummary() const
+{
+    if (mvStreams.empty())
+        return "no streams seen yet";
+    std::string sOut;
+    char achLine[160];
+    for (size_t u = 0; u < mvStreams.size(); ++u) {
+        const StreamState& o = mvStreams[u];
+        const char* pRole = (o.eRole == ChannelRole::Reference)    ? "reference" :
+                            (o.eRole == ChannelRole::Surveillance) ? "surveillance" :
+                                                                     "NOT ASSIGNED";
+        std::snprintf(achLine, sizeof(achLine), "%sstream 0x%08X \"%s\" (%s)",
+                      u == 0 ? "" : ", ", o.uStreamId,
+                      o.sName.empty() ? "no context yet" : o.sName.c_str(), pRole);
+        sOut += achLine;
+    }
+    return sOut;
+}
+
+void ChannelIngest::resetTimeline()
+{
+    mRefBuffer.reset();
+    mSurBuffer.reset();
+    mbRefSeen       = false;
+    muRefFirstIndex = 0;
+    mbSurSeen       = false;
+    muSurFirstIndex = 0;
+    mbCpiAnchored   = false;
+    muCpiStart      = 0;
 }
 
 bool ChannelIngest::rolesResolved() const
@@ -282,6 +327,7 @@ bool ChannelIngest::handleContext(const Vita49Packet& oPacket)
 
     std::string sName;
     if (findJsonString(oPacket.pJson, oPacket.uJsonLength, "name", sName, uSearchFrom)) {
+        oStream.sName = sName;
         ChannelRole eRole = ChannelRole::Unknown;
         if (sName == mConfig.sReferenceName)
             eRole = ChannelRole::Reference;
@@ -310,9 +356,27 @@ bool ChannelIngest::handleContext(const Vita49Packet& oPacket)
         }
     }
 
-    // The context packet also carries the sample rate; disagreeing with the
-    // configured rate would corrupt every absolute index we compute.
+    // The driver's session id. A change means the driver restarted, or a
+    // second driver is sending into the same group: either way the sample
+    // indices that follow do not continue the ones before, and if two
+    // drivers are running the buffers now hold an interleaving of both.
+    std::string sSession;
+    if (findJsonString(oPacket.pJson, oPacket.uJsonLength, "session", sSession, uSearchFrom)) {
+        if (!oStream.sSession.empty() && sSession != oStream.sSession) {
+            ++mStats.uSessionChanges;
+            std::fprintf(stderr,
+                         "ChannelIngest: WARNING stream 0x%08X changed driver session %s -> %s.\n"
+                         "               A driver restarted, or TWO drivers are sending to this\n"
+                         "               group. If the warning repeats, stop one of them.\n",
+                         oPacket.uStreamId, oStream.sSession.c_str(), sSession.c_str());
+        }
+        oStream.sSession = sSession;
+    }
+
+    // The context packet also carries the sample rate; the caller compares
+    // it with the configured rate and adapts or refuses (design note §7).
     if (oPacket.dSampleRate > 0.0) {
+        mdSourceSampleRateHz = oPacket.dSampleRate;
         const double dConfigured = static_cast<double>(mConfig.uSampleRateHz);
         if (oPacket.dSampleRate != dConfigured) {
             std::fprintf(stderr,
@@ -381,6 +445,24 @@ bool ChannelIngest::handleData(const Vita49Packet& oPacket)
 
     CircularBuffer& oBuffer = bIsSurveillance ? mSurBuffer : mRefBuffer;
 
+    // A packet more than a whole buffer behind the write end is not a late
+    // packet, it is a source whose timeline went backwards: a driver
+    // restarted from another clock, or the clock was corrected. Waiting for
+    // wall time to catch up could take days, so forget the old timeline and
+    // start again here. Late packets within a buffer length are still
+    // rejected by the buffer as before.
+    if (oBuffer.writeEnd() > oBuffer.capacity() &&
+        uAbsIndex + oPacket.uSampleCount + oBuffer.capacity() < oBuffer.writeEnd()) {
+        ++mStats.uReanchors;
+        std::fprintf(stderr,
+                     "ChannelIngest: WARNING the source timeline jumped back by %.1f s "
+                     "(index %llu, write end %llu); re-anchoring, buffers cleared\n",
+                     double(oBuffer.writeEnd() - uAbsIndex) / double(mConfig.uSampleRateHz),
+                     (unsigned long long)uAbsIndex,
+                     (unsigned long long)oBuffer.writeEnd());
+        resetTimeline();
+    }
+
     if (!oBuffer.write(uAbsIndex, acStaging, oPacket.uSampleCount)) {
         ++mStats.uRejectedWrites;
         return true;   // already logged by the buffer; not a fault here
@@ -397,19 +479,6 @@ bool ChannelIngest::handleData(const Vita49Packet& oPacket)
 
     mStats.uSamplesWritten += oPacket.uSampleCount;
     return true;
-}
-
-double ChannelIngest::coverage(const ComplexF* pcSamples, uint64_t uCount)
-{
-    if (uCount == 0)
-        return 0.0;
-
-    uint64_t uNonZero = 0;
-    for (uint64_t u = 0; u < uCount; ++u) {
-        if (pcSamples[u].real() != 0.0f || pcSamples[u].imag() != 0.0f)
-            ++uNonZero;
-    }
-    return static_cast<double>(uNonZero) / static_cast<double>(uCount);
 }
 
 CpiStatus ChannelIngest::tryExtractCpi(ComplexF* pcRef, ComplexF* pcSur,
@@ -472,14 +541,22 @@ CpiStatus ChannelIngest::tryExtractCpi(ComplexF* pcRef, ComplexF* pcSur,
         return CpiStatus::Skipped;
     }
 
+    // Coverage is the fraction of the window that arrived in packets, from
+    // the buffer's per-slot validity flags. It does not look at the sample
+    // values, so a quiet input (an ADC idling at a few codes, many of them
+    // exactly zero) is as valid as a loud one, while a zero-filled gap is
+    // not, whatever the samples around it look like. Read before the start
+    // advances, on the same window the reads above used.
+    const double dRefCoverage = static_cast<double>(mRefBuffer.validCount(muCpiStart, uCount)) /
+                                static_cast<double>(uCount);
+    const double dSurCoverage = static_cast<double>(mSurBuffer.validCount(muCpiStart, uCount)) /
+                                static_cast<double>(uCount);
+
     const uint64_t uStart = muCpiStart;
     muCpiStart += mConfig.uHopSamples;
 
-    // A gap reads back as exact zeros, because CircularBuffer zero-fills on a
-    // forward jump. That is what makes this count trustworthy -- without it,
-    // stale samples from the previous lap would look like valid data.
-    if (coverage(pcRef, uCount) < mConfig.dMinCpiCoverage ||
-        coverage(pcSur, uCount) < mConfig.dMinCpiCoverage) {
+    if (dRefCoverage < mConfig.dMinCpiCoverage ||
+        dSurCoverage < mConfig.dMinCpiCoverage) {
         ++mStats.uCpisSkippedCoverage;
         return CpiStatus::Skipped;
     }

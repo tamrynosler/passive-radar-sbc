@@ -33,6 +33,8 @@ struct Vita49StreamInfo {
     bool        bExtRef;
     std::string sDevice;           // "USRP N210 BasicRX", "synth"
     std::string sDriverVersion;    // UHD version string, or "none"
+    std::string sSessionId;        // random per driver start; the ingest warns
+                                   // when it changes (restart, or two drivers)
 };
 
 struct Vita49Time {

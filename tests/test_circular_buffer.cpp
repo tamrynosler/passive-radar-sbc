@@ -293,6 +293,78 @@ void testFersLikeStream()
         assert(vcCpi[u] == sampleAt(uCpiStart + u));
 }
 
+// Validity flags: set by write(), cleared by the zero-fill, independent of
+// the sample values. This is what lets a quiet input (samples that happen to
+// be exactly zero) count as covered while a real gap does not.
+void testValidityFlags()
+{
+    CircularBuffer oBuf(16);
+
+    // Nothing written: nothing valid, and a non-resident window is 0.
+    assert(oBuf.validCount(0, 4) == 0);
+
+    // A write of EXACT ZEROS is valid data: it came from a packet.
+    std::vector<ComplexF> vcZeros(6, ComplexF(0.0f, 0.0f));
+    assert(oBuf.write(100, vcZeros.data(), 6));
+    assert(oBuf.validCount(100, 6) == 6);
+
+    // A forward jump: [106, 110) is zero-filled and NOT valid.
+    std::vector<ComplexF> vcRun = makeRun(110, 4);
+    assert(oBuf.write(110, vcRun.data(), 4));
+    assert(oBuf.validCount(100, 14) == 10);   // 6 + 4, hole of 4 excluded
+    assert(oBuf.validCount(106, 4) == 0);
+    assert(oBuf.validCount(110, 4) == 4);
+
+    // Filling the hole later makes it valid.
+    vcRun = makeRun(106, 4);
+    assert(oBuf.write(106, vcRun.data(), 4));
+    assert(oBuf.validCount(100, 14) == 14);
+
+    // Windows the buffer cannot vouch for count as 0, same rules as read():
+    // past the write end, before the oldest resident sample, too large.
+    assert(oBuf.validCount(100, 15) == 0);
+    assert(oBuf.validCount(0, 1) == 0);
+    assert(oBuf.validCount(100, 17) == 0);
+    assert(oBuf.validCount(100, 0) == 0);
+
+    // Wrap: index 124 is slot 12 of 16, so this write straddles the seam
+    // (slots 12..15 then 0..3) and sets flags on both sides; the forward
+    // jump before it zero-fills [114, 124) and clears those flags, which
+    // previously held valid data from the writes above.
+    vcRun = makeRun(124, 8);
+    assert(oBuf.write(124, vcRun.data(), 8));
+    assert(oBuf.validCount(124, 8) == 8);
+    assert(oBuf.validCount(116, 8) == 0);     // the hole
+    assert(oBuf.validCount(116, 16) == 8);    // the whole resident window
+
+    // A gap larger than the buffer clears every slot, then the new write
+    // marks only its own.
+    vcRun = makeRun(1000, 3);
+    assert(oBuf.write(1000, vcRun.data(), 3));
+    assert(oBuf.validCount(1000, 3) == 3);
+    assert(oBuf.validCount(990, 10) == 0);
+    assert(oBuf.validCount(987, 16) == 3);
+}
+
+void testReset()
+{
+    CircularBuffer oBuf(16);
+    std::vector<ComplexF> vcRun = makeRun(1000, 8);
+    assert(oBuf.write(1000, vcRun.data(), 8));
+    assert(oBuf.writeEnd() == 1008);
+
+    oBuf.reset();
+    assert(oBuf.writeEnd() == 0);
+    assert(oBuf.oldestValid() == 0);
+    assert(oBuf.validCount(1000, 8) == 0);
+
+    // Usable from index 0 again, as if new; the old lap's flags are gone.
+    vcRun = makeRun(4, 4);
+    assert(oBuf.write(4, vcRun.data(), 4));
+    assert(oBuf.validCount(0, 8) == 4);      // [0,4) zero-filled hole, [4,8) valid
+    expectRun(oBuf, 4, 4);
+}
+
 } // namespace
 
 int main()
@@ -310,6 +382,7 @@ int main()
     testFullCapacityWrite();
     testReadBoundsRejected();
     testFersLikeStream();
+    testValidityFlags();
 
     std::printf("test_circular_buffer: all tests passed\n");
     return 0;

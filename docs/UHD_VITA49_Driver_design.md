@@ -22,8 +22,11 @@
 >   multicast misbehaves on the switch.
 > - *Sample rate* → **200000 Hz** (decimation 500). With **`CPI_LENGTH_s =
 >   1.024`** the CPI is again 204800 samples, so every window key the chain
->   was validated at still divides. `config/usrp.conf` holds this; `prb.conf`
->   is untouched so the FERS replay and goldens keep working. Longer CPIs:
+>   was validated at still divides. `config/prb.conf` now holds this (author's
+>   instruction, 2026-09-25); the FERS scenario moved to `config/fers.conf`,
+>   which `make replay` uses, so the recorded capture still replays. The
+>   MATLAB golden generators read `prb.conf` and now describe the USRP
+>   configuration, not the capture they are compared against. Longer CPIs:
 >   2.048, 3.072, 4.096 s keep dividing; anything else works if the ECA-CD
 >   batch stays a power of two dividing the CPI (Config.cpp refuses otherwise).
 > - *Config keys vs flags (Q4)* → the driver takes `--config FILE` and reads
@@ -51,6 +54,27 @@
 > ChannelIngest end to end with an injected 1000-sample gap zero-filled in
 > place); `uhd_to_vita49 --synth` into `ingest_probe` on loopback for 12 s:
 > 7018 packets per stream, index continuity exact, 11 CPIs, 0 gaps, PASS.
+>
+> **Mac build (2026-09-25):** `brew install uhd` (4.10) plus `make host`
+> compiles the full driver here, so the N210 can be driven from the laptop
+> as well as from the Nano. UHD 4.x headers need C++17, so the Makefile
+> compiles that one host target as C++17; the code itself is C++14 and is
+> built as such on the Jetson against UHD 3.10.
+>
+> **The USRP, probed from the Mac 2026-09-25:** it is a **USRP2 r4** (serial
+> 627), not an N210. Address 192.168.10.2 (factory default; the EEPROM
+> fields read 255.255.255.255, which is cosmetic on a USRP2), FW 12.4 and
+> FPGA 10.1 from its SD card, both accepted by UHD 4.10 and the same compat
+> numbers UHD 3.10 wants, so **no reflash**. ltc2284 14-bit ADC, BasicRX on
+> slot A with frontends A (I), B (Q), AB, BA and no gain elements; time
+> sources none/external/mimo, clock internal/external, sensor `ref_locked`.
+> RX DSP range ±50 MHz: UHD's `rx_dsp_core_200::set_freq` wraps a request
+> outside that modulo the 100 MHz clock, so tuning to 89 MHz programs a
+> +11 MHz shift and the §6.4 reasoning stands (bench check §9.8 still due).
+> External reference levels for a USRP2: 5 to 15 dBm on 10 MHz, 5 Vpp PPS.
+> UHD 4.10 prints a benign "fifo ctrl timed out looking for acks" from the
+> USRP2 destructor on close. Recv frame 1472 bytes, so 342 samples fit one
+> packet. Everything in this note written for the N210 applies unchanged.
 >
 > **Hardware note:** the board on the switch on 2026-09-25 is the *old*
 > Jetson TK1 (`tegra-ubuntu.local`, <tk1-ip>; ssh host

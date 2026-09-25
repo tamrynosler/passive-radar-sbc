@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -24,7 +25,7 @@ UdpReceiver::~UdpReceiver()
     close();
 }
 
-bool UdpReceiver::open(uint16_t uPort, int iRequestedRcvBufBytes)
+bool UdpReceiver::open(uint16_t uPort, int iRequestedRcvBufBytes, bool bBlocking)
 {
     CHECK(miSocket < 0, "UdpReceiver::open called on an already-open socket");
 
@@ -70,6 +71,22 @@ bool UdpReceiver::open(uint16_t uPort, int iRequestedRcvBufBytes)
     }
 
     const int iFlags = ::fcntl(miSocket, F_GETFL, 0);
+    if (bBlocking) {
+        if (iFlags < 0) {
+            std::fprintf(stderr, "UdpReceiver: reading socket flags failed: %s\n",
+                         std::strerror(errno));
+            close();
+            return false;
+        }
+        // Wake once a second with WouldBlock even when nothing arrives, so
+        // a thread blocked here can notice a stop flag.
+        timeval oTimeout;
+        oTimeout.tv_sec  = 1;
+        oTimeout.tv_usec = 0;
+        if (::setsockopt(miSocket, SOL_SOCKET, SO_RCVTIMEO, &oTimeout, sizeof(oTimeout)) < 0)
+            std::fprintf(stderr, "UdpReceiver: SO_RCVTIMEO failed: %s\n", std::strerror(errno));
+        return true;
+    }
     if (iFlags < 0 || ::fcntl(miSocket, F_SETFL, iFlags | O_NONBLOCK) < 0) {
         std::fprintf(stderr, "UdpReceiver: setting O_NONBLOCK failed: %s\n",
                      std::strerror(errno));
@@ -80,7 +97,7 @@ bool UdpReceiver::open(uint16_t uPort, int iRequestedRcvBufBytes)
     return true;
 }
 
-bool UdpReceiver::joinMulticastGroup(const char* pGroup)
+bool UdpReceiver::joinMulticastGroup(const char* pGroup, const char* pInterfaceIp)
 {
     CHECK(miSocket >= 0, "joinMulticastGroup before open");
     CHECK(pGroup != nullptr && pGroup[0] != '\0', "joinMulticastGroup with an empty group");
@@ -96,8 +113,15 @@ bool UdpReceiver::joinMulticastGroup(const char* pGroup)
         return false;
     }
     // INADDR_ANY: the kernel joins on the interface its routing table picks
-    // for the group, which on a single-homed board is the only one.
+    // for the group, which on a single-homed board is the only one. A
+    // laptop with Wi-Fi and a wired port to the switch must say which.
     oReq.imr_interface.s_addr = htonl(INADDR_ANY);
+    if (pInterfaceIp != nullptr && pInterfaceIp[0] != '\0' &&
+        ::inet_pton(AF_INET, pInterfaceIp, &oReq.imr_interface) != 1) {
+        std::fprintf(stderr, "UdpReceiver: interface address %s is not dotted IPv4\n",
+                     pInterfaceIp);
+        return false;
+    }
 
     if (::setsockopt(miSocket, IPPROTO_IP, IP_ADD_MEMBERSHIP, &oReq, sizeof(oReq)) < 0) {
         std::fprintf(stderr, "UdpReceiver: joining %s failed: %s\n", pGroup, std::strerror(errno));
@@ -115,7 +139,8 @@ void UdpReceiver::close()
     miActualRcvBufBytes = 0;
 }
 
-ReceiveResult UdpReceiver::receive(uint8_t* pBuffer, size_t uCapacity, size_t& uBytesOut)
+ReceiveResult UdpReceiver::receive(uint8_t* pBuffer, size_t uCapacity, size_t& uBytesOut,
+                                   std::string* pSenderOut)
 {
     uBytesOut = 0;
 
@@ -124,7 +149,16 @@ ReceiveResult UdpReceiver::receive(uint8_t* pBuffer, size_t uCapacity, size_t& u
         return ReceiveResult::Error;
     }
 
-    const ssize_t iRead = ::recvfrom(miSocket, pBuffer, uCapacity, 0, nullptr, nullptr);
+    sockaddr_in oSender;
+    socklen_t   uSenderLen = sizeof(oSender);
+    const ssize_t iRead = ::recvfrom(miSocket, pBuffer, uCapacity, 0,
+                                     pSenderOut ? reinterpret_cast<sockaddr*>(&oSender) : nullptr,
+                                     pSenderOut ? &uSenderLen : nullptr);
+    if (iRead >= 0 && pSenderOut != nullptr) {
+        char achAddr[INET_ADDRSTRLEN] = {0};
+        ::inet_ntop(AF_INET, &oSender.sin_addr, achAddr, sizeof(achAddr));
+        *pSenderOut = achAddr;
+    }
 
     if (iRead < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK)

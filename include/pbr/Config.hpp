@@ -30,6 +30,7 @@ struct PbrConfig {
 
     // ---- ingest ----------------------------------------------------------
     uint16_t    uUdpPort           = 0;
+    uint16_t    uControlPort       = 0;     // live-change HTTP port; 0 = off
     double      dFullScale         = 0.0;   // must match --vita49-fullscale
     double      dBufferSeconds     = 0.0;
 
@@ -63,6 +64,12 @@ struct PbrConfig {
     double      dCdBatchSeconds    = 0.0;   // ECA-CD batch length
     uint64_t    uCdDopplerTaps     = 0;     // ECA-CD P; subspace is 2P+1 wide
     uint64_t    uArdSnapshotEvery  = 0;     // 1 = every CPI
+    // Where each serialised ARD frame goes (docs/ard-stream-design.md): to
+    // DIR/ard/ on disk, to the UDP destination, both, or neither.
+    bool        bArdWriteFiles     = false;
+    bool        bArdStream         = false;
+    std::string sArdStreamHost;             // ARD_STREAM_DEST host part
+    uint16_t    uArdStreamPort     = 0;     // ARD_STREAM_DEST port part
     uint64_t    uCglsIterations    = 0;
     double      dCglsBatchSeconds  = 0.0;   // CGLS window, independent of ECA's
     bool        bCglsPrime         = false; // start from the previous CPI's weights
@@ -96,6 +103,30 @@ bool loadPbrConfig(const char* pPath, PbrConfig& oConfig);
 // Print the loaded configuration, so a run's log records exactly what it ran
 // with.
 void printPbrConfig(const PbrConfig& oConfig);
+
+// The same loader on text instead of a file. pMessages, if given, collects
+// every message the loader printed, so a caller can pass the reason on.
+bool loadPbrConfigFromText(const std::string& sText, PbrConfig& oConfig,
+                           std::string* pMessages = nullptr);
+
+// Every key as KEY = VALUE lines, one per line, in a form the loader reads
+// back to the same values. The live parameter set in the file's own syntax.
+std::string pbrConfigToText(const PbrConfig& oConfig);
+
+// A live change: KEY = VALUE lines laid over oCurrent and validated as a
+// whole. On success oOut is the new, fully derived config; on failure it is
+// untouched and sMessagesOut says why (an unknown key, a bad value, a
+// combination the chain cannot run). Nothing is written to disk.
+bool applyPbrConfigLines(const PbrConfig& oCurrent, const std::string& sLines,
+                         PbrConfig& oOut, std::string& sMessagesOut);
+
+// The source declares a sample rate the config did not expect. Re-express
+// every time-based window at the source's rate, each snapped to the nearest
+// value the chain allows, and the CPI to the nearest length they all divide,
+// then validate. sReportOut lists every value that moved, as the warning the
+// chain prints. False, with the reason in the report, if no valid set exists.
+bool adaptPbrConfigToSampleRate(const PbrConfig& oCurrent, uint64_t uSourceRateHz,
+                                PbrConfig& oOut, std::string& sReportOut);
 
 } // namespace pbr
 

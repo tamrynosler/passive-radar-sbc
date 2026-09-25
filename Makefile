@@ -35,7 +35,7 @@ RSYNC := rsync -a --delete \
          --exclude '.git' --exclude '.DS_Store'
 
 .PHONY: help build sync test run replay verify bench pull shell clean \
-        view host host-test host-view
+        view drive stop host host-test host-view
 
 help:
 	@echo "passive-radar-sbc"
@@ -43,7 +43,9 @@ help:
 	@echo "  make sync       push config + source to the Jetson (no compile)"
 	@echo "  make build      sync, then compile on the Jetson"
 	@echo "  make test       run the unit tests on the Jetson"
-	@echo "  make run        live run against FERS, clocks pinned"
+	@echo "  make run        live run, clocks pinned (from the USRP or FERS)"
+	@echo "  make drive      the USRP driver on the Jetson: samples -> multicast"
+	@echo "  make stop       end every radar process left on the Jetson"
 	@echo "  make replay     replay the recorded capture on the Jetson"
 	@echo "  make view       watch the newest run in a browser (second terminal)"
 	@echo "  make verify     golden-file checks against MATLAB"
@@ -54,7 +56,7 @@ help:
 	@echo
 	@echo "  make host       build every tool locally into ./bin (no CUDA)"
 	@echo "  make host-test  run the unit tests locally"
-	@echo "  make host-view  serve the ARD viewer locally against ./data"
+	@echo "  make host-view  serve one recorded frame from ./data in the viewer"
 	@echo
 	@echo "  ARGS=... passes extra arguments to run and bench, e.g."
 	@echo "    make run ARGS='--seconds 145'"
@@ -86,23 +88,60 @@ test:
 run:
 	@ssh -t $(JETSON) 'cd $(REMOTE) && bash scripts/run_live.sh $(ARGS)'
 
-## replay: run the recorded capture through the whole chain on the Jetson.
+## drive: the USRP driver on the Jetson, streaming both channels to the
+##        sample multicast group (239.192.0.1:4991) until Ctrl-C. Start it
+##        AFTER `make run` prints "Listening now". Runs in the foreground of
+##        its own terminal; Ctrl-C here stops it cleanly.
+##
+##          make drive                          the USRP2 at 192.168.10.2
+##          make drive ARGS='--seconds 60'      timed
+##          make drive ARGS='--synth'           no hardware: planted target
+##          make drive ARGS='--synth --synth-silent'   dead-input test
+##
+##        Three terminals for a live session: `make view`, `make run
+##        ARGS='--group 239.192.0.1'`, `make drive`.
+drive:
+	@ssh -t $(JETSON) 'cd $(REMOTE) && ./build/uhd_to_vita49 \
+	    --args addr=192.168.10.2 --config config/prb.conf $(ARGS)'
+
+## stop: end every radar process on the Jetson -- viewer, chain, driver,
+##       tegrastats logger -- for when a terminal was closed on one of them
+##       and a port is still held. SIGTERM first (clean summaries), then
+##       SIGKILL for anything that ignored it. The [_] keeps pkill -f from
+##       matching the shell that runs it.
+stop:
+	@ssh $(JETSON) 'for p in "build/ard[_]view" "build/pbr[_]run" "build/uhd_to[_]vita49" \
+	        "build/ingest[_]probe" "scripts/ard_viewer[.]py"; do \
+	        pkill -TERM -f "$$p" 2>/dev/null && echo "stopped $$p"; done; \
+	    sleep 2; \
+	    for p in "build/ard[_]view" "build/pbr[_]run" "build/uhd_to[_]vita49" \
+	        "build/ingest[_]probe" "scripts/ard_viewer[.]py"; do \
+	        pkill -KILL -f "$$p" 2>/dev/null && echo "killed $$p (ignored SIGTERM)"; done; \
+	    pgrep -af "build/(ard_view|pbr_run|uhd_to_vita49|ingest_probe)" | grep -v pgrep \
+	        || echo "nothing running"'
+
+## replay: run the recorded capture through the whole chain on the Jetson,
+##         with config/fers.conf (the FERS scenario: 204800 Hz, fullscale
+##         0.005). prb.conf now describes the USRP and would mis-index it.
 ##         Each run gets its own directory named after the algorithm and the
 ##         time, with a copy of the config beside it, so runs of different
 ##         algorithms can be pulled back and compared side by side.
 replay:
 	@ssh $(JETSON) 'cd $(REMOTE) && \
-	    A=$$(sed -n "s/^DSI_ALGORITHM *= *//p" config/prb.conf) && \
+	    A=$$(sed -n "s/^DSI_ALGORITHM *= *//p" config/fers.conf) && \
 	    OUT=/data/results/replay_$${A}_$$(date +%Y%m%d_%H%M%S) && \
-	    mkdir -p $$OUT && cp config/prb.conf $$OUT/prb.conf && \
+	    mkdir -p $$OUT && cp config/fers.conf $$OUT/prb.conf && \
 	    echo "output: $$OUT" && \
-	    ./build/pbr_run --file data/fers_capture.pbrcap --out $$OUT $(ARGS) \
+	    ./build/pbr_run --file data/fers_capture.pbrcap --config config/fers.conf \
+	        --out $$OUT $(ARGS) \
 	        | tee $$OUT/run.log'
 
-## view: watch the newest run in a browser, live. Run this ON THE MAC, like
+## view: watch the running chain in a browser, live. Run this ON THE MAC, like
 ##       every other target, in a second terminal alongside `make run` or
-##       `make replay`. The sidecar reads the files pbr_run already writes,
-##       so it cannot add latency to a CPI.
+##       `make replay`. ard_view on the board joins the ARD multicast group
+##       pbr_run streams to (ARD_STREAM_DEST) and serves the page; nothing is
+##       written to disk. It is a separate process, so it cannot add latency
+##       to a CPI.
 ##
 ##       Forwarded over the existing ssh path rather than served straight to
 ##       the subnet: the board's firewall blocks ICMP and may block inbound
@@ -110,7 +149,7 @@ replay:
 ##       firewall allows it, http://<board-ip>:8080 also works directly.
 ##
 ##       A viewer left running on the board from an earlier session holds
-##       8080, so any old instance is stopped first. The [.] in the pattern
+##       8080, so any old instance is stopped first. The [_] in the pattern
 ##       stops pkill -f matching the very shell that runs it (Linux pkill
 ##       does not exclude its ancestors; it would kill the ssh command).
 ##
@@ -118,10 +157,10 @@ replay:
 ##       still running, say) fail loudly. Otherwise ssh carries on and the
 ##       browser silently talks to the wrong server.
 view:
-	@ssh $(JETSON) 'pkill -f "scripts/ard_viewer[.]py" || true'
+	@ssh $(JETSON) 'pkill -f "build/ard[_]view" || true'
 	@echo "open http://localhost:8080 -- Ctrl-C here to stop"
 	@ssh -o ExitOnForwardFailure=yes -L 8080:localhost:8080 $(JETSON) \
-	    'cd $(REMOTE) && python3 scripts/ard_viewer.py --root /data/results'
+	    'cd $(REMOTE) && ./build/ard_view --group 239.192.0.2'
 
 ## verify: every golden-file check. Run after changing src/dsi or src/ard.
 verify:
@@ -174,6 +213,19 @@ HOST_CXX      ?= c++
 HOST_CXXFLAGS := -std=c++14 -O2 -Wall -Wextra -Iinclude -pthread
 HOST_BIN      := bin
 
+# UHD on the Mac (brew install uhd) lets uhd_to_vita49 drive the N210 from
+# here too, since the Mac is on the same switch. pkg-config finds it (UHD
+# ships uhd.pc); without it the driver builds --synth only.
+#
+# Homebrew's UHD is 4.x and its headers need C++17, so this ONE host target
+# is compiled as C++17 (the later -std wins). The project standard stays
+# C++14: nothing in our sources uses C++17, and the Jetson build, which is
+# the one that matters, compiles the same file as C++14 against UHD 3.10.
+UHD_CFG := $(shell pkg-config --exists uhd 2>/dev/null && pkg-config --modversion uhd)
+ifneq ($(UHD_CFG),)
+HOST_UHD_FLAGS := -std=c++17 -DPBR_HAVE_UHD $(shell pkg-config --cflags --libs uhd)
+endif
+
 LIB_SRC := src/ingest/CircularBuffer.cpp src/ingest/CpiFile.cpp \
            src/ingest/Config.cpp src/ingest/Vita49Packet.cpp \
            src/ingest/UdpReceiver.cpp src/ingest/ChannelIngest.cpp \
@@ -182,25 +234,31 @@ LIB_SRC := src/ingest/CircularBuffer.cpp src/ingest/CpiFile.cpp \
            src/dsi/DSICanceller.cpp src/dsi/cpu/EcaCpu.cpp \
            src/dsi/cpu/CglsCpu.cpp src/dsi/cpu/EcaCdCpu.cpp \
            src/ard/ArdProcessor.cpp src/ard/ArdFile.cpp src/ard/cpu/ArdCpu.cpp \
-           src/ard/cpu/BatchesArdCpu.cpp
+           src/ard/cpu/BatchesArdCpu.cpp src/ard/ArdStream.cpp \
+           src/display/HttpServer.cpp
 
 HOST_APPS  := src/app/pbr_run.cpp src/app/ingest_replay.cpp \
               src/app/ingest_probe.cpp src/app/dsi_verify.cpp \
               src/app/ard_verify.cpp src/app/uhd_to_vita49.cpp \
-              bench/dsi_bench.cpp bench/ard_bench.cpp
+              src/app/ard_view.cpp bench/dsi_bench.cpp bench/ard_bench.cpp
 HOST_TESTS := tests/test_circular_buffer.cpp tests/test_vita49_packet.cpp \
               tests/test_config.cpp tests/test_cpi_extraction.cpp \
               tests/test_eca.cpp tests/test_cgls.cpp tests/test_ecacd.cpp \
               tests/test_ard.cpp tests/test_batches_ard.cpp \
-              tests/test_vita49_writer.cpp
+              tests/test_vita49_writer.cpp tests/test_ard_stream.cpp \
+              tests/test_http.cpp
 
 ## host: build every tool locally into ./bin
 host:
 	@mkdir -p $(HOST_BIN)
 	@for a in $(HOST_APPS); do \
 	    n=$$(basename $$a .cpp); \
-	    $(HOST_CXX) $(HOST_CXXFLAGS) $$a $(LIB_SRC) -o $(HOST_BIN)/$$n || exit 1; \
+	    extra=""; \
+	    if [ "$$n" = uhd_to_vita49 ]; then extra="$(HOST_UHD_FLAGS)"; fi; \
+	    $(HOST_CXX) $(HOST_CXXFLAGS) $$a $(LIB_SRC) $$extra -o $(HOST_BIN)/$$n || exit 1; \
 	done
+	@if [ -n "$(UHD_CFG)" ]; then echo "uhd_to_vita49 built WITH UHD $(UHD_CFG)"; \
+	    else echo "uhd_to_vita49 built without UHD (--synth only); brew install uhd to add it"; fi
 	@echo "built into $(HOST_BIN)/"
 
 ## host-test: build and run the unit tests locally
@@ -213,11 +271,10 @@ host-test:
 	        || { echo "  FAILED  $$n"; ./$(HOST_BIN)/$$n; exit 1; }; \
 	    echo "  ok      $$n"; \
 	done
-	@python3 tests/test_ard_viewer.py > /dev/null 2>&1 \
-	    || { echo "  FAILED  test_ard_viewer"; python3 tests/test_ard_viewer.py; exit 1; }
-	@echo "  ok      test_ard_viewer"
 
-## host-view: serve the ARD viewer locally against the fixture in ./data, for
-##            working on the page without the board.
+## host-view: serve one recorded frame from ./data on the Mac, for working on
+##            the page without the board. To watch a live board from the Mac
+##            instead: bin/ard_view --group 239.192.0.2 (the Mac must be on
+##            the switch), then http://localhost:8080.
 host-view:
-	@python3 scripts/ard_viewer.py --dir data --port 8080
+	@./$(HOST_BIN)/ard_view --file data/ard/ard_00000.bin --http 8080
