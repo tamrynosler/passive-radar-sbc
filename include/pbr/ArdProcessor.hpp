@@ -55,6 +55,19 @@ namespace pbr {
 // Doppler bin 0 is the most negative Doppler, bin uDopplerBins/2 is zero
 // Doppler, which is the `fftshift` the reference applies.
 //
+// Sign and origin of the axes (traced 2026-10-01, docs/adsb-overlay-design.md
+// 4.6):
+//
+//   range    bin 0 is the BASELINE: an echo that travelled the same distance
+//            as the direct signal. The axis is Rt + Rr - L, the extra path,
+//            so the transmitter-receiver distance L is not needed to form
+//            the map; it is only needed to place a cell on the ground.
+//   Doppler  positive means the bistatic range is DECREASING, a closing
+//            target. Confirmed on the FERS scenario: the .fersxml target
+//            computes to bin 46.3 / +99.1 Hz by hand and the chain found
+//            bin 46 / +99 Hz. A spectrally inverted front end would mirror
+//            this axis and leave range untouched (PLAN.md, orientation check).
+//
 // References:
 //   [1] Petri et al., TIWDC/ESAV 2011 -- the batches (decimation) CAF.
 //   [2] Schuepbach, Paine, O'Hagan, RadarConf 2020 -- the chain this
