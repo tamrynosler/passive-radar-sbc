@@ -5,19 +5,23 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ARD viewer</title>
 <style>
+  html, body { height: 100%; }
   body {
     margin: 0;
     background: #101014;
     color: #d8d8e0;
     font: 13px/1.4 -apple-system, "Segoe UI", "DejaVu Sans", sans-serif;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
-  header, .controls {
-    padding: 8px 12px;
+  header {
+    padding: 6px 12px;
     background: #17171d;
     border-bottom: 1px solid #2a2a33;
+    flex: none;
   }
-  .controls { border-bottom: none; border-top: 1px solid #2a2a33; }
-  .row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 16px; }
+  .row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 14px; }
   .field { white-space: nowrap; }
   .field .label {
     color: #7d7d8c;
@@ -28,12 +32,72 @@
   }
   .field .value { color: #f0f0f4; font-variant-numeric: tabular-nums; }
   #runName { font-weight: 600; }
-  #message { color: #e0b050; min-height: 1.4em; padding: 4px 12px 0; }
+  #panelToggle { margin-left: auto; }
+  #message { color: #e0b050; min-height: 1.4em; padding: 3px 12px 0; flex: none; }
   #message.error { color: #e06060; }
-  .plot { padding: 10px 12px; }
-  canvas { display: block; width: 100%; height: 560px; background: #101014; }
-  input[type=number] {
-    width: 74px;
+
+  /* The plots fill whatever the header leaves; the panel sits at the right. */
+  #main { flex: 1; display: flex; min-height: 0; }
+  #plots {
+    flex: 1;
+    min-width: 0;
+    display: grid;
+    gap: 6px;
+    padding: 6px;
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr;
+  }
+  #plots.n2 { grid-template-columns: 1fr 1fr; }
+  #plots.n3, #plots.n4 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+  #plots.n5 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr 1fr; }
+  .cell { position: relative; min-width: 0; min-height: 0; display: none; }
+  .cell.shown { display: block; }
+  .cell.wide { grid-column: 1 / -1; }
+  .cell canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; background: #101014; }
+  #plots.empty::after {
+    content: "no display selected";
+    color: #7d7d8c;
+    align-self: center;
+    justify-self: center;
+  }
+
+  /* The control panel. */
+  #panel {
+    flex: none;
+    width: 300px;
+    overflow-y: auto;
+    background: #17171d;
+    border-left: 1px solid #2a2a33;
+    padding: 8px 12px 14px;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  #panel.hidden { display: none; }
+  .group { border: 1px solid #2a2a33; border-radius: 4px; padding: 8px 10px; }
+  .group h3 {
+    margin: 0 0 6px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #9a9aa8;
+    font-weight: 600;
+  }
+  .prow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 3px 0;
+  }
+  .prow label { color: #c0c0cc; }
+  .prow label[title] { cursor: help; text-decoration: underline dotted #4a4a58; text-underline-offset: 3px; }
+  .off { display: none; }
+  .note { color: #7d7d8c; font-size: 12px; padding: 2px 0; }
+  input[type=text], select {
+    width: 108px;
+    box-sizing: border-box;
     background: #22222b;
     color: #f0f0f4;
     border: 1px solid #3a3a46;
@@ -41,16 +105,31 @@
     padding: 3px 5px;
     font: inherit;
   }
+  input[type=text].dirty { border-color: #c9a227; }
+  input[type=checkbox] { margin: 0 6px 0 0; }
   button {
     background: #2c2c38;
     color: #f0f0f4;
     border: 1px solid #3a3a46;
     border-radius: 3px;
-    padding: 3px 10px;
+    padding: 4px 12px;
     font: inherit;
     cursor: pointer;
   }
   button:hover { background: #3a3a48; }
+  button.small { padding: 2px 8px; font-size: 12px; }
+  #actions { display: flex; gap: 8px; }
+  #actions button { flex: 1; padding: 6px 0; }
+  #cfgResult { min-height: 1.4em; color: #8f8; }
+  #cfgResult.error { color: #f88; }
+  #cfgDetail {
+    margin: 0;
+    white-space: pre-wrap;
+    font: 11px/1.35 Menlo, Consolas, monospace;
+    color: #9a9aa8;
+    max-height: 160px;
+    overflow-y: auto;
+  }
 </style>
 </head>
 <body>
@@ -69,44 +148,85 @@
     <span class="field"><span class="label">det</span><span class="value" id="fDet">&mdash;</span></span>
     <span class="field"><span class="label">config</span><span class="value" id="fConfig">&mdash;</span></span>
     <span class="field"><span class="label">dropped</span><span class="value" id="fDropped">&mdash;</span></span>
+    <button id="panelToggle" class="small" title="Hide or show the control panel; the plots take the space.">Hide controls &rsaquo;</button>
   </div>
 </header>
 
 <div id="message">starting&hellip;</div>
 
-<div class="plot"><canvas id="view"></canvas></div>
-
-<div class="controls" id="params">
-  <div class="row">
-    <span class="field"><span class="label">parameters</span>
-      <button id="cfgLoad">Load</button>
-      <button id="cfgApply">Apply</button>
-      <button id="cfgReset">Reset to file</button>
-      <span class="value" id="cfgResult">&mdash;</span>
-    </span>
+<div id="main">
+  <div id="plots">
+    <div class="cell" id="cellArd"><canvas id="cvArd"></canvas></div>
+    <div class="cell" id="cellDet"><canvas id="cvDet"></canvas></div>
+    <div class="cell" id="cellHold"><canvas id="cvHold"></canvas></div>
+    <div class="cell" id="cellRf"><canvas id="cvRf"></canvas></div>
+    <div class="cell" id="cellWf"><canvas id="cvWf"></canvas></div>
   </div>
-  <textarea id="cfgText" rows="10" spellcheck="false"
-    style="width:100%; box-sizing:border-box; font-family:monospace; font-size:12px;
-           background:#101014; color:#ddd; border:1px solid #333; margin-top:6px;"
-    placeholder="Load fetches the chain's live KEY = VALUE set; edit values; Apply sends the whole set back. Changes take effect at the next CPI boundary. The config file is never written."></textarea>
-</div>
 
-<div class="controls">
-  <div class="row">
-    <span class="field">
-      <span class="label">doppler &plusmn;Hz</span>
-      <input type="number" id="fdMax" value="400" min="1" step="50">
-    </span>
-    <span class="field">
-      <span class="label">floor dB</span>
-      <input type="number" id="floorDb" value="-50" max="-1" step="5">
-    </span>
-    <span class="field">
-      <span class="label">0 dB reference</span>
-      <span class="value" id="refValue">&mdash;</span>
-      <button id="resetRef">Reset</button>
-    </span>
-  </div>
+  <aside id="panel">
+    <div class="group">
+      <h3>Display type</h3>
+      <div class="prow"><label title="Show the newest frame: bistatic range against bistatic Doppler, in dB below the running peak."><input type="checkbox" id="showArd" checked>Range-Doppler map</label></div>
+      <div class="prow"><label title="Show the CFAR detections as dots: the newest frame in red, the previous frames in grey."><input type="checkbox" id="showDet">Detections</label>
+        <button id="clearDet" class="small" title="Forget every previous detection; the grey dots start again from the next frame.">Clear</button></div>
+      <div class="prow"><label title="Show, for every cell, the highest dB seen over the last N frames. Slow or intermittent targets stand out."><input type="checkbox" id="showHold">Max hold</label></div>
+      <div class="prow"><label title="Before any processing: the power spectrum of the raw CPI, as the canceller received it, one row per CPI, newest at the bottom. Frequency offset from the carrier on x. Shows the station, neighbours, interference and a dead front end. A CPI without data is a black row."><input type="checkbox" id="showRf">Spectrogram before processing</label></div>
+      <div class="prow"><label title="After DSI cancellation and the CAF: one row per CPI, newest at the bottom, the strongest cell over range for every Doppler bin (or over Doppler for every range bin). Shows cancellation residue and target Doppler tracks over time. A CPI without data is a black row."><input type="checkbox" id="showWf">Spectrogram after processing</label></div>
+      <div class="prow"><label title="Doppler window shown on every panel, symmetric about zero. Display only; the chain computes the full span." for="fdMax">Doppler span (&plusmn;Hz)</label><input type="text" id="fdMax" value="400"></div>
+      <div class="prow"><label title="Bottom of the colour scale, in dB below the 0 dB reference. Everything weaker is drawn in the darkest colour." for="floorDb">Floor (dB)</label><input type="text" id="floorDb" value="-50"></div>
+      <div class="prow"><label title="How many of the most recent frames the max hold is taken over." for="holdFrames">Max hold frames</label><input type="text" id="holdFrames" value="10"></div>
+      <div class="prow"><label title="How many previous frames of detections the Detections panel keeps as grey dots." for="histFrames">Detection history (frames)</label><input type="text" id="histFrames" value="20"></div>
+      <div class="prow"><label title="Rows both spectrograms show, one per CPI, newest at the bottom. Rows with no frame yet, or whose frame was blank or lost, are black." for="wfDepth">Spectrogram rows</label><input type="text" id="wfDepth" value="60"></div>
+      <div class="prow"><label title="After processing: Doppler puts the strongest cell over range per Doppler bin on x; Range the strongest over Doppler per range bin." for="wfAxis">After-processing axis</label>
+        <select id="wfAxis"><option value="doppler">Doppler</option><option value="range">Range</option></select></div>
+      <div class="prow"><label for="rfChannel" title="Before processing: which channel's spectrum to show. The reference sees the station directly; the surveillance is what the canceller cleans.">Before-processing channel</label>
+        <select id="rfChannel"><option value="1">Surveillance</option><option value="0">Reference</option></select></div>
+      <div class="prow"><label title="The strongest map peak seen so far in this run, the 0 dB of the colour scale. Reset ref restarts it from the current frame.">0 dB reference <span class="value" id="refValue">&mdash;</span></label>
+        <button id="resetRef" class="small" title="Restart the 0 dB reference from the current frame's peak.">Reset ref</button></div>
+    </div>
+
+    <div class="group">
+      <h3>DSI cancellation</h3>
+      <div class="prow"><label title="Direct-signal interference canceller. ECA-m: one solve over the whole CPI (MATLAB reference). ECA-B: batches with independent weights. ECA-S: sliding window, long estimation and short update. ECA-CD: per carrier and Doppler in the frequency domain. CGLS: iterative least squares." for="dsiAlgo">Algorithm</label>
+        <select id="dsiAlgo" data-key="DSI_ALGORITHM">
+          <option value="ECA-m">ECA-m</option>
+          <option value="ECA-B">ECA-B</option>
+          <option value="ECA-S">ECA-S</option>
+          <option value="ECA-CD">ECA-CD</option>
+          <option value="CGLS">CGLS</option>
+        </select></div>
+      <div class="prow"><label title="N_CLUTTER_TAPS: delay taps in the clutter subspace, i.e. how far in range the canceller reaches. Must be at least the number of range bins.">Clutter taps</label><input type="text" data-key="N_CLUTTER_TAPS"></div>
+      <div class="note" data-algo="ECA-m">One solve over the whole CPI, absolute loading 1e-3 (the MATLAB reference).</div>
+      <div class="note" data-algo="ECA-B">Weights re-estimated every batch; the update interval equals the batch length.</div>
+      <div class="prow" data-algo="ECA-B"><label title="ECA_BATCH_LENGTH_s: the stretch of signal each set of weights is estimated from and applied to. ECA-B needs the update interval equal to this, so it is sent along. Must divide the CPI. Its Doppler ambiguities land every 1/T Hz.">Batch length (s)</label><input type="text" data-key="ECA_BATCH_LENGTH_s" data-algo="ECA-B"></div>
+      <div class="prow" data-algo="ECA-S"><label title="ECA_BATCH_LENGTH_s: the stretch of signal the weights are estimated from (T_A). Colone et al. found 25 ms optimal for FM with a 1 s CPI.">Estimation window T<sub>A</sub> (s)</label><input type="text" data-key="ECA_BATCH_LENGTH_s" data-algo="ECA-S"></div>
+      <div class="prow" data-algo="ECA-S"><label title="ECA_UPDATE_INTERVAL_s: the stretch one set of weights is applied to (T_S). Shorter than the estimation window for ECA-S; must divide the CPI. Sets where the cancellation ambiguities fall: every 1/T_S Hz.">Update interval T<sub>S</sub> (s)</label><input type="text" data-key="ECA_UPDATE_INTERVAL_s"></div>
+      <div class="prow" data-algo="ECA-B ECA-S"><label title="ECA_DOPPLER_TAPS: Doppler bins either side of zero in the clutter subspace, which becomes K(2P+1) columns wide. Only 0 is implemented.">Doppler taps P</label><input type="text" data-key="ECA_DOPPLER_TAPS"></div>
+      <div class="prow" data-algo="ECA-B ECA-S"><label title="ECA_DIAGONAL_LOADING: added to the Gram diagonal as a fraction of its mean, to keep the solve well conditioned. Relative, so the signal level does not change its strength.">Diagonal loading</label><input type="text" data-key="ECA_DIAGONAL_LOADING"></div>
+      <div class="prow" data-algo="ECA-CD"><label title="ECA_CD_BATCH_s: the CPI is cut into batches of this length, each FFT-ed, and the clutter projected out carrier by carrier. Must be a power of two in samples and divide the CPI. The cancellation ambiguity sits at 1/batch Hz; longer batches reach further in delay.">Batch length (s)</label><input type="text" data-key="ECA_CD_BATCH_s"></div>
+      <div class="prow" data-algo="ECA-CD"><label title="ECA_CD_DOPPLER_TAPS: Doppler columns either side of zero per carrier, spaced 1/CPI apart. Cheap here: each per-carrier solve is (2P+1) square. Schuepbach et al. used 1; at most 3.">Doppler taps P</label><input type="text" data-key="ECA_CD_DOPPLER_TAPS"></div>
+      <div class="prow" data-algo="CGLS"><label title="CGLS_BATCH_s: weights estimated from and applied to fragments of this length. Must divide the CPI. Longer is better conditioned and puts the ambiguity closer (1/batch Hz).">Batch length (s)</label><input type="text" data-key="CGLS_BATCH_s"></div>
+      <div class="prow" data-algo="CGLS"><label title="CGLS_ITERATIONS: fixed iteration count, which fixes the execution time and acts as the regularisation: strong clutter is fitted first, noise last, so more is not better. Cold, 120 matches ECA-B; primed, 30 does within a few CPIs.">Iterations</label><input type="text" data-key="CGLS_ITERATIONS"></div>
+      <div class="prow" data-algo="CGLS"><label title="CGLS_PRIME: start each window from the weights the same window converged to in the previous CPI, instead of from zero. The scene barely changes between CPIs, so the start is already close. Makes the canceller stateful.">Prime from previous CPI</label>
+        <select data-key="CGLS_PRIME"><option value="1">yes</option><option value="0">no</option></select></div>
+    </div>
+
+    <div class="group">
+      <h3>CFAR</h3>
+      <div class="prow"><label title="CFAR_PFA: the probability of false alarm the 2D CA-CFAR threshold is set for. Lower means fewer detections. Strictly between 0 and 1.">P<sub>fa</sub></label><input type="text" data-key="CFAR_PFA"></div>
+      <div class="prow"><label title="CFAR_GUARD_RANGE: cells either side of the cell under test, in range, left out of the noise estimate so a target does not raise its own threshold.">Guard, range (cells)</label><input type="text" data-key="CFAR_GUARD_RANGE"></div>
+      <div class="prow"><label title="CFAR_GUARD_DOPPLER: cells either side of the cell under test, in Doppler, left out of the noise estimate.">Guard, Doppler (cells)</label><input type="text" data-key="CFAR_GUARD_DOPPLER"></div>
+      <div class="prow"><label title="CFAR_TRAIN_RANGE: cells either side, in range, beyond the guard, averaged for the noise estimate. 0 means no range training.">Train, range (cells)</label><input type="text" data-key="CFAR_TRAIN_RANGE"></div>
+      <div class="prow"><label title="CFAR_TRAIN_DOPPLER: cells either side, in Doppler, beyond the guard, averaged for the noise estimate.">Train, Doppler (cells)</label><input type="text" data-key="CFAR_TRAIN_DOPPLER"></div>
+    </div>
+
+    <div id="actions">
+      <button id="cfgApply" title="Send the DSI and CFAR values shown to the chain. It validates the whole set and applies it at the next CPI boundary, or refuses with the reason. The config file is never written.">Apply</button>
+      <button id="cfgReset" title="Return the chain to its config file values and the display fields to their defaults. Applies at the next CPI boundary.">Reset</button>
+    </div>
+    <div id="cfgResult">&mdash;</div>
+    <pre id="cfgDetail"></pre>
+  </aside>
 </div>
 
 <script>
@@ -127,12 +247,35 @@
 //       64  8*R*D map, interleaved float32 I,Q, map[doppler*R + range]
 //      ...    48  per detection: uint64 rangeBin, uint64 dopplerBin,
 //                 float64 rangeKm, dopplerHz, powerDb, snrDb
+//
+// Four displays, all drawn from these frames in the browser:
+//   ARD        the map of the newest frame, in dB below the running peak
+//   Detections the newest frame's detections (red) over the last N frames'
+//              (grey), on the same axes
+//   Max hold   per cell, the maximum dB over the last N frames
+//   Spectrogram after processing   a fixed number of rows, one per CPI,
+//              newest at the bottom: the maximum dB over range for each
+//              Doppler bin (or over Doppler for each range bin) of the map.
+//   Spectrogram before processing  the same rows, from the PBRARDP1 spectra
+//              the chain streams with each frame (ArdStream.hpp): the raw
+//              CPI's power spectrum, reference or surveillance channel.
+//   A CPI with no frame (blank, or lost on the way) is a black row in both,
+//   so the time axis stays true.
+//
+// Blank frames (status != 0) are shown in the ARD panel but never enter the
+// max hold or the detection trail: a dead input must not wipe them.
 
 var HEADER_SIZE = 64;
 var DETECTION_SIZE = 48;
 var C_LIGHT = 299792458;
 var POLL_MS = 500;
 var STALE_S = 3;
+var RELOAD_AFTER_APPLY_MS = 4000;   // fallback reload; normally liveChanges triggers it
+
+var DISPLAY_DEFAULTS = {
+  fdMax: "400", floorDb: "-50", holdFrames: "10", histFrames: "20",
+  wfDepth: "60", wfAxis: "doppler", rfChannel: "1"
+};
 
 var state = {
   runName: null,
@@ -146,8 +289,24 @@ var state = {
   streamStatus: 0,       // 0 processed, 1 null input, 2 a stage failed
   reason: "",
   framesDropped: 0,
-  fetching: false
+  liveChanges: null,     // the chain's count of applied changes; a step reloads the fields
+  fetching: false,
+  // Histories, all bounded by the display fields.
+  holdRing: [],          // Float32Array dB maps of the last N processed frames
+  holdDb: null,          // their per-cell maximum, recomputed per frame
+  holdShape: "",         // "RxD" the ring was built for; a change empties it
+  detHistory: [],        // [{cpi, dets: [{rangeBin, dopplerBin}]}], newest last
+  wfRows: [],            // [{cpi, timeS, doppler: Float32Array(D), range: Float32Array(R)}], newest last;
+                         // doppler/range null for a CPI with no data (drawn black)
+  wfLastCpi: null,       // the CPI of the newest waterfall row, to spot gaps
+  rfRows: [],            // [{cpi, spectra: [Float32Array|null x2], bins, sampleRateHz}], newest last
+  rfLastCpi: null,
+  rfRefDb: [null, null]  // running maximum per channel, the 0 dB of that panel
 };
+
+// The display settings, read from the panel fields (with defaults when a
+// field holds nonsense) so every draw uses the same numbers.
+var display = {fdMax: 400, floorDb: -50, holdFrames: 10, histFrames: 20, wfDepth: 60, wfAxis: "doppler", rfChannel: 1};
 
 // --- format helpers --------------------------------------------------------
 
@@ -221,7 +380,7 @@ function parseFrame(buffer) {
     throw new Error("frame is " + buffer.byteLength + " bytes, expected " + expected);
   }
 
-  frame.map = new Float32Array(buffer, HEADER_SIZE, 2 * cells);
+  var map = new Float32Array(buffer, HEADER_SIZE, 2 * cells);
 
   var base = HEADER_SIZE + 8 * cells;
   frame.detections = [];
@@ -237,16 +396,44 @@ function parseFrame(buffer) {
     });
   }
 
-  // Peak over the whole map, as play_ard.m does, not over the visible window.
-  var peak2 = 0;
-  for (var j = 0; j < frame.map.length; j += 2) {
-    var re = frame.map[j];
-    var im = frame.map[j + 1];
-    var mag2 = re * re + im * im;
-    if (mag2 > peak2) { peak2 = mag2; }
+  // The map in dB, once, for every panel. Peak over the whole map, as
+  // play_ard.m does, not over the visible window.
+  frame.db = new Float32Array(cells);
+  var peak = -Infinity;
+  for (var c = 0; c < cells; c++) {
+    var re = map[2 * c];
+    var im = map[2 * c + 1];
+    var db = 10 * Math.log10(re * re + im * im + 1e-300);
+    frame.db[c] = db;
+    if (db > peak) { peak = db; }
   }
-  frame.peakDb = 10 * Math.log10(peak2 + 1e-300);
+  frame.peakDb = peak;
   return frame;
+}
+
+// The PBRARDP1 datagrams ard_view serves back to back: for each, the header
+// then int16 hundredths of a dB. Returns {bins, sampleRateHz, spectra: [ref, sur]}
+// with a null for a channel that was not there.
+function parseSpectra(buffer) {
+  var view = new DataView(buffer);
+  var out = {bins: 0, sampleRateHz: 0, spectra: [null, null]};
+  var at = 0;
+  while (at + 24 <= buffer.byteLength) {
+    var magic = "";
+    for (var i = 0; i < 8; i++) { magic += String.fromCharCode(view.getUint8(at + i)); }
+    if (magic !== "PBRARDP1") { throw new Error("not a spectrum datagram"); }
+    var channel = view.getUint32(at + 12, true);
+    var bins = view.getUint32(at + 16, true);
+    var fs = view.getUint32(at + 20, true);
+    if (at + 24 + 2 * bins > buffer.byteLength) { throw new Error("spectrum datagram truncated"); }
+    var db = new Float32Array(bins);
+    for (var b = 0; b < bins; b++) { db[b] = view.getInt16(at + 24 + 2 * b, true) / 100; }
+    if (channel < 2) { out.spectra[channel] = db; }
+    out.bins = bins;
+    out.sampleRateHz = fs;
+    at += 24 + 2 * bins;
+  }
+  return out;
 }
 
 // --- axes ------------------------------------------------------------------
@@ -276,12 +463,12 @@ function dopplerWindow(frame, fdMax) {
 // Bin centres, not bin edges: imagesc puts the centre of bin r at the axis
 // value, so a tick and a detection ring at the same bin must land on the same
 // pixel. Both go through these two.
-function binToX(frame, bin, left, plotW) {
-  return left + ((bin + 0.5) / frame.rangeBins) * plotW;
+function binToX(frame, bin, box) {
+  return box.left + ((bin + 0.5) / frame.rangeBins) * box.w;
 }
 
-function binToY(win, bin, top, plotH) {
-  return top + ((win.hi - bin + 0.5) / win.count) * plotH;
+function binToY(win, bin, box) {
+  return box.top + ((win.hi - bin + 0.5) / win.count) * box.h;
 }
 
 function tickStep(span, target) {
@@ -295,33 +482,189 @@ function tickStep(span, target) {
   return 10 * power;
 }
 
+// --- histories -------------------------------------------------------------
+
+// Called once per processed (non-blank) frame. Every history is bounded by
+// the display fields; a shape change (a rate adaptation changes R or D)
+// empties them, since the cells no longer mean the same thing.
+function pushHistories(frame) {
+  var R = frame.rangeBins;
+  var D = frame.dopplerBins;
+  var shape = R + "x" + D;
+  if (shape !== state.holdShape) {
+    state.holdShape = shape;
+    state.holdRing = [];
+    state.holdDb = null;
+    state.detHistory = [];
+    state.wfRows = [];
+    state.wfLastCpi = null;
+  }
+
+  state.holdRing.push(frame.db);
+  trimHistories();
+  recomputeHold(R * D);
+
+  var dets = [];
+  for (var i = 0; i < frame.detections.length; i++) {
+    dets.push({rangeBin: frame.detections[i].rangeBin, dopplerBin: frame.detections[i].dopplerBin});
+  }
+  state.detHistory.push({cpi: state.shownCpi, dets: dets});
+
+  // One waterfall row along each axis, so the axis can be switched without
+  // waiting for the history to refill.
+  var doppler = new Float32Array(D);
+  var range = new Float32Array(R);
+  for (var r = 0; r < R; r++) { range[r] = -Infinity; }
+  for (var d = 0; d < D; d++) {
+    var row = d * R;
+    var best = -Infinity;
+    for (var rr = 0; rr < R; rr++) {
+      var v = frame.db[row + rr];
+      if (v > best) { best = v; }
+      if (v > range[rr]) { range[rr] = v; }
+    }
+    doppler[d] = best;
+  }
+  pushWaterfallRow({cpi: state.shownCpi, timeS: frame.cpiStartIndex / frame.sampleRateHz,
+                    doppler: doppler, range: range});
+}
+
+// Append a row to a time history (rows newest last, lastKey the CPI of the
+// newest), first filling any CPIs skipped since the last one with blank
+// rows so the time axis stays true. A row with null data draws black.
+function pushTimeRow(rowsKey, lastKey, row) {
+  var rows = state[rowsKey];
+  var last = state[lastKey];
+  if (last !== null && row.cpi > last + 1) {
+    var missing = Math.min(row.cpi - last - 1, display.wfDepth);
+    for (var k = missing; k >= 1; k--) {
+      rows.push({cpi: row.cpi - k, timeS: null, doppler: null, range: null, spectra: null});
+    }
+  }
+  if (last === null || row.cpi > last) {
+    rows.push(row);
+    state[lastKey] = row.cpi;
+  }
+  trimHistories();
+}
+
+function pushWaterfallRow(row) { pushTimeRow("wfRows", "wfLastCpi", row); }
+
+function blankWaterfallRow(cpi) {
+  return {cpi: cpi, timeS: null, doppler: null, range: null};
+}
+
+// The before-processing spectra for a CPI (null spectra: none arrived).
+function pushSpectrumRow(cpi, timeS, parsed) {
+  var row = {cpi: cpi, timeS: timeS, spectra: null, bins: 0, sampleRateHz: 0};
+  if (parsed !== null) {
+    row.spectra = parsed.spectra;
+    row.bins = parsed.bins;
+    row.sampleRateHz = parsed.sampleRateHz;
+    for (var c = 0; c < 2; c++) {
+      var db = parsed.spectra[c];
+      if (db === null) { continue; }
+      var peak = -Infinity;
+      for (var b = 0; b < db.length; b++) { if (db[b] > peak) { peak = db[b]; } }
+      if (isFinite(peak) && peak > -290 && (state.rfRefDb[c] === null || peak > state.rfRefDb[c])) {
+        state.rfRefDb[c] = peak;
+      }
+    }
+  }
+  pushTimeRow("rfRows", "rfLastCpi", row);
+}
+
+function trimHistories() {
+  while (state.holdRing.length > display.holdFrames) { state.holdRing.shift(); }
+  while (state.detHistory.length > display.histFrames + 1) { state.detHistory.shift(); }
+  while (state.wfRows.length > display.wfDepth) { state.wfRows.shift(); }
+  while (state.rfRows.length > display.wfDepth) { state.rfRows.shift(); }
+}
+
+function recomputeHold(cells) {
+  var ring = state.holdRing;
+  if (ring.length === 0) { state.holdDb = null; return; }
+  if (state.holdDb === null || state.holdDb.length !== cells) {
+    state.holdDb = new Float32Array(cells);
+  }
+  var hold = state.holdDb;
+  hold.set(ring[0]);
+  for (var n = 1; n < ring.length; n++) {
+    var src = ring[n];
+    for (var c = 0; c < cells; c++) {
+      if (src[c] > hold[c]) { hold[c] = src[c]; }
+    }
+  }
+}
+
 // --- drawing ---------------------------------------------------------------
 
 var offscreen = document.createElement("canvas");
 
-function drawMap(frame, win, floorDb, refDb) {
-  var R = frame.rangeBins;
+// Size the canvas to its CSS box at device resolution and return a context
+// in CSS pixels. Null when the cell is collapsed (hidden or zero-sized).
+function prepareCanvas(canvas) {
+  var dpr = window.devicePixelRatio || 1;
+  var w = canvas.clientWidth;
+  var h = canvas.clientHeight;
+  if (w < 10 || h < 10) { return null; }
+  var pw = Math.round(w * dpr);
+  var ph = Math.round(h * dpr);
+  if (canvas.width !== pw || canvas.height !== ph) {
+    canvas.width = pw;
+    canvas.height = ph;
+  }
+  var ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = "#101014";
+  ctx.fillRect(0, 0, w, h);
+  return {ctx: ctx, width: w, height: h};
+}
+
+// The plot rectangle inside a canvas, leaving room for the title, the axis
+// labels and (optionally) a colour bar.
+function plotBox(width, height, withBar) {
+  var left = 58;
+  var right = withBar ? 84 : 16;
+  var top = 26;
+  var bottom = 42;
+  return {left: left, top: top,
+          w: Math.max(10, width - left - right), h: Math.max(10, height - top - bottom)};
+}
+
+function drawTitle(ctx, text) {
+  ctx.fillStyle = "#c8c8d4";
+  ctx.font = "600 12px sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.fillText(text, 8, 6);
+}
+
+function dbScale(floorDb, refDb) {
+  if (refDb === null || !isFinite(refDb)) { refDb = 0; }   // nothing to reference yet
+  return {floorDb: floorDb, refDb: refDb, scale: 1 / (0 - floorDb)};
+}
+
+function lutIndex(db, s) {
+  var t = (db - s.refDb - s.floorDb) * s.scale;
+  if (t < 0) { t = 0; } else if (t > 1) { t = 1; }
+  return 3 * ((t * 255) | 0);
+}
+
+// A dB map [doppler * R + range] over the Doppler window, into `offscreen`.
+function paintMap(db, R, win, s) {
   offscreen.width = R;
   offscreen.height = win.count;
   var ctx = offscreen.getContext("2d");
   var image = ctx.createImageData(R, win.count);
   var pixels = image.data;
-  var scale = 1 / (0 - floorDb);
-  if (refDb === null || !isFinite(refDb)) { refDb = 0; }   // nothing to reference yet
-
   for (var d = win.lo; d <= win.hi; d++) {
     // Canvas y grows downward and positive Doppler is up, so the top row of
     // the image is the highest Doppler in the window.
-    var y = win.hi - d;
-    var rowIn = 2 * d * R;
-    var rowOut = 4 * y * R;
+    var rowIn = d * R;
+    var rowOut = 4 * (win.hi - d) * R;
     for (var r = 0; r < R; r++) {
-      var re = frame.map[rowIn + 2 * r];
-      var im = frame.map[rowIn + 2 * r + 1];
-      var db = 10 * Math.log10(re * re + im * im + 1e-300) - refDb;
-      var t = (db - floorDb) * scale;
-      if (t < 0) { t = 0; } else if (t > 1) { t = 1; }
-      var entry = 3 * ((t * 255) | 0);
+      var entry = lutIndex(db[rowIn + r], s);
       var out = rowOut + 4 * r;
       pixels[out] = LUT[entry];
       pixels[out + 1] = LUT[entry + 1];
@@ -332,89 +675,256 @@ function drawMap(frame, win, floorDb, refDb) {
   ctx.putImageData(image, 0, 0);
 }
 
-function render() {
-  var canvas = el("view");
-  var ctx = canvas.getContext("2d");
-  var width = canvas.clientWidth;
-  var height = canvas.clientHeight;
-  if (canvas.width !== width || canvas.height !== height) {
-    canvas.width = width;
-    canvas.height = height;
-  }
+function drawMapPanel(canvas, title, db) {
+  var c = prepareCanvas(canvas);
+  if (c === null) { return; }
+  drawTitle(c.ctx, title);
+  var frame = state.frame;
+  if (frame === null || db === null) { return; }
 
-  ctx.fillStyle = "#101014";
-  ctx.fillRect(0, 0, width, height);
+  var box = plotBox(c.width, c.height, true);
+  var win = dopplerWindow(frame, display.fdMax);
+  var s = dbScale(display.floorDb, state.refDb);
+  paintMap(db, frame.rangeBins, win, s);
 
+  var ctx = c.ctx;
+  ctx.imageSmoothingEnabled = false;   // blocky like imagesc, not blurred
+  ctx.drawImage(offscreen, box.left, box.top, box.w, box.h);
+  frameBox(ctx, box);
+  drawRangeAxis(ctx, frame, box);
+  drawDopplerAxis(ctx, frame, win, box);
+  drawColorBar(ctx, display.floorDb, box.left + box.w + 16, box.top, 14, box.h);
+}
+
+function drawDetectionPanel(canvas) {
+  var c = prepareCanvas(canvas);
+  if (c === null) { return; }
+  drawTitle(c.ctx, "Detections: newest frame red, previous " + display.histFrames + " grey");
   var frame = state.frame;
   if (frame === null) { return; }
 
-  var fdMax = Number(el("fdMax").value);
-  var floorDb = Number(el("floorDb").value);
-  if (!(fdMax > 0)) { fdMax = 400; }
-  if (!(floorDb < 0)) { floorDb = -50; }
+  var box = plotBox(c.width, c.height, false);
+  var win = dopplerWindow(frame, display.fdMax);
+  var ctx = c.ctx;
+  ctx.fillStyle = "#16161c";
+  ctx.fillRect(box.left, box.top, box.w, box.h);
+  frameBox(ctx, box);
+  drawRangeAxis(ctx, frame, box, true);
+  drawDopplerAxis(ctx, frame, win, box, true);
 
-  var win = dopplerWindow(frame, fdMax);
-  drawMap(frame, win, floorDb, state.refDb);
-
-  var left = 62;
-  var right = 92;
-  var top = 12;
-  var bottom = 44;
-  var plotW = Math.max(10, width - left - right);
-  var plotH = Math.max(10, height - top - bottom);
-
-  ctx.imageSmoothingEnabled = false;   // blocky like imagesc, not blurred
-  ctx.drawImage(offscreen, left, top, plotW, plotH);
-
-  ctx.strokeStyle = "#5a5a68";
-  ctx.lineWidth = 1;
-  ctx.strokeRect(left + 0.5, top + 0.5, plotW - 1, plotH - 1);
-
-  drawAxes(ctx, frame, win, left, top, plotW, plotH);
-  drawDetections(ctx, frame, win, left, top, plotW, plotH);
-  drawColorBar(ctx, floorDb, left + plotW + 18, top, 14, plotH);
+  // Previous frames first, so the newest sit on top.
+  var hist = state.detHistory;
+  var last = hist.length - 1;
+  ctx.fillStyle = "#80808c";
+  for (var h = 0; h <= last; h++) {
+    if (hist[h].cpi === state.shownCpi) { continue; }
+    plotDots(ctx, frame, win, box, hist[h].dets, 2.5);
+  }
+  ctx.fillStyle = "#ff3b3b";
+  plotDots(ctx, frame, win, box, frame.detections, 3.5);
 }
 
-function drawAxes(ctx, frame, win, left, top, plotW, plotH) {
-  var R = frame.rangeBins;
+function plotDots(ctx, frame, win, box, dets, radius) {
+  for (var i = 0; i < dets.length; i++) {
+    var det = dets[i];
+    if (det.dopplerBin < win.lo || det.dopplerBin > win.hi) { continue; }
+    if (det.rangeBin >= frame.rangeBins) { continue; }
+    ctx.beginPath();
+    ctx.arc(binToX(frame, det.rangeBin, box), binToY(win, det.dopplerBin, box), radius, 0, 2 * Math.PI);
+    ctx.fill();
+  }
+}
+
+function drawWaterfallPanel(canvas) {
+  var c = prepareCanvas(canvas);
+  if (c === null) { return; }
+  var byRange = (display.wfAxis === "range");
+  drawTitle(c.ctx, "Spectrogram after processing: max dB over " +
+                   (byRange ? "Doppler, per range bin" : "range, per Doppler bin") + ", newest at the bottom");
+  var frame = state.frame;
+  var rows = state.wfRows;
+  if (frame === null) { return; }
+
+  var box = plotBox(c.width, c.height, true);
+  var win = dopplerWindow(frame, display.fdMax);
+  var s = dbScale(display.floorDb, state.refDb);
+  var cols = byRange ? frame.rangeBins : win.count;
+  var N = display.wfDepth;
+
+  // Always N rows: the newest at the bottom, older ones above it, and any
+  // row without data (not arrived yet, blank, or lost) stays black, which
+  // createImageData gives for free.
+  offscreen.width = cols;
+  offscreen.height = N;
+  var octx = offscreen.getContext("2d");
+  var image = octx.createImageData(cols, N);
+  var pixels = image.data;
+  for (var i = 0; i < rows.length && i < N; i++) {
+    var row = rows[rows.length - 1 - i];   // i = 0 is the newest
+    var src = byRange ? row.range : row.doppler;
+    if (src === null || src === undefined) { continue; }
+    var y = N - 1 - i;
+    for (var x = 0; x < cols; x++) {
+      var db = byRange ? src[x] : src[win.lo + x];
+      var entry = lutIndex(db, s);
+      var out = 4 * (y * cols + x);
+      pixels[out] = LUT[entry];
+      pixels[out + 1] = LUT[entry + 1];
+      pixels[out + 2] = LUT[entry + 2];
+      pixels[out + 3] = 255;
+    }
+  }
+  octx.putImageData(image, 0, 0);
+
+  var ctx = c.ctx;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(offscreen, box.left, box.top, box.w, box.h);
+  frameBox(ctx, box);
+
+  if (byRange) {
+    drawRangeAxis(ctx, frame, box);
+  } else {
+    drawDopplerXAxis(ctx, frame, win, box);
+  }
+  drawTimeAxis(ctx, rows, box);
+  drawColorBar(ctx, display.floorDb, box.left + box.w + 16, box.top, 14, box.h);
+}
+
+function drawRfPanel(canvas) {
+  var c = prepareCanvas(canvas);
+  if (c === null) { return; }
+  var ch = display.rfChannel;
+  drawTitle(c.ctx, "Spectrogram before processing: " + (ch === 0 ? "reference" : "surveillance") +
+                   " channel, newest at the bottom");
+  var rows = state.rfRows;
+  if (rows.length === 0) { return; }
+
+  // Bins and rate from the newest row that has data; nothing drawn until one has.
+  var bins = 0;
+  var fs = 0;
+  for (var r = rows.length - 1; r >= 0; r--) {
+    if (rows[r].spectra && rows[r].spectra[ch]) { bins = rows[r].bins; fs = rows[r].sampleRateHz; break; }
+  }
+  var box = plotBox(c.width, c.height, true);
+  var N = display.wfDepth;
+  var s = dbScale(display.floorDb, state.rfRefDb[ch]);
+
+  if (bins > 0) {
+    offscreen.width = bins;
+    offscreen.height = N;
+    var octx = offscreen.getContext("2d");
+    var image = octx.createImageData(bins, N);
+    var pixels = image.data;
+    for (var i = 0; i < rows.length && i < N; i++) {
+      var row = rows[rows.length - 1 - i];
+      var db = (row.spectra && row.spectra[ch] && row.bins === bins) ? row.spectra[ch] : null;
+      if (db === null) { continue; }
+      var y = N - 1 - i;
+      for (var x = 0; x < bins; x++) {
+        var entry = lutIndex(db[x], s);
+        var out = 4 * (y * bins + x);
+        pixels[out] = LUT[entry];
+        pixels[out + 1] = LUT[entry + 1];
+        pixels[out + 2] = LUT[entry + 2];
+        pixels[out + 3] = 255;
+      }
+    }
+    octx.putImageData(image, 0, 0);
+    c.ctx.imageSmoothingEnabled = false;
+    c.ctx.drawImage(offscreen, box.left, box.top, box.w, box.h);
+  }
+  frameBox(c.ctx, box);
+  drawFrequencyAxis(c.ctx, fs, box);
+  drawTimeAxis(c.ctx, rows, box);
+  drawColorBar(c.ctx, display.floorDb, box.left + box.w + 16, box.top, 14, box.h);
+}
+
+// Frequency offset from the carrier on x, in kHz: bin 0 is -fs/2.
+function drawFrequencyAxis(ctx, fs, box) {
+  axisStyle(ctx);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  if (fs > 0) {
+    var halfKhz = fs / 2000;
+    var step = tickStep(2 * halfKhz, Math.max(3, box.w / 70));
+    var first = Math.ceil(-halfKhz / step) * step;
+    for (var khz = first; khz <= halfKhz; khz += step) {
+      var x = box.left + ((khz + halfKhz) / (2 * halfKhz)) * box.w;
+      ctx.beginPath();
+      ctx.moveTo(x, box.top + box.h);
+      ctx.lineTo(x, box.top + box.h + 5);
+      ctx.stroke();
+      ctx.fillText(khz.toFixed(0), x, box.top + box.h + 8);
+    }
+  }
+  ctx.fillText("Offset from carrier (kHz)", box.left + box.w / 2, box.top + box.h + 24);
+}
+
+function frameBox(ctx, box) {
+  ctx.strokeStyle = "#5a5a68";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(box.left + 0.5, box.top + 0.5, box.w - 1, box.h - 1);
+}
+
+function axisStyle(ctx) {
   ctx.fillStyle = "#b0b0be";
   ctx.strokeStyle = "#5a5a68";
+  ctx.lineWidth = 1;
   ctx.font = "11px sans-serif";
+}
 
-  // Range on x.
+function gridLine(ctx, x0, y0, x1, y1) {
+  ctx.save();
+  ctx.strokeStyle = "#2c2c36";
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(x1, y1);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// Range on x.
+function drawRangeAxis(ctx, frame, box, withGrid) {
+  axisStyle(ctx);
+  var R = frame.rangeBins;
   var maxKm = rangeKm(frame, R - 1);
   var kmPerBin = rangeKm(frame, 1);
-  var rStep = tickStep(maxKm, 8);
+  var rStep = tickStep(maxKm, Math.max(3, box.w / 70));
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
   for (var km = 0; km <= maxKm; km += rStep) {
-    var x = binToX(frame, km / kmPerBin, left, plotW);
+    var x = binToX(frame, km / kmPerBin, box);
+    if (withGrid) { gridLine(ctx, x, box.top, x, box.top + box.h); }
     ctx.beginPath();
-    ctx.moveTo(x, top + plotH);
-    ctx.lineTo(x, top + plotH + 5);
+    ctx.moveTo(x, box.top + box.h);
+    ctx.lineTo(x, box.top + box.h + 5);
     ctx.stroke();
-    ctx.fillText(km.toFixed(rStep < 1 ? 1 : 0), x, top + plotH + 8);
+    ctx.fillText(km.toFixed(rStep < 1 ? 1 : 0), x, box.top + box.h + 8);
   }
-  ctx.fillText("Bistatic range (km)", left + plotW / 2, top + plotH + 26);
+  ctx.fillText("Bistatic range (km)", box.left + box.w / 2, box.top + box.h + 24);
+}
 
-  // Doppler on y, positive up.
+// Doppler on y, positive up.
+function drawDopplerAxis(ctx, frame, win, box, withGrid) {
+  axisStyle(ctx);
   var loHz = dopplerHz(frame, win.lo);
   var hiHz = dopplerHz(frame, win.hi);
   var hzPerBin = binHz(frame);
-  var dStep = tickStep(hiHz - loHz, 8);
+  var dStep = tickStep(hiHz - loHz, Math.max(3, box.h / 40));
   var first = Math.ceil(loHz / dStep) * dStep;
   ctx.textAlign = "right";
   ctx.textBaseline = "middle";
   for (var hz = first; hz <= hiHz; hz += dStep) {
-    var y = binToY(win, hz / hzPerBin + frame.dopplerBins / 2, top, plotH);
+    var y = binToY(win, hz / hzPerBin + frame.dopplerBins / 2, box);
+    if (withGrid) { gridLine(ctx, box.left, y, box.left + box.w, y); }
     ctx.beginPath();
-    ctx.moveTo(left - 5, y);
-    ctx.lineTo(left, y);
+    ctx.moveTo(box.left - 5, y);
+    ctx.lineTo(box.left, y);
     ctx.stroke();
-    ctx.fillText(hz.toFixed(0), left - 8, y);
+    ctx.fillText(hz.toFixed(0), box.left - 8, y);
   }
   ctx.save();
-  ctx.translate(14, top + plotH / 2);
+  ctx.translate(12, box.top + box.h / 2);
   ctx.rotate(-Math.PI / 2);
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
@@ -422,21 +932,67 @@ function drawAxes(ctx, frame, win, left, top, plotW, plotH) {
   ctx.restore();
 }
 
-// Rings at the bin indices from the record, not at its km/Hz values: the bins
-// are exact.
-function drawDetections(ctx, frame, win, left, top, plotW, plotH) {
-  ctx.strokeStyle = "#ffffff";
-  ctx.lineWidth = 1.3;
-  for (var i = 0; i < frame.detections.length; i++) {
-    var det = frame.detections[i];
-    if (det.dopplerBin < win.lo || det.dopplerBin > win.hi) { continue; }
-    if (det.rangeBin >= frame.rangeBins) { continue; }
-    var x = binToX(frame, det.rangeBin, left, plotW);
-    var y = binToY(win, det.dopplerBin, top, plotH);
+// Doppler on x, for the waterfall.
+function drawDopplerXAxis(ctx, frame, win, box) {
+  axisStyle(ctx);
+  var loHz = dopplerHz(frame, win.lo);
+  var hiHz = dopplerHz(frame, win.hi);
+  var hzPerBin = binHz(frame);
+  var dStep = tickStep(hiHz - loHz, Math.max(3, box.w / 70));
+  var first = Math.ceil(loHz / dStep) * dStep;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  for (var hz = first; hz <= hiHz; hz += dStep) {
+    var bin = hz / hzPerBin + frame.dopplerBins / 2;
+    var x = box.left + ((bin - win.lo + 0.5) / win.count) * box.w;
     ctx.beginPath();
-    ctx.arc(x, y, 5, 0, 2 * Math.PI);
+    ctx.moveTo(x, box.top + box.h);
+    ctx.lineTo(x, box.top + box.h + 5);
     ctx.stroke();
+    ctx.fillText(hz.toFixed(0), x, box.top + box.h + 8);
   }
+  ctx.fillText("Bistatic Doppler (Hz)", box.left + box.w / 2, box.top + box.h + 24);
+}
+
+// Seconds per CPI, from the two newest rows that carry a time; the config's
+// CPI length if the history is too short to tell; 1 s failing that.
+function cpiSeconds(rows) {
+  var later = null;
+  for (var i = rows.length - 1; i >= 0; i--) {
+    if (rows[i].timeS === null) { continue; }
+    if (later === null) { later = rows[i]; continue; }
+    var dt = (later.timeS - rows[i].timeS) / (later.cpi - rows[i].cpi);
+    if (dt > 0) { return dt; }
+    break;
+  }
+  var cfg = state.config ? Number(state.config.CPI_LENGTH_s) : NaN;
+  return (cfg > 0) ? cfg : 1;
+}
+
+// Time on y for the waterfall: seconds before the newest row, one CPI per
+// row, counted up from the bottom. Rows with no data still take their slot.
+function drawTimeAxis(ctx, rows, box) {
+  axisStyle(ctx);
+  var N = display.wfDepth;
+  var period = cpiSeconds(rows);
+  var every = Math.max(1, Math.ceil(N / Math.max(2, box.h / 36)));
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  for (var i = 0; i < N; i += every) {
+    var y = box.top + ((N - 1 - i + 0.5) / N) * box.h;
+    ctx.beginPath();
+    ctx.moveTo(box.left - 5, y);
+    ctx.lineTo(box.left, y);
+    ctx.stroke();
+    ctx.fillText((-i * period).toFixed(0), box.left - 8, y);
+  }
+  ctx.save();
+  ctx.translate(12, box.top + box.h / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("Time (s)", 0, 0);
+  ctx.restore();
 }
 
 function drawColorBar(ctx, floorDb, x, y, barW, barH) {
@@ -453,11 +1009,81 @@ function drawColorBar(ctx, floorDb, x, y, barW, barH) {
   ctx.font = "11px sans-serif";
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
-  var step = tickStep(-floorDb, 5);
+  var step = tickStep(-floorDb, Math.max(2, barH / 40));
   for (var db = 0; db >= floorDb; db -= step) {
     var frac = (db - floorDb) / (0 - floorDb);
     ctx.fillText(db.toFixed(0), x + barW + 4, y + barH * (1 - frac));
   }
+}
+
+function render() {
+  if (el("cellArd").classList.contains("shown")) {
+    drawMapPanel(el("cvArd"), "Range-Doppler map", state.frame ? state.frame.db : null);
+  }
+  if (el("cellDet").classList.contains("shown")) {
+    drawDetectionPanel(el("cvDet"));
+  }
+  if (el("cellHold").classList.contains("shown")) {
+    drawMapPanel(el("cvHold"), "Max hold over the last " + display.holdFrames + " frames", state.holdDb);
+  }
+  if (el("cellRf").classList.contains("shown")) {
+    drawRfPanel(el("cvRf"));
+  }
+  if (el("cellWf").classList.contains("shown")) {
+    drawWaterfallPanel(el("cvWf"));
+  }
+}
+
+// --- layout ----------------------------------------------------------------
+
+// One panel fills the area; two sit side by side; three are two on top and
+// one across the bottom; four are a 2 x 2 grid; five are 2 x 2 with the
+// last across the bottom.
+function layout() {
+  var order = [["showArd", "cellArd"], ["showDet", "cellDet"],
+               ["showHold", "cellHold"], ["showRf", "cellRf"], ["showWf", "cellWf"]];
+  var shown = [];
+  for (var i = 0; i < order.length; i++) {
+    var cell = el(order[i][1]);
+    var on = el(order[i][0]).checked;
+    cell.classList.toggle("shown", on);
+    cell.classList.remove("wide");
+    if (on) { shown.push(cell); }
+  }
+  if (shown.length === 3 || shown.length === 5) { shown[shown.length - 1].classList.add("wide"); }
+  var plots = el("plots");
+  plots.className = (shown.length === 0) ? "empty" : "n" + shown.length;
+  render();
+}
+
+// --- display fields --------------------------------------------------------
+
+function readNumberField(id, fallback, test) {
+  var v = Number(el(id).value);
+  if (!isFinite(v) || !test(v)) {
+    el(id).value = String(fallback);
+    return fallback;
+  }
+  return v;
+}
+
+function readDisplayFields() {
+  display.fdMax = readNumberField("fdMax", 400, function (v) { return v > 0; });
+  display.floorDb = readNumberField("floorDb", -50, function (v) { return v < 0; });
+  display.holdFrames = Math.round(readNumberField("holdFrames", 10, function (v) { return v >= 1 && v <= 200; }));
+  display.histFrames = Math.round(readNumberField("histFrames", 20, function (v) { return v >= 0 && v <= 1000; }));
+  display.wfDepth = Math.round(readNumberField("wfDepth", 60, function (v) { return v >= 2 && v <= 2000; }));
+  display.wfAxis = el("wfAxis").value;
+  display.rfChannel = (el("rfChannel").value === "0") ? 0 : 1;
+  trimHistories();
+  if (state.frame !== null) { recomputeHold(state.frame.rangeBins * state.frame.dopplerBins); }
+}
+
+function resetDisplayFields() {
+  for (var id in DISPLAY_DEFAULTS) {
+    if (DISPLAY_DEFAULTS.hasOwnProperty(id)) { el(id).value = DISPLAY_DEFAULTS[id]; }
+  }
+  readDisplayFields();
 }
 
 // --- header strip ----------------------------------------------------------
@@ -538,17 +1164,37 @@ function onStatus(status) {
   var stream = status.stream || null;
   var runName = stream ? stream.runName : null;
   if (runName !== state.runName) {
-    // A new run: the old running peak belongs to different data.
+    // A new run: the old running peak and histories belong to different data.
     state.runName = runName;
     state.refDb = null;
     state.frame = null;
     state.shownCpi = null;
+    state.holdRing = [];
+    state.holdDb = null;
+    state.holdShape = "";
+    state.detHistory = [];
+    state.wfRows = [];
+    state.wfLastCpi = null;
+    state.rfRows = [];
+    state.rfLastCpi = null;
+    state.rfRefDb = [null, null];
+    state.liveChanges = null;
+    if (runName !== null) { loadConfig(); }
   }
   state.telemetry = stream;
   state.config = stream ? (stream.config || null) : null;
   state.streamStatus = stream ? (stream.status || 0) : 0;
   state.reason = stream ? (stream.reason || "") : "";
   state.framesDropped = status.framesDropped || 0;
+
+  // The chain counts every change it has applied (Apply or Reset). When the
+  // count steps, the new set is in effect: fetch it into the fields.
+  var changes = pick(stream, "liveChanges");
+  if (changes !== state.liveChanges) {
+    var wasKnown = (state.liveChanges !== null);
+    state.liveChanges = changes;
+    if (wasKnown && changes !== null) { loadConfig(); }
+  }
 
   if (status.latestCpi !== state.latestCpi) {
     state.latestCpi = status.latestCpi;
@@ -580,14 +1226,30 @@ function fetchFrame() {
     var frame = parseFrame(buffer);
     state.frame = frame;
     state.shownCpi = cpi;
-    // A blank frame has no peak; it must not set (or reset) the reference.
-    if (frame.status === 0 && isFinite(frame.peakDb) &&
-        (state.refDb === null || frame.peakDb > state.refDb)) {
-      state.refDb = frame.peakDb;
+    // A blank frame has no peak; it must not set (or reset) the reference,
+    // and it must not enter the histories.
+    if (frame.status === 0 && isFinite(frame.peakDb)) {
+      if (state.refDb === null || frame.peakDb > state.refDb) {
+        state.refDb = frame.peakDb;
+      }
+      pushHistories(frame);
+    } else {
+      pushWaterfallRow(blankWaterfallRow(cpi));
     }
-    state.fetching = false;
     updateHeader();
     render();
+    // The spectra that came with this frame; a 404 (an older chain, or a
+    // recorded file) is a black row, not an error.
+    return fetch("/api/spectrum/latest", {cache: "no-store"}).then(function (response) {
+      if (!response.ok) { return null; }
+      return response.arrayBuffer().then(parseSpectra);
+    }).catch(function () { return null; }).then(function (parsed) {
+      if (state.runName !== wantRun) { return; }
+      pushSpectrumRow(cpi, frame.cpiStartIndex / frame.sampleRateHz, parsed);
+      if (el("cellRf").classList.contains("shown")) { drawRfPanel(el("cvRf")); }
+    });
+  }).then(function () {
+    state.fetching = false;
   }).catch(function (err) {
     state.fetching = false;
     setMessage(String(err.message || err), true);
@@ -604,26 +1266,87 @@ function pollStatus() {
   });
 }
 
-// --- wiring ----------------------------------------------------------------
-
 // --- live parameters ---------------------------------------------------------
 //
 // The viewer forwards these to the chain's control port (learnt from the
-// stream). Apply sends the whole edited set; the chain validates it as one,
-// applies at the next CPI boundary, or answers with the reason it refused.
+// stream). Apply sends the keys the panel shows for the selected algorithm,
+// plus the CFAR set; the chain lays them over its live set, validates the
+// whole, applies at the next CPI boundary, or answers with the reason it
+// refused. Reset returns the chain to its config file's values.
 
-function setCfgResult(text, isError) {
+function chainFields() {
+  var nodes = document.querySelectorAll("#panel [data-key]");
+  var list = [];
+  for (var i = 0; i < nodes.length; i++) { list.push(nodes[i]); }
+  return list;
+}
+
+// Show the rows that belong to the selected algorithm.
+function showAlgorithmRows() {
+  var algo = el("dsiAlgo").value;
+  var nodes = document.querySelectorAll("#panel [data-algo]");
+  for (var i = 0; i < nodes.length; i++) {
+    var on = nodes[i].getAttribute("data-algo").split(" ").indexOf(algo) >= 0;
+    nodes[i].classList.toggle("off", !on);
+  }
+}
+
+function fieldIsVisible(node) {
+  var n = node;
+  while (n && n !== document.body) {
+    if (n.classList && n.classList.contains("off")) { return false; }
+    n = n.parentNode;
+  }
+  return true;
+}
+
+function parseConfigText(text) {
+  var map = {};
+  var lines = text.split("\n");
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    var hash = line.indexOf("#");
+    if (hash >= 0) { line = line.slice(0, hash); }
+    var eq = line.indexOf("=");
+    if (eq < 0) { continue; }
+    map[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
+  }
+  return map;
+}
+
+function fillFields(map) {
+  var fields = chainFields();
+  for (var i = 0; i < fields.length; i++) {
+    var key = fields[i].getAttribute("data-key");
+    if (map.hasOwnProperty(key)) {
+      fields[i].value = map[key];
+      fields[i].classList.remove("dirty");
+    }
+  }
+  showAlgorithmRows();
+}
+
+function setCfgResult(text, isError, detail) {
   var node = el("cfgResult");
   node.textContent = text;
-  node.style.color = isError ? "#f88" : "#8f8";
+  node.className = isError ? "error" : "";
+  el("cfgDetail").textContent = detail || "";
+}
+
+// The chain answers with a summary line, then the detail. "refused:" alone
+// says nothing, so a bare summary takes the first detail line with it.
+function summarise(text) {
+  var lines = text.trim().split("\n");
+  var first = lines[0];
+  if (/:\s*$/.test(first) && lines.length > 1) { first += " " + lines[1].trim(); }
+  return first;
 }
 
 function loadConfig() {
-  setCfgResult("loading…", false);
   fetch("/api/config", {cache: "no-store"}).then(function (response) {
     return response.text().then(function (text) {
-      if (!response.ok) { throw new Error(text); }
-      el("cfgText").value = text;
+      if (!response.ok) { throw new Error(text.trim()); }
+      fillFields(parseConfigText(text));
       setCfgResult("loaded " + new Date().toLocaleTimeString(), false);
     });
   }).catch(function (err) {
@@ -631,14 +1354,37 @@ function loadConfig() {
   });
 }
 
+// KEY = VALUE lines for the chain: every visible chain field. ECA-B is
+// defined by its update interval equalling its batch length, so that key is
+// filled in here rather than shown.
+function collectLines() {
+  var algo = el("dsiAlgo").value;
+  var lines = [];
+  var fields = chainFields();
+  for (var i = 0; i < fields.length; i++) {
+    if (!fieldIsVisible(fields[i])) { continue; }
+    var key = fields[i].getAttribute("data-key");
+    var value = String(fields[i].value).trim();
+    if (value === "") { return {error: key + " is empty"}; }
+    lines.push(key + " = " + value);
+    if (algo === "ECA-B" && key === "ECA_BATCH_LENGTH_s") {
+      lines.push("ECA_UPDATE_INTERVAL_s = " + value);
+    }
+  }
+  return {text: lines.join("\n") + "\n"};
+}
+
 function applyConfig() {
+  readDisplayFields();
+  layout();
+  var body = collectLines();
+  if (body.error) { setCfgResult(body.error, true); return; }
   setCfgResult("applying…", false);
-  fetch("/api/apply", {method: "POST", cache: "no-store", body: el("cfgText").value,
+  fetch("/api/apply", {method: "POST", cache: "no-store", body: body.text,
                        headers: {"Content-Type": "text/plain"}}).then(function (response) {
     return response.text().then(function (text) {
-      setCfgResult(text.trim().split("\n")[0], !response.ok);
-      if (text.indexOf("\n") > 0) { el("cfgText").placeholder = text; }
-      if (!response.ok) { window.alert(text); }
+      setCfgResult(summarise(text), !response.ok, text.trim());
+      if (response.ok) { setTimeout(loadConfig, RELOAD_AFTER_APPLY_MS); }
     });
   }).catch(function (err) {
     setCfgResult(String(err.message || err), true);
@@ -646,32 +1392,90 @@ function applyConfig() {
 }
 
 function resetConfig() {
+  resetDisplayFields();
+  layout();
   setCfgResult("resetting…", false);
   fetch("/api/reset", {method: "POST", cache: "no-store", body: ""}).then(function (response) {
     return response.text().then(function (text) {
-      setCfgResult(text.trim().split("\n")[0], !response.ok);
-      if (!response.ok) { window.alert(text); }
+      setCfgResult(summarise(text), !response.ok, text.trim());
       // The chain applies at the next boundary; refetch after it has.
-      setTimeout(loadConfig, 2500);
+      setTimeout(loadConfig, RELOAD_AFTER_APPLY_MS);
     });
   }).catch(function (err) {
     setCfgResult(String(err.message || err), true);
   });
 }
 
-el("cfgLoad").addEventListener("click", loadConfig);
+// --- wiring ----------------------------------------------------------------
+
 el("cfgApply").addEventListener("click", applyConfig);
 el("cfgReset").addEventListener("click", resetConfig);
+el("dsiAlgo").addEventListener("change", showAlgorithmRows);
 
-el("fdMax").addEventListener("change", render);
-el("floorDb").addEventListener("change", render);
+var chainInputs = chainFields();
+for (var ci = 0; ci < chainInputs.length; ci++) {
+  chainInputs[ci].addEventListener("input", function (ev) { ev.target.classList.add("dirty"); });
+}
+
+var toggles = ["showArd", "showDet", "showHold", "showRf", "showWf"];
+for (var ti = 0; ti < toggles.length; ti++) {
+  el(toggles[ti]).addEventListener("change", layout);
+}
+var displayIds = ["fdMax", "floorDb", "holdFrames", "histFrames", "wfDepth", "wfAxis", "rfChannel"];
+for (var di = 0; di < displayIds.length; di++) {
+  el(displayIds[di]).addEventListener("change", function () { readDisplayFields(); render(); });
+}
+el("clearDet").addEventListener("click", function () {
+  state.detHistory = [];
+  render();
+});
 el("resetRef").addEventListener("click", function () {
   state.refDb = (state.frame === null) ? null : state.frame.peakDb;
+  state.rfRefDb = [null, null];
+  var newest = (state.rfRows.length > 0) ? state.rfRows[state.rfRows.length - 1] : null;
+  if (newest !== null && newest.spectra !== null) {
+    for (var ch = 0; ch < 2; ch++) {
+      var db = newest.spectra[ch];
+      if (db === null) { continue; }
+      var peak = -Infinity;
+      for (var b = 0; b < db.length; b++) { if (db[b] > peak) { peak = db[b]; } }
+      if (isFinite(peak) && peak > -290) { state.rfRefDb[ch] = peak; }
+    }
+  }
   updateHeader();
+  render();
+});
+el("panelToggle").addEventListener("click", function () {
+  var hidden = el("panel").classList.toggle("hidden");
+  el("panelToggle").innerHTML = hidden ? "&lsaquo; Controls" : "Hide controls &rsaquo;";
   render();
 });
 window.addEventListener("resize", render);
 
+// ?show=ard,det,hold,wf picks the panels at load (bookmarks, screenshots);
+// ?panel=hidden starts with the controls hidden.
+(function applyQuery() {
+  var q = window.location.search.replace(/^\?/, "").split("&");
+  for (var i = 0; i < q.length; i++) {
+    var kv = q[i].split("=");
+    if (kv[0] === "show") {
+      var want = (kv[1] || "").split(",");
+      el("showArd").checked = want.indexOf("ard") >= 0;
+      el("showDet").checked = want.indexOf("det") >= 0;
+      el("showHold").checked = want.indexOf("hold") >= 0;
+      el("showRf").checked = want.indexOf("rf") >= 0;
+      el("showWf").checked = want.indexOf("wf") >= 0;
+    } else if (kv[0] === "panel" && kv[1] === "hidden") {
+      el("panel").classList.add("hidden");
+      el("panelToggle").innerHTML = "&lsaquo; Controls";
+    }
+  }
+})();
+
+readDisplayFields();
+showAlgorithmRows();
+layout();
+loadConfig();
 pollStatus();
 setInterval(pollStatus, POLL_MS);
 </script>

@@ -5,37 +5,41 @@ FM-based passive bistatic radar (PBR) processing on embedded GPU hardware.
 Real-time direct-signal-interference (DSI) cancellation, cross-ambiguity
 processing and CFAR detection, ported from a validated MATLAB reference to
 native C++/CUDA and benchmarked on an NVIDIA Jetson Nano (Tegra X1, sm_53,
-CUDA 10.2). Signal source is the FERS radar simulator streaming VITA 49.2 over
-UDP, decoupled from the processing platform so the same ingest interface later
-accepts a live receiver front end.
+CUDA 10.2). The signal source is a USRP2 with a BasicRX, read over UHD by our
+own driver and streamed as VITA 49.2 over UDP multicast; the FERS radar
+simulator speaks the same profile and remains the test source. Range-Doppler
+frames are multicast to a small C++ viewer that serves a browser page, from
+which the chain's parameters can be changed while it runs.
 
 
-## Status
+## Status (2026-09-29)
 
-- [x] Jetson Nano bring-up, CUDA 10.2 verified (`deviceQuery` PASS)
+- [x] Jetson Nano bring-up, CUDA 10.2, remote build workflow (edit on the
+      Mac, build and run on the Jetson over SSH; `make help`)
 - [x] MATLAB reference chain (FERS → ECA-B → CAF range–Doppler → 2D CA-CFAR)
-- [x] cuFFT timing + capacity harness (`bench/`) — built and running on-hardware
-- [x] Remote build workflow (edit on laptop → build + run on Jetson over SSH)
-- [x] C++/CUDA VITA 49.2 ingest + absolute-index circular buffer
-- [x] CPI extraction: aligned 1 s windows handed to the DSP chain
-- [x] Configuration file (`config/prb.conf`) driving the whole chain
-- [x] DSI cancellation on the CPU: ECA-m (MATLAB reference) and ECA-B,
-      validated against MATLAB golden files at < 1e-9 relative error
-- [x] DSI cancellation on the GPU: 142 ms/CPI on the Nano, 68× the CPU,
-      7× faster than real time
-- [ ] ECA-S, ECA-CD, CGLS  ← next
-- [x] CAF range–Doppler + 2D CA-CFAR: 19.6 ms/CPI on the GPU, matching
-      MATLAB at 3.2e-7 with identical detections
-- [x] **Full chain running live in real time on the Jetson** — 156 ms/CPI
-      against a 1000 ms budget, 0 CPIs dropped over a 45 s live FERS run
-- [ ] Algorithm benchmarking study (suppression vs latency)
+- [x] VITA 49.2 ingest, absolute-index circular buffer with packet-based
+      validity flags, CPI extraction, config file
+- [x] DSI cancellation, CPU and GPU: ECA-m, ECA-B, ECA-S, ECA-CD, CGLS
+- [x] CAF range–Doppler map (Direct and Batches) and 2D CA-CFAR on the GPU
+- [x] `uhd_to_vita49`: USRP2/N210 → VITA 49.2 multicast, byte-identical to
+      FERS's profile, verified on the Nano and from the Mac
+- [x] ARD frames streamed over UDP multicast; `ard_view` (C++) serves the
+      browser page; nothing written to disk unless asked
+- [x] Blank frames with a status word on dead or unprocessable input;
+      no crash, no stop
+- [x] Live parameter changes over an HTTP control port, applied at CPI
+      boundaries, logged; sample-rate mismatch adapts automatically
+- [x] **Full chain in real time on the Jetson from the USRP2**: 25 ms per
+      1.024 s CPI with clocks pinned (ECA-CD), 80 to 230 ms unpinned
+- [ ] Antennas connected, spectrum orientation checked, first aircraft  ← next
+- [ ] Algorithm benchmarking study (suppression vs latency), the thesis
+      contribution; MATLAB goldens to be regenerated for the 200 kHz config
 
-> **The chain runs live in real time**: 156 ms per 1 s CPI on the Jetson,
-> zero CPIs dropped over a 45 s live FERS run, every stage validated against
-> MATLAB. All timing figures are still **provisional** — taken with DVFS
-> active, because pinning the clocks needs an interactive sudo password.
-> `make run` and `make bench` pin them; run those from a terminal for citable
-> numbers.
+> Timing figures with clocks pinned come from `make run`, which needs an
+> interactive sudo password; unpinned numbers are provisional.
+
+Design records: `docs/UHD_VITA49_Driver_design.md`, `docs/ard-stream-design.md`,
+`docs/live-parameters.md`, `docs/design_decisions.md`.
 
 
 ## Repository layout
@@ -54,13 +58,13 @@ passive-radar-sbc/
 │   ├── ingest/           VITA 49.2 UDP receiver, circular buffer, config
 │   ├── dsi/              DSI cancellation: ECA-B, ECA-S, ECA-CD, CGLS
 │   ├── ard/              CAF / range–Doppler map, 2D CA-CFAR, map output
-│   ├── display/          on-screen ARD viewer (reserved, not yet written)
-│   └── app/              executables (offline runner, live pipeline)
+│   ├── display/          HttpServer + ard_viewer.html, served by ard_view
+│   └── app/              pbr_run, uhd_to_vita49, ard_view, probes, verifiers
 ├── tests/                unit + integration tests, MATLAB-vs-CUDA validation
 ├── matlab/               the reference implementation (validation ground truth)
-├── config/               prb.conf — processing parameters for the whole chain
+├── config/               prb.conf (USRP, 200 kHz) and fers.conf (FERS, 204800 Hz)
 ├── third_party/          approved external headers (currently none)
-├── scripts/              run wrappers, tegrastats logging, profiling helpers
+├── scripts/              run_live.sh, replay_udp.py, bench wrappers
 ├── docs/                 architecture notes, benchmarking methodology, results
 └── cmake/                helper modules
 ```
@@ -157,7 +161,7 @@ make host-replay   # -> bin/ingest_replay, replays a recorded capture
 binds the UDP port:
 
 ```bash
-./bin/ingest_probe --seconds 30 --capture data/fers_capture.pbrcap
+./bin/ingest_probe --seconds 30 --capture data/S0_clean/capture.pbrcap
 # then, in another terminal:
 fers-cli <scenario>.fersxml --out-dir=/tmp/out \
          --vita49 127.0.0.1:4991 --vita49-fullscale 0.0022 -n=6
@@ -172,7 +176,7 @@ extracted. Exit status is 0 on PASS.
 stage stays testable without live FERS:
 
 ```bash
-./bin/ingest_replay --file data/fers_capture.pbrcap --csv data/cpp_decode.csv
+./bin/ingest_replay --file data/S0_clean/capture.pbrcap --csv /tmp/cpp_decode.csv
 ```
 
 The `--csv` output feeds `matlab/compare_vita49_capture.m`, which decodes the
@@ -187,12 +191,12 @@ canceller against it. Nothing here needs FERS or a network.
 
 ```bash
 make host-replay
-./bin/ingest_replay --file data/fers_capture.pbrcap --fullscale 0.005 \
-                    --dump-cpi data/cpi_0000.bin
+./bin/ingest_replay --file data/S0_clean/capture.pbrcap --fullscale 0.005 \
+                    --dump-cpi data/S0_clean/cpi_0000.bin
 
 make host-bench
-./bin/dsi_bench --cpi data/cpi_0000.bin --algorithm ECA-B --iters 10 \
-                --csv results/dsi_bench.csv
+./bin/dsi_bench --cpi data/S0_clean/cpi_0000.bin --algorithm ECA-B --iters 10 \
+                --csv results/L3_bench/dsi_bench.csv
 ```
 
 `--algorithm` and `--backend` override `config/prb.conf` when given; with
@@ -231,8 +235,8 @@ them and exits non-zero on failure:
 ```bash
 /Applications/MATLAB_R2025a.app/bin/matlab -batch "addpath('matlab'); eca_golden"
 make host-verify
-./bin/dsi_verify --cpi data/cpi_0000.bin --golden data/golden_ecam.bin --algorithm ECA-m
-./bin/dsi_verify --cpi data/cpi_0000.bin --golden data/golden_ecab.bin --algorithm ECA-B
+./bin/dsi_verify --cpi data/S0_clean/cpi_0000.bin --golden data/S0_clean/golden/golden_ecam.bin --algorithm ECA-m
+./bin/dsi_verify --cpi data/S0_clean/cpi_0000.bin --golden data/S0_clean/golden/golden_ecab.bin --algorithm ECA-B
 ```
 
 The golden file records the parameters it was generated with, and

@@ -338,6 +338,98 @@ void testSenderToAssemblerOverLoopback()
     assert(oHeader.uStatus == kArdStatusFailed);
 }
 
+// Spectrum datagrams: sent after the frame they attach directly; sent
+// before it they wait; a wrong sequence, channel or length is ignored; the
+// values round-trip as hundredths of a dB and saturate.
+void testSpectrumAttachesAndRoundTrips()
+{
+    const uint16_t uPort = 45993;
+    UdpReceiver oReceiver;
+    assert(oReceiver.open(uPort, 4 * 1024 * 1024, true));
+    ArdStreamSender oSender;
+    assert(oSender.open("127.0.0.1", uPort, nullptr));
+
+    const uint32_t uBins = 16;
+    float afDb[uBins];
+    for (uint32_t u = 0; u < uBins; ++u) afDb[u] = -100.0f + 1.25f * static_cast<float>(u);
+    afDb[3] = -500.0f;   // below the int16 range: must saturate, not wrap
+    afDb[4] = 400.0f;
+
+    const std::vector<uint8_t> vFrame = serialise(makeHeader(0, kArdStatusOk));
+    assert(oSender.sendSpectrum(afDb, uBins, 1, 200000, 7));    // early: frame 7 not started yet -> ignored
+    assert(oSender.sendFrame(vFrame.data(), vFrame.size(), 7));
+    assert(oSender.sendSpectrum(afDb, uBins, 0, 200000, 7));    // after: attaches
+    assert(oSender.sendSpectrum(afDb, uBins, 1, 200000, 8));    // wrong sequence: ignored
+    assert(oSender.sendStatus("{\"cpi\":7}", 7));
+
+    ArdFrameAssembler oAsm;
+    std::vector<uint8_t> vDatagram(2048);
+    int iAttached = 0;
+    bool bStatus = false;
+    for (int i = 0; i < 200 && !bStatus; ++i) {
+        size_t uLength = 0;
+        if (oReceiver.receive(vDatagram.data(), vDatagram.size(), uLength) != ReceiveResult::Datagram)
+            break;
+        const ArdFeedResult e = oAsm.feed(vDatagram.data(), uLength);
+        if (e == ArdFeedResult::SpectrumAttached) ++iAttached;
+        if (e == ArdFeedResult::StatusAttached)   bStatus = true;
+    }
+    assert(bStatus);
+    assert(iAttached == 1);
+    assert(oAsm.spectrum(1).empty());                 // the early one was for an unknown frame
+    const std::vector<uint8_t>& vSpec = oAsm.spectrum(0);
+    assert(vSpec.size() == kArdSpectrumHeaderBytes + 2 * uBins);
+    uint32_t uField = 0;
+    std::memcpy(&uField, vSpec.data() + 12, 4); assert(uField == 0);
+    std::memcpy(&uField, vSpec.data() + 16, 4); assert(uField == uBins);
+    std::memcpy(&uField, vSpec.data() + 20, 4); assert(uField == 200000);
+    for (uint32_t u = 0; u < uBins; ++u) {
+        int16_t iValue = 0;
+        std::memcpy(&iValue, vSpec.data() + kArdSpectrumHeaderBytes + 2 * u, 2);
+        if (u == 3)      assert(iValue == -32768);
+        else if (u == 4) assert(iValue == 32767);
+        else             assert(iValue == static_cast<int16_t>(afDb[u] * 100.0f));
+    }
+    assert(oAsm.spectrum(2).empty());                 // out-of-range channel
+
+    // Before the frame: waits, then attaches on completion. A new frame
+    // clears it.
+    const std::vector<uint8_t> vFrame9 = serialise(makeHeader(1, kArdStatusOk));
+    {
+        size_t uLength = 0;
+        // Frame 9 not started: its spectrum is ignored.
+        assert(oSender.sendSpectrum(afDb, uBins, 1, 200000, 9));
+        assert(oReceiver.receive(vDatagram.data(), vDatagram.size(), uLength) == ReceiveResult::Datagram);
+        assert(oAsm.feed(vDatagram.data(), uLength) == ArdFeedResult::Ignored);
+        // Send frame 9 and feed its first chunk, so the frame is being
+        // assembled when the spectrum arrives.
+        assert(oSender.sendFrame(vFrame9.data(), vFrame9.size(), 9));
+        assert(oReceiver.receive(vDatagram.data(), vDatagram.size(), uLength) == ReceiveResult::Datagram);
+        assert(oAsm.feed(vDatagram.data(), uLength) == ArdFeedResult::ChunkStored);
+        assert(oSender.sendSpectrum(afDb, uBins, 1, 200000, 9));
+        // The remaining chunks are queued ahead of the spectrum; drain them,
+        // the frame completes, then the spectrum arrives and attaches.
+        bool bComplete = false;
+        bool bAttached = false;
+        for (int i = 0; i < 200 && !bAttached; ++i) {
+            if (oReceiver.receive(vDatagram.data(), vDatagram.size(), uLength) != ReceiveResult::Datagram)
+                break;
+            const ArdFeedResult e = oAsm.feed(vDatagram.data(), uLength);
+            if (e == ArdFeedResult::FrameComplete)    bComplete = true;
+            if (e == ArdFeedResult::SpectrumAttached) bAttached = true;
+        }
+        assert(bComplete && bAttached);
+        assert(oAsm.frameSequence() == 9);
+        assert(oAsm.spectrum(0).empty());             // frame 7's spectrum did not carry over
+        assert(!oAsm.spectrum(1).empty());
+    }
+
+    // Malformed: a truncated spectrum datagram is ignored.
+    std::vector<uint8_t> vBad(oAsm.spectrum(1));
+    vBad.resize(vBad.size() - 2);
+    assert(oAsm.feed(vBad.data(), vBad.size()) == ArdFeedResult::Ignored);
+}
+
 } // namespace
 
 int main()
@@ -348,6 +440,7 @@ int main()
     testMissingChunkAndNewSequenceDrops();
     testMalformedChunksRejected();
     testSenderToAssemblerOverLoopback();
+    testSpectrumAttachesAndRoundTrips();
 
     std::printf("test_ard_stream: all tests passed\n");
     return 0;

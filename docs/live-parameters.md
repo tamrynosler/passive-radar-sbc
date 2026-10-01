@@ -52,8 +52,9 @@ hop, and the lag telemetry shows the single bump.
   the sample-rate adaptation.
 - `ard_view.cpp`: forwards `/api/config` and `/api/apply` to the chain,
   whose address it learns from the stream (sender IP + `controlPort` in
-  the status JSON). `src/display/ard_viewer.html`: the Parameters panel,
-  Load and Apply.
+  the status JSON). `src/display/ard_viewer.html`: the control panel
+  (Display type, DSI cancellation, CFAR), Apply and Reset; the field set is
+  loaded from `/api/config` when a run appears and after every change.
 - `ChannelIngest::setCpi` (central, approved), `UdpReceiver::receive`
   sender address.
 

@@ -3,8 +3,11 @@
 # run_live.sh - the live chain on the Jetson, with clocks pinned and
 # tegrastats logged. Run this ON THE JETSON.
 #
-# FERS streams from another machine on the same subnet. Start this FIRST (it
-# binds the UDP port), then start fers-cli pointed at this board:
+# The samples come from uhd_to_vita49 (the USRP2 driver, `make drive` from
+# the Mac, into multicast 239.192.0.1:4991; pass --group 239.192.0.1 here) or,
+# for testing, from FERS streaming from another machine on the same subnet
+# with --config config/fers.conf. Start this first (it binds the UDP port),
+# then start the source. For FERS:
 #
 #   cd ~/FERS
 #   ./build/release/packages/fers-cli/fers-cli \

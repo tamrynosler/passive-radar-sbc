@@ -132,6 +132,31 @@ shows a banner over the map: "receiving, nothing to process: <reason>".
 This is the user-facing behaviour asked for: a dead front end looks like a
 live but empty display, never a crash or a frozen last frame.
 
+### 4.2b Before-processing spectra, magic `PBRARDP1` (added 2026-09-30)
+
+Sent after the frame's last chunk and before the status, one per channel,
+so the viewer's before-processing spectrogram shows the CPI exactly as the
+canceller received it, blank frames included. Approved in chat 2026-09-30.
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `PBRARDP1` |
+| 8 | 4 | `uint32` frame sequence it belongs to |
+| 12 | 4 | `uint32` channel: 0 reference, 1 surveillance |
+| 16 | 4 | `uint32` bins N |
+| 20 | 4 | `uint32` sample rate, Hz |
+| 24 | 2N | `int16` dB × 100 per bin; bin 0 is −fs/2, bin N/2 the carrier |
+
+N = 512 (`kSpectrumBins` in `pbr_run`), so one datagram of 1048 bytes and
+no fragmentation. The values come from `SpectrumEstimator`
+(`include/pbr/Spectrum.hpp`): a Welch average over the CPI's consecutive
+512-sample segments, Hann-windowed, plain C++ radix-2 on the host so the
+Mac build has it and the GPU is not involved; about a millisecond per
+channel. The assembler attaches a spectrum to the frame of the same
+sequence exactly as it attaches the status; `ard_view` serves the two
+datagrams back to back at `GET /api/spectrum/latest`. Levels are relative
+(mean |X|²/N), comparable between CPIs and channels, not absolute.
+
 ### 4.3 Reassembly rules (the receiver)
 
 - A chunk whose sequence differs from the frame being assembled starts a

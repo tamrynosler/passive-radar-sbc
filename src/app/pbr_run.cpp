@@ -65,6 +65,7 @@
 #include "pbr/Config.hpp"
 #include "pbr/DSICanceller.hpp"
 #include "pbr/HttpServer.hpp"
+#include "pbr/Spectrum.hpp"
 #include "pbr/UdpReceiver.hpp"
 #include "pbr/Vita49Packet.hpp"
 #include "pbr/types.hpp"
@@ -87,6 +88,11 @@ namespace {
 const size_t   kDatagramCapacity = 2048;
 const uint64_t kMaxDetections    = 8192;
 const char* const kDefaultConfigPath = "config/prb.conf";
+
+// Bins in the before-processing spectrum streamed with each frame: 512
+// int16 values fit one 1400-byte datagram, and 400 Hz per bin at 204800 Hz
+// is finer than the viewer's panel can draw.
+const uint32_t kSpectrumBins = 512;
 
 // A stage returning false on a CPI produces a blank frame and the run goes
 // on; this many in a row means the fault is not in the data, and the run
@@ -244,6 +250,11 @@ struct Chain {
     std::vector<ComplexF>  vcMap;
     std::vector<Detection> vDet;
     std::vector<uint8_t>   vFrame;      // one serialised ARD frame
+
+    // The two channels' spectra before any processing, streamed with each
+    // frame for the viewer's before-processing spectrogram.
+    SpectrumEstimator      oSpectrum;
+    std::vector<float>     vfSpectrum;  // kSpectrumBins dB values, reused per channel
 };
 
 // Build (or rebuild) the chain for a config, warm-up included. Releases the
@@ -278,6 +289,9 @@ bool buildChain(const PbrConfig& oCfg, Chain& oChain, double& dMsOut)
     const uint64_t uCells = oChain.oArdParams.uRangeBins * oChain.oArdParams.uDopplerBins;
     oChain.vcRef.assign(static_cast<size_t>(oCfg.uCpiSamples), ComplexF(0.0f, 0.0f));
     oChain.vcSur.assign(static_cast<size_t>(oCfg.uCpiSamples), ComplexF(0.0f, 0.0f));
+    if (!oChain.oSpectrum.init(kSpectrumBins))
+        return false;
+    oChain.vfSpectrum.assign(kSpectrumBins, 0.0f);
     oChain.vcCleaned.assign(oChain.bDeviceCoupled ? 0 : static_cast<size_t>(oCfg.uCpiSamples),
                             ComplexF(0.0f, 0.0f));
     oChain.vcMap.assign(static_cast<size_t>(uCells), ComplexF(0.0f, 0.0f));
@@ -1049,6 +1063,18 @@ int main(int argc, char* argv[])
                     // plus the live config values and where to send changes.
                     const uint32_t uSequence = static_cast<uint32_t>(uCpiIndex);
                     oArdSender.sendFrame(oChain.vFrame.data(), uFrameBytes, uSequence);
+
+                    // Then each channel's spectrum as it was handed to the
+                    // canceller, blank frames included: a dead input is
+                    // exactly what that panel is for. Timed inside ardWriteMs.
+                    const ComplexF* apChannel[2] = { oChain.vcRef.data(), oChain.vcSur.data() };
+                    for (uint32_t c = 0; c < 2; ++c) {
+                        if (oChain.oSpectrum.compute(apChannel[c], oCfg.uCpiSamples,
+                                                     oChain.vfSpectrum.data()))
+                            oArdSender.sendSpectrum(oChain.vfSpectrum.data(), kSpectrumBins, c,
+                                                    static_cast<uint32_t>(oCfg.uSampleRateHz),
+                                                    uSequence);
+                    }
 
                     char achStatus[1200];
                     const int iLen = std::snprintf(

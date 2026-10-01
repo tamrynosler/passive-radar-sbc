@@ -1,3 +1,12 @@
+> **Update 2026-09-25.** Two directories this audit recorded as empty have
+> since been populated from the author's copies: `UHDToPXGF/` (the legacy
+> USRP capture program, read closely in `UHD_VITA49_Driver_design.md` §3 and
+> replaced by `src/app/uhd_to_vita49.cpp`) and `CudaProcServer/` (the old
+> processor's PXGF consumer side). The legacy tree also carries a UHD 3.9.7
+> source snapshot, which told us the USRP2 was last flashed for UHD 3.9 and
+> let the new driver be checked against the API before a board was reachable.
+> Nothing from either directory was copied; ideas only, per CLAUDE.md.
+
 # Legacy Codebase Audit — `legacy/`
 
 **Scope:** everything under `legacy/`. All conclusions below come from reading the code itself, not from filenames or comments; where the two disagree, the mismatch is called out. Audit date: 2026-09-15.

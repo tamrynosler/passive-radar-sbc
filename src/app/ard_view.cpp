@@ -11,6 +11,9 @@
 //   GET  /api/status         JSON: latest CPI, counters, and the status JSON
 //                            pbr_run sent with the frame, verbatim
 //   GET  /api/frame/latest   the newest complete frame, PBRARD01 bytes
+//   GET  /api/spectrum/latest  the before-processing spectra that came with
+//                            it: the PBRARDP1 datagrams, reference then
+//                            surveillance, back to back; 404 until one arrives
 //   GET  /api/config         the chain's live parameter set (forwarded)
 //   POST /api/apply          KEY = VALUE lines for the chain (forwarded);
 //                            the chain's answer comes back as the body
@@ -119,6 +122,7 @@ struct Shared {
     bool                 bHaveFrame = false;
     uint32_t             uCpi = 0;
     std::vector<uint8_t> vFrame;
+    std::vector<uint8_t> avSpectrum[kArdSpectrumChannels];   // PBRARDP1 datagrams, or empty
     std::string          sStatus;            // pbr_run's status JSON, or empty
     std::string          sChainHost;         // who sent the frames
     uint16_t             uChainControlPort = 0;
@@ -159,13 +163,20 @@ void receiveLoop(UdpReceiver* pReceiver, Shared* pShared)
             continue;   // the one-second wake-up; check the stop flag
 
         const ArdFeedResult eFed = oAssembler.feed(vDatagram.data(), uLength);
-        if (eFed == ArdFeedResult::FrameComplete || eFed == ArdFeedResult::StatusAttached) {
+        if (eFed == ArdFeedResult::FrameComplete || eFed == ArdFeedResult::StatusAttached ||
+            eFed == ArdFeedResult::SpectrumAttached) {
             std::lock_guard<std::mutex> oLock(pShared->oMutex);
             if (eFed == ArdFeedResult::FrameComplete) {
                 pShared->vFrame     = oAssembler.frame();
                 pShared->uCpi       = oAssembler.frameSequence();
                 pShared->bHaveFrame = true;
                 pShared->sChainHost = sSender;
+            }
+            if (eFed != ArdFeedResult::StatusAttached) {
+                // A new frame starts with whatever spectra arrived early
+                // (usually none); each later one attaches on its own.
+                for (uint32_t c = 0; c < kArdSpectrumChannels; ++c)
+                    pShared->avSpectrum[c] = oAssembler.spectrum(c);
             }
             pShared->sStatus = oAssembler.statusJson();
             if (!pShared->sStatus.empty())
@@ -292,6 +303,21 @@ bool handleRequest(const std::string& sMethod, const std::string& sPath,
         if (!pShared->bHaveFrame)
             return false;
         oResponse.vBody        = pShared->vFrame;
+        oResponse.sContentType = "application/octet-stream";
+        oResponse.sExtraHeader = "X-Pbr-Cpi: " + std::to_string(pShared->uCpi);
+        return true;
+    }
+
+    if (sPath == "/api/spectrum/latest" && sMethod == "GET") {
+        std::lock_guard<std::mutex> oLock(pShared->oMutex);
+        if (!pShared->bHaveFrame)
+            return false;
+        oResponse.vBody.clear();
+        for (uint32_t c = 0; c < kArdSpectrumChannels; ++c)
+            oResponse.vBody.insert(oResponse.vBody.end(),
+                                   pShared->avSpectrum[c].begin(), pShared->avSpectrum[c].end());
+        if (oResponse.vBody.empty())
+            return false;
         oResponse.sContentType = "application/octet-stream";
         oResponse.sExtraHeader = "X-Pbr-Cpi: " + std::to_string(pShared->uCpi);
         return true;

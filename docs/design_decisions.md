@@ -122,6 +122,12 @@ reference's buffer length.
 
 ### 1.5 Gaps are zero-filled — a deliberate divergence from the MATLAB reference
 
+> **Amended 2026-09-25.** Coverage is no longer judged from the zeros. Each
+> slot carries a validity flag set by `write()` and cleared by the zero-fill,
+> and `validCount()` gives the fraction of a window that came from packets.
+> A quiet input (ADC codes of -2..2 with no antenna) was being rejected as
+> 0% covered under the value test. The zero-fill stays as a second guarantee.
+
 **Decision.** A write whose index is beyond the current write end zero-fills the
 skipped span before writing, clamped to one capacity.
 
@@ -1003,3 +1009,16 @@ every test file in the project.
   exist but their positions are unpublished, so packet loss cannot yet be
   detected from the trailer. The header's mod-16 packet count is the cheaper
   candidate and is now decoded on the MATLAB side, pending observation.
+
+## 5. Later design notes (2026-09-25 to 2026-09-29)
+
+Recorded in their own documents rather than here; the decisions list at the
+top of `PROGRESS.md` indexes them:
+
+- `UHD_VITA49_Driver_design.md` — the USRP2/N210 driver, the FERS VITA 49.2
+  profile as a wire contract, exact timestamp arithmetic, multicast delivery.
+- `ard-stream-design.md` — range-Doppler frames streamed as the file bytes
+  over UDP multicast, the C++ viewer, blank frames with a status word.
+- `live-parameters.md` — one in-memory parameter set seeded by a file that is
+  never written; changes at CPI boundaries by rebuilding; the control port;
+  sample-rate adaptation.

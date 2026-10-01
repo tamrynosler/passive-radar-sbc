@@ -55,6 +55,12 @@
 > place); `uhd_to_vita49 --synth` into `ingest_probe` on loopback for 12 s:
 > 7018 packets per stream, index continuity exact, 11 CPIs, 0 gaps, PASS.
 >
+> **Running it (2026-09-28):** `make drive` from the Mac runs the driver on
+> the Nano against 192.168.10.2 with `config/prb.conf`; `ARGS='--synth'` for
+> the planted target, `ARGS='--synth --synth-silent'` for dead input. The
+> Nano's 192.168.10.3 alias must be permanent (NetworkManager), or a reboot
+> leaves "No devices found".
+>
 > **Mac build (2026-09-25):** `brew install uhd` (4.10) plus `make host`
 > compiles the full driver here, so the N210 can be driven from the laptop
 > as well as from the Nano. UHD 4.x headers need C++17, so the Makefile

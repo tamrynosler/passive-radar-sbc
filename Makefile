@@ -120,19 +120,21 @@ stop:
 	    pgrep -af "build/(ard_view|pbr_run|uhd_to_vita49|ingest_probe)" | grep -v pgrep \
 	        || echo "nothing running"'
 
-## replay: run the recorded capture through the whole chain on the Jetson,
-##         with config/fers.conf (the FERS scenario: 204800 Hz, fullscale
-##         0.005). prb.conf now describes the USRP and would mis-index it.
-##         Each run gets its own directory named after the algorithm and the
-##         time, with a copy of the config beside it, so runs of different
-##         algorithms can be pulled back and compared side by side.
+## replay: run a scenario's recorded capture through the whole chain on the
+##         Jetson with config/fers.conf (204800 Hz, fullscale 0.005; prb.conf
+##         describes the USRP and would mis-index it). SCENARIO names the
+##         directory under data/ (scenarios/README.md); the run lands in
+##         /data/results/L2_performance/SCENARIO/ALG/STAMP with a copy of the
+##         config beside it. The quick manual path; scripts/run_experiment.sh
+##         is the controlled one with the full manifest.
+SCENARIO ?= S0_clean
 replay:
 	@ssh $(JETSON) 'cd $(REMOTE) && \
 	    A=$$(sed -n "s/^DSI_ALGORITHM *= *//p" config/fers.conf) && \
-	    OUT=/data/results/replay_$${A}_$$(date +%Y%m%d_%H%M%S) && \
-	    mkdir -p $$OUT && cp config/fers.conf $$OUT/prb.conf && \
+	    OUT=/data/results/L2_performance/$(SCENARIO)/$${A}/$$(date +%Y%m%d_%H%M%S) && \
+	    mkdir -p $$OUT && cp config/fers.conf $$OUT/config.conf && \
 	    echo "output: $$OUT" && \
-	    ./build/pbr_run --file data/fers_capture.pbrcap --config config/fers.conf \
+	    ./build/pbr_run --file data/$(SCENARIO)/capture.pbrcap --config config/fers.conf \
 	        --out $$OUT $(ARGS) \
 	        | tee $$OUT/run.log'
 
@@ -163,12 +165,14 @@ view:
 	    'cd $(REMOTE) && ./build/ard_view --group 239.192.0.2'
 
 ## verify: every golden-file check. Run after changing src/dsi or src/ard.
+##         Goldens live under data/SCENARIO/golden/ (regenerate with the
+##         MATLAB generators; none exist there yet as of 2026-10-01).
 verify:
 	@ssh $(JETSON) 'cd $(REMOTE) && \
-	    ./build/dsi_verify --cpi data/cpi_0000.bin \
-	        --golden data/golden_ecab.bin --algorithm ECA-B --tolerance 1e-2 && \
-	    ./build/ard_verify --cpi data/cpi_0000.bin \
-	        --golden data/golden_ard.bin --chained'
+	    ./build/dsi_verify --cpi data/$(SCENARIO)/cpi_0000.bin \
+	        --golden data/$(SCENARIO)/golden/golden_ecab.bin --algorithm ECA-B --tolerance 1e-2 && \
+	    ./build/ard_verify --cpi data/$(SCENARIO)/cpi_0000.bin \
+	        --golden data/$(SCENARIO)/golden/golden_ard.bin --chained'
 
 ## bench: DSI and ARD timing sweeps with clocks pinned, then pull the CSVs.
 bench:
@@ -235,7 +239,7 @@ LIB_SRC := src/ingest/CircularBuffer.cpp src/ingest/CpiFile.cpp \
            src/dsi/cpu/CglsCpu.cpp src/dsi/cpu/EcaCdCpu.cpp \
            src/ard/ArdProcessor.cpp src/ard/ArdFile.cpp src/ard/cpu/ArdCpu.cpp \
            src/ard/cpu/BatchesArdCpu.cpp src/ard/ArdStream.cpp \
-           src/display/HttpServer.cpp
+           src/ard/Spectrum.cpp src/display/HttpServer.cpp
 
 HOST_APPS  := src/app/pbr_run.cpp src/app/ingest_replay.cpp \
               src/app/ingest_probe.cpp src/app/dsi_verify.cpp \
@@ -246,7 +250,7 @@ HOST_TESTS := tests/test_circular_buffer.cpp tests/test_vita49_packet.cpp \
               tests/test_eca.cpp tests/test_cgls.cpp tests/test_ecacd.cpp \
               tests/test_ard.cpp tests/test_batches_ard.cpp \
               tests/test_vita49_writer.cpp tests/test_ard_stream.cpp \
-              tests/test_http.cpp
+              tests/test_http.cpp tests/test_spectrum.cpp
 
 ## host: build every tool locally into ./bin
 host:
@@ -277,4 +281,4 @@ host-test:
 ##            instead: bin/ard_view --group 239.192.0.2 (the Mac must be on
 ##            the switch), then http://localhost:8080.
 host-view:
-	@./$(HOST_BIN)/ard_view --file data/ard/ard_00000.bin --http 8080
+	@./$(HOST_BIN)/ard_view --file data/S0_clean/ard/ard_00000.bin --http 8080

@@ -12,6 +12,7 @@ namespace {
 
 const char kChunkMagic[8]  = { 'P', 'B', 'R', 'A', 'R', 'D', 'S', '1' };
 const char kStatusMagic[8] = { 'P', 'B', 'R', 'A', 'R', 'D', 'T', '1' };
+const char kSpectrumMagic[8] = { 'P', 'B', 'R', 'A', 'R', 'D', 'P', '1' };
 
 // Sanity bound on a corrupt chunk count: a frame of kMaxCells cells is
 // under two million chunks.
@@ -74,6 +75,32 @@ bool ArdStreamSender::sendStatus(const char* pJson, uint32_t uSequence)
     return true;
 }
 
+bool ArdStreamSender::sendSpectrum(const float* pDb, uint32_t uBins, uint32_t uChannel,
+                                   uint32_t uSampleRateHz, uint32_t uSequence)
+{
+    CHECK(moSender.isOpen(), "ArdStreamSender: sendSpectrum before open");
+    CHECK(pDb != nullptr, "ArdStreamSender: null spectrum");
+    CHECK(uBins > 0 && uBins <= kArdSpectrumMaxBins, "ArdStreamSender: spectrum bins out of range");
+    CHECK(uChannel < kArdSpectrumChannels, "ArdStreamSender: spectrum channel out of range");
+
+    std::memcpy(mauDatagram, kSpectrumMagic, 8);
+    putU32(mauDatagram + 8,  uSequence);
+    putU32(mauDatagram + 12, uChannel);
+    putU32(mauDatagram + 16, uBins);
+    putU32(mauDatagram + 20, uSampleRateHz);
+    uint8_t* pOut = mauDatagram + kArdSpectrumHeaderBytes;
+    for (uint32_t u = 0; u < uBins; ++u) {
+        // Hundredths of a dB, saturated: +-327 dB covers any real level.
+        float fScaled = pDb[u] * 100.0f;
+        if (fScaled > 32767.0f)  fScaled = 32767.0f;
+        if (fScaled < -32768.0f) fScaled = -32768.0f;
+        const int16_t iValue = static_cast<int16_t>(fScaled);
+        std::memcpy(pOut + 2 * u, &iValue, sizeof(iValue));
+    }
+    moSender.send(mauDatagram, kArdSpectrumHeaderBytes + 2 * static_cast<size_t>(uBins));
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Assembler
 // ---------------------------------------------------------------------------
@@ -93,6 +120,15 @@ ArdFrameAssembler::ArdFrameAssembler()
       muFramesCompleted(0),
       muFramesDropped(0)
 {
+    for (uint32_t c = 0; c < kArdSpectrumChannels; ++c)
+        mauPendingSpectrumSequence[c] = 0;
+}
+
+const std::vector<uint8_t>& ArdFrameAssembler::spectrum(uint32_t uChannel) const
+{
+    if (uChannel >= kArdSpectrumChannels || !mbHaveComplete)
+        return mvNoSpectrum;
+    return mavSpectrum[uChannel];
 }
 
 ArdFeedResult ArdFrameAssembler::feed(const uint8_t* pDatagram, size_t uLength)
@@ -103,6 +139,8 @@ ArdFeedResult ArdFrameAssembler::feed(const uint8_t* pDatagram, size_t uLength)
         return feedChunk(pDatagram, uLength);
     if (std::memcmp(pDatagram, kStatusMagic, 8) == 0)
         return feedStatus(pDatagram, uLength);
+    if (std::memcmp(pDatagram, kSpectrumMagic, 8) == 0)
+        return feedSpectrum(pDatagram, uLength);
     return ArdFeedResult::Ignored;
 }
 
@@ -193,6 +231,12 @@ ArdFeedResult ArdFrameAssembler::feedChunk(const uint8_t* pDatagram, size_t uLen
         msStatus.swap(msPendingStatus);
         mbHavePendingStatus = false;
     }
+    for (uint32_t c = 0; c < kArdSpectrumChannels; ++c) {
+        mavSpectrum[c].clear();
+        if (!mavPendingSpectrum[c].empty() && mauPendingSpectrumSequence[c] == muSequence)
+            mavSpectrum[c].swap(mavPendingSpectrum[c]);
+        mavPendingSpectrum[c].clear();
+    }
     return ArdFeedResult::FrameComplete;
 }
 
@@ -215,6 +259,29 @@ ArdFeedResult ArdFrameAssembler::feedStatus(const uint8_t* pDatagram, size_t uLe
         msPendingStatus.assign(pJson);
         muPendingSequence   = uSequence;
         mbHavePendingStatus = true;
+        return ArdFeedResult::ChunkStored;
+    }
+    return ArdFeedResult::Ignored;
+}
+
+ArdFeedResult ArdFrameAssembler::feedSpectrum(const uint8_t* pDatagram, size_t uLength)
+{
+    if (uLength < kArdSpectrumHeaderBytes)
+        return ArdFeedResult::Ignored;
+    const uint32_t uSequence = getU32(pDatagram + 8);
+    const uint32_t uChannel  = getU32(pDatagram + 12);
+    const uint32_t uBins     = getU32(pDatagram + 16);
+    if (uChannel >= kArdSpectrumChannels || uBins == 0 || uBins > kArdSpectrumMaxBins ||
+        uLength != kArdSpectrumHeaderBytes + 2 * static_cast<size_t>(uBins))
+        return ArdFeedResult::Ignored;
+
+    if (mbHaveComplete && uSequence == muCompleteSequence) {
+        mavSpectrum[uChannel].assign(pDatagram, pDatagram + uLength);
+        return ArdFeedResult::SpectrumAttached;
+    }
+    if (mbAssembling && uSequence == muSequence) {
+        mavPendingSpectrum[uChannel].assign(pDatagram, pDatagram + uLength);
+        mauPendingSpectrumSequence[uChannel] = uSequence;
         return ArdFeedResult::ChunkStored;
     }
     return ArdFeedResult::Ignored;
