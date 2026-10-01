@@ -23,8 +23,10 @@ nvprof.*
 *.h5
 *.pbrcap
 tegrastats*.log
-data/
-results/
+data/*
+results/*
+!data/README.md
+!results/README.md
 # Rendered plots and movies from matlab/play_ard.m and friends -- regenerated
 # from the ARD snapshots, so not worth version controlling.
 *.mp4
@@ -54,3 +56,6 @@ matlab/legacy/
 CLAUDE.md
 PROGRESS.md
 PLAN.md
+
+# Reference papers: local only, not for the repository
+Papers/
