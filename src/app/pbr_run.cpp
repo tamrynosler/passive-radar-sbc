@@ -307,8 +307,22 @@ bool buildChain(const PbrConfig& oCfg, Chain& oChain, double& dMsOut)
     // defers some plan work to its first execution. Without this the very
     // first CPI blows its budget and the first telemetry row looks like a
     // failure.
-    std::fill(oChain.vcRef.begin(), oChain.vcRef.end(), ComplexF(1.0f, 0.0f));
-    std::fill(oChain.vcSur.begin(), oChain.vcSur.end(), ComplexF(0.5f, 0.5f));
+    //
+    // The warm-up signal must look like signal. A constant reference makes
+    // every delayed column of the clutter matrix identical, so the Gram is
+    // singular to FP32 and ECA-m's whole-CPI Cholesky fails before any real
+    // CPI arrives (2026-10-02; the batched algorithms survived only because
+    // their windows are short). A fixed pseudo-random sequence (a plain LCG,
+    // the same every run) is well conditioned; the output is discarded.
+    uint32_t uLcg = 12345u;
+    for (size_t n = 0; n < oChain.vcRef.size(); ++n) {
+        uLcg = uLcg * 1664525u + 1013904223u;
+        const float fI = static_cast<float>(uLcg >> 8) / 16777216.0f - 0.5f;
+        uLcg = uLcg * 1664525u + 1013904223u;
+        const float fQ = static_cast<float>(uLcg >> 8) / 16777216.0f - 0.5f;
+        oChain.vcRef[n] = ComplexF(fI, fQ);
+        oChain.vcSur[n] = ComplexF(0.5f * fI, 0.5f * fQ);
+    }
     DSIStats oWarmDsi;
     ArdStats oWarmArd;
     bool bWarm = oChain.pDsi->cancel(oChain.vcRef.data(), oChain.vcSur.data(),

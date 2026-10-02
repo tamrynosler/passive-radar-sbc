@@ -6,6 +6,13 @@ to `~/passive-radar-archive/old-results/`.
 
 ```
 results/
+  prelim/<scenario>/<ALG>/<stamp>/        scripts/run_prelim.sh: one algorithm,
+      config.conf run.txt clocks.txt      one frozen CPI, accuracy + time per
+      tegrastats.log verify_*.txt         CPI + chain latency + suppression,
+      bench.csv chain/                    read back by matlab/prelim_report.m
+  CGLS_tuning/                            the author's manual CGLS parameter
+      run_cgls.sh plot_cgls.m README.md   tests on the laptop CPU (tracked);
+      index.csv <name>_<stamp>/           one directory per test (not tracked)
   L1_correctness/<scenario>/<alg>_<backend>.txt     pass/fail and error values
   L2_performance/<scenario>/<ALG>/<stamp>/          one full-scenario run
       config.conf   the config the run used, verbatim

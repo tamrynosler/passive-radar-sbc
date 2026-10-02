@@ -27,6 +27,13 @@ data/*
 results/*
 !data/README.md
 !results/README.md
+# the manual tuning tools are tracked; the test directories beside them are not
+!results/CGLS_tuning/
+results/CGLS_tuning/*
+!results/CGLS_tuning/README.md
+!results/CGLS_tuning/run_cgls.sh
+!results/CGLS_tuning/plot_cgls.m
+!results/CGLS_tuning/plot_cgls_sweep.m
 # Rendered plots and movies from matlab/play_ard.m and friends -- regenerated
 # from the ARD snapshots, so not worth version controlling.
 *.mp4

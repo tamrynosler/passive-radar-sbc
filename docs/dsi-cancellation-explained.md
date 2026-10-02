@@ -262,6 +262,20 @@ And **host timings prove nothing about the Jetson.** They say the code runs
 and give the order of magnitude. Citable figures come from the Jetson with
 clocks pinned (`nvpmodel -m 0 && jetson_clocks`) and tegrastats logged.
 
+## 7. Two things measured later that this document should warn about (2026-10-02)
+
+- **The vertical Doppler streak through every strong return is not the
+  canceller.** At the matched delay the Doppler FFT sees |s(t)|^2 times the
+  target's tone, so each return is convolved with the spectrum of the
+  illuminator's power envelope. A band-limited recording of a real FM station
+  has an envelope with programme content in it (lines at 40, 75 and 145 Hz
+  in `cpi_0000.bin`), which prints a streak 25-30 dB down on the target and
+  on the direct signal alike, identical for all five cancellers. The
+  cancellers act only at zero Doppler. `RESULTS.md`, 2026-10-02 afternoon.
+- **A stateful canceller must be reset after the chain's warm-up.** CGLS
+  with priming keeps the weights from the warm-up's random signal and starts
+  the first real CPI from them (17.8 dB instead of 42). Fix pending.
+
 ## References
 
 - Colone, O'Hagan, Lombardo, Baker, TAES 45(2) 2009 — ECA and ECA-B.

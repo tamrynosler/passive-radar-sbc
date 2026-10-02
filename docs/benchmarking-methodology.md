@@ -46,3 +46,24 @@ and version used for each figure.
 - Table: batch sweep at the chosen Doppler length.
 - Plot: latency vs N with the real-time budget line overlaid.
 - Cross-reference the chosen operating point to the DSI cancellation benchmarks.
+
+## Protocol used for the 2026-10-02 baseline
+
+`scripts/run_prelim.sh` (`make prelim ARGS=<ALG>`): one algorithm, one frozen
+CPI (`data/S0_clean/cpi_0000.bin`), on the Jetson with clocks pinned and
+`tegrastats` logged. Four measurements land in one directory under
+`results/prelim/<scenario>/<ALG>/<stamp>/` with a manifest (`run.txt`: git
+hash, SHA-256 of the CPI, capture, golden and config, each step's window and
+exit status):
+
+1. accuracy: `dsi_verify` against the MATLAB golden, CPU FP64 at 1e-4 and
+   GPU at 1e-2; without a golden, GPU against CPU in FP32 and FP64, both 1e-2
+2. time per CPI: `dsi_bench`, `cancel()` only, one warm-up discarded, GPU
+   (20 iterations) then Nano CPU (3); min, median, mean, std, max
+3. the chain on the scenario's capture: `pbr_run --file`, per-CPI `dsiMs`,
+   `ardMs`, `totalMs`, suppression, detections, and the maps
+4. suppression, reported by all three
+
+The GPU time includes host-to-device and device-to-host copies, because
+`cancel()` takes host pointers: it is the stage latency the chain pays, not
+kernel time. Results: `RESULTS.md`.

@@ -16,27 +16,38 @@
 %     reference reaching back into earlier samples within the CPI (zeros only
 %     before the CPI start). Mirrors src/dsi/cpu/EcaCpu.cpp's conventions.
 %
-% The parameters below MUST match config/prb.conf; dsi_verify reads them back
-% from the golden file header and refuses to compare if they disagree with
-% the config it loaded, so a stale or mismatched golden file fails loudly
-% instead of "passing" against the wrong settings.
+% The parameters come from the config the C++ side reads (never copied by
+% hand); dsi_verify reads them back from the golden file header and refuses
+% to compare if they disagree with the config it loaded, so a stale or
+% mismatched golden file fails loudly instead of "passing" against the wrong
+% settings.
+%
+%   eca_golden(confPath, scenarioDir)
+%
+%   confPath     the chain config, config/fers.conf for the FERS scenarios
+%   scenarioDir  data/<scenario>: reads cpi_0000.bin, writes golden/golden_ecam.bin
+%                and golden/golden_ecab.bin
 %
 % Run from the repository root:
-%   matlab -batch "run('matlab/eca_golden.m')"
+%   matlab -batch "addpath('matlab'); eca_golden('config/fers.conf', 'data/S0_clean')"
 
-clear; clc;
+function eca_golden(confPath, scenarioDir)
+if nargin < 1 || isempty(confPath),    confPath    = 'config/fers.conf'; end
+if nargin < 2 || isempty(scenarioDir), scenarioDir = 'data/S0_clean';    end
 
 % ---- parameters, straight from the config the C++ side reads --------------
-cfg          = read_prb_conf('config/prb.conf');
+cfg          = read_prb_conf(confPath);
 K            = cfg.N_CLUTTER_TAPS;
 batchSamples = round(cfg.ECA_BATCH_LENGTH_s * cfg.SAMPLE_RATE_Hz);
 loadingRel   = cfg.ECA_DIAGONAL_LOADING;
 loadingAbs   = 1e-3;     % ECA-m inherits the reference chain's absolute value
-fprintf('config: K %d, batch %d samples, loading %g\n', K, batchSamples, loadingRel);
+fprintf('config %s: K %d, batch %d samples, loading %g\n', confPath, K, batchSamples, loadingRel);
 
-cpiPath   = 'data/cpi_0000.bin';
-ecamPath  = 'data/golden_ecam.bin';
-ecabPath  = 'data/golden_ecab.bin';
+cpiPath   = fullfile(scenarioDir, 'cpi_0000.bin');
+goldenDir = fullfile(scenarioDir, 'golden');
+if ~exist(goldenDir, 'dir'), mkdir(goldenDir); end
+ecamPath  = fullfile(goldenDir, 'golden_ecam.bin');
+ecabPath  = fullfile(goldenDir, 'golden_ecab.bin');
 
 % ---- read the frozen CPI ---------------------------------------------------
 [sref, ssur, N, fs, startIdx] = read_cpi(cpiPath);
@@ -88,6 +99,7 @@ fprintf('ECA-B: cancelled %.2f dB of surveillance power\n', ...
 write_golden(ecamPath, clean_m, N, K, N,            1, loadingAbs);
 write_golden(ecabPath, clean_b, N, K, batchSamples, 0, loadingRel);
 fprintf('wrote %s and %s\n', ecamPath, ecabPath);
+end
 
 % ================= helpers =================
 function [sref, ssur, n, fs, startIdx] = read_cpi(path)

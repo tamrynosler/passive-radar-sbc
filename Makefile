@@ -29,7 +29,13 @@ CMAKE_ARGS := -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_COMPILER=$(NVCC)
 # Exclusions follow .gitignore, so anything git ignores stays off the Jetson.
 # 'P' protects a path from --delete: data/, results/ and build/ live only on
 # the board and must survive every sync.
-RSYNC := rsync -a --delete \
+#
+# macOS 15.7 ships openrsync as /usr/bin/rsync, which dies with "unexpected
+# end of file" on --delete plus filter rules against the board's rsync 3.1.2
+# (2026-10-02; each option alone works, the combination does not). The real
+# rsync from Homebrew works, so it is preferred whenever it is installed.
+RSYNC_BIN := $(shell test -x /opt/homebrew/bin/rsync && echo /opt/homebrew/bin/rsync || echo rsync)
+RSYNC := $(RSYNC_BIN) -a --delete \
          --filter='P data' --filter='P results' --filter='P build' \
          --filter=':- .gitignore' \
          --exclude '.git' --exclude '.DS_Store'
@@ -174,6 +180,24 @@ verify:
 	    ./build/ard_verify --cpi data/$(SCENARIO)/cpi_0000.bin \
 	        --golden data/$(SCENARIO)/golden/golden_ard.bin --chained'
 
+## prelim: ONE algorithm on the scenario's frozen CPI, on the Jetson with
+##         clocks pinned: accuracy against the MATLAB golden (CPU FP64 and
+##         GPU), time per CPI (dsi_bench), and the chain on the capture
+##         (latency, suppression, maps). scripts/run_prelim.sh says exactly
+##         what it does. Results land in results/prelim/SCENARIO/ALG/STAMP.
+##           make prelim ARGS=ECA-m
+prelim:
+	@ssh -t $(JETSON) 'cd $(REMOTE) && SCENARIO=$(SCENARIO) STAMP=$(shell date +%Y%m%d_%H%M%S) \
+	    bash scripts/run_prelim.sh $(ARGS)'
+	@$(MAKE) pull
+
+## push-data: copy data/SCENARIO (capture, frozen CPIs, truth, goldens) to the
+##            board. Data never syncs with make build, so this is explicit.
+push-data:
+	@ssh $(JETSON) 'mkdir -p $(REMOTE)/data/$(SCENARIO)'
+	@$(RSYNC_BIN) -a --stats data/$(SCENARIO)/ '$(JETSON):$(REMOTE)/data/$(SCENARIO)/' \
+	    | grep -E "Number of files transferred|Total transferred file size" || true
+
 ## bench: DSI and ARD timing sweeps with clocks pinned, then pull the CSVs.
 bench:
 	@ssh -t $(JETSON) 'cd $(REMOTE) && bash scripts/run_dsi_bench.sh $(ARGS)'
@@ -192,7 +216,7 @@ bench:
 ##       protocol 29 and does not know the newer flag.
 pull:
 	@mkdir -p results
-	@rsync -a --stats '$(JETSON):/data/results/' results/ \
+	@$(RSYNC_BIN) -a --stats '$(JETSON):/data/results/' results/ \
 	    | grep -E "Number of files transferred|Total transferred file size|^sent" || true
 	@echo "results in ./results"
 
