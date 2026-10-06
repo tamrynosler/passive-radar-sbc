@@ -1,7 +1,6 @@
 #include "pbr/Vita49Writer.hpp"
 
 #include "pbr/ChannelIngest.hpp"   // kMaxSamplesPerPacket
-#include "pbr/Vita49Packet.hpp"    // kVita49ClassId, offsets
 #include "pbr/check.hpp"
 
 #include <cstdio>
@@ -10,8 +9,6 @@
 namespace pbr {
 
 namespace {
-
-constexpr uint64_t kPicosecondsPerSecond = 1000000000000ULL;
 
 // Big-endian field writers, byte by byte: the inverse of readBe* in
 // Vita49Packet.cpp, and for the same reasons (no alignment assumptions, no
@@ -56,10 +53,10 @@ void writeCommonHeader(uint8_t* p, uint32_t uType, bool bTrailer,
     p[0] = static_cast<uint8_t>((uType << 4) | 0x8u | (bTrailer ? 0x4u : 0x0u) | 0x2u);
     p[1] = static_cast<uint8_t>((1u << 6) | (2u << 4) | (uPacketCount & 0x0Fu));
     writeBe16(p + 2, static_cast<uint16_t>(uTotalBytes / 4));
-    writeBe32(p + 4, uStreamId);
-    writeBe64(p + 8, kVita49ClassId);
-    writeBe32(p + 16, oTime.uSeconds);
-    writeBe64(p + 20, oTime.uPicoseconds);
+    writeBe32(p + kVita49StreamIdOffset,    uStreamId);
+    writeBe64(p + kVita49ClassIdOffset,     kVita49ClassId);
+    writeBe32(p + kVita49SecondsOffset,     oTime.uSeconds);
+    writeBe64(p + kVita49PicosecondsOffset, oTime.uPicoseconds);
 }
 
 // Trailer and context state indicators share one layout: bits 31:27 enable
@@ -79,11 +76,11 @@ uint32_t makeIndicators(bool bRefLocked, bool bSampleLoss)
 
 // A receiver name goes into the JSON unescaped, so it must be plain ASCII
 // without the two characters that would break the string.
-bool isSafeJsonString(const std::string& s)
+bool isSafeJsonString(const std::string& sText)
 {
-    for (size_t u = 0; u < s.size(); ++u) {
-        const unsigned char ch = static_cast<unsigned char>(s[u]);
-        if (ch < 0x20 || ch > 0x7E || ch == '"' || ch == '\\')
+    for (size_t u = 0; u < sText.size(); ++u) {
+        const unsigned char uChar = static_cast<unsigned char>(sText[u]);
+        if (uChar < 0x20 || uChar > 0x7E || uChar == '"' || uChar == '\\')
             return false;
     }
     return true;

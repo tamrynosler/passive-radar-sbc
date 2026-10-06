@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <string>
 
+#include "pbr/Vita49Packet.hpp"
+
 namespace pbr {
 
 // Encoder for FERS's VITA 49.2 profile: the mirror image of Vita49Packet.hpp,
@@ -46,9 +48,6 @@ struct Vita49Time {
 constexpr uint32_t kVita49FlagSampleLoss  = 0x04;   // first context after a gap
 constexpr uint32_t kVita49FlagStreamOpen  = 0x08;   // first context packet
 constexpr uint32_t kVita49FlagStreamClose = 0x10;   // last context packet
-
-// Fixed bytes around a data payload: 28-byte header plus 4-byte trailer.
-constexpr size_t kVita49DataOverheadBytes = 32;
 
 // Exact conversion of an absolute sample index to a VRT timestamp such that
 // ChannelIngest::absoluteIndex() recovers the same index:

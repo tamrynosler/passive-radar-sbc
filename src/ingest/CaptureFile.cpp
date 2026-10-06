@@ -90,10 +90,12 @@ bool CaptureWriter::write(const uint8_t* pBytes, size_t uLength)
     uint8_t auLength[4];
     putLe32(auLength, static_cast<uint32_t>(uLength));
 
-    if (std::fwrite(auLength, 1, sizeof(auLength), mpFile) != sizeof(auLength))
+    if (std::fwrite(auLength, 1, sizeof(auLength), mpFile) != sizeof(auLength) ||
+        std::fwrite(pBytes, 1, uLength, mpFile) != uLength) {
+        std::fprintf(stderr, "CaptureWriter: write failed after %llu records\n",
+                     static_cast<unsigned long long>(muRecords));
         return false;
-    if (std::fwrite(pBytes, 1, uLength, mpFile) != uLength)
-        return false;
+    }
 
     ++muRecords;
     muBytes += uLength;

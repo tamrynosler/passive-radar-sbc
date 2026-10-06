@@ -27,10 +27,10 @@ const uint64_t kSurSeedQ = 0x2545F4914F6CDD1DULL;
 // splitmix64 finaliser: a good 64-bit hash of (seed, index).
 uint64_t hash64(uint64_t uSeed, uint64_t uIndex)
 {
-    uint64_t z = uIndex + uSeed;
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-    return z ^ (z >> 31);
+    uint64_t uZ = uIndex + uSeed;
+    uZ = (uZ ^ (uZ >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    uZ = (uZ ^ (uZ >> 27)) * 0x94D049BB133111EBULL;
+    return uZ ^ (uZ >> 31);
 }
 
 // Roughly Gaussian, unit variance: the sum of four independent uniforms on
@@ -39,10 +39,10 @@ uint64_t hash64(uint64_t uSeed, uint64_t uIndex)
 // levels above.
 double noiseAt(uint64_t uSeed, uint64_t uIndex)
 {
-    const uint64_t h = hash64(uSeed, uIndex);
+    const uint64_t uHash = hash64(uSeed, uIndex);
     double dSum = 0.0;
     for (unsigned u = 0; u < 4; ++u) {
-        const double dLane = static_cast<double>((h >> (16 * u)) & 0xFFFFu);
+        const double dLane = static_cast<double>((uHash >> (16 * u)) & 0xFFFFu);
         dSum += dLane / 65536.0 - 0.5;
     }
     return dSum * 1.7320508075688772;   // sqrt(3)
@@ -125,26 +125,26 @@ bool SynthSource::receive(int16_t* pRef, int16_t* pSur, uint64_t uWant,
     const double dTwoPiOverFs = kTwoPi / static_cast<double>(muSampleRateHz);
 
     for (uint64_t u = 0; u < uWant; ++u) {
-        const uint64_t n = muIndex + u;
+        const uint64_t uN = muIndex + u;
 
-        const double dRefI = kRefRmsCodes * noiseAt(kRefSeedI, n);
-        const double dRefQ = kRefRmsCodes * noiseAt(kRefSeedQ, n);
+        const double dRefI = kRefRmsCodes * noiseAt(kRefSeedI, uN);
+        const double dRefQ = kRefRmsCodes * noiseAt(kRefSeedQ, uN);
 
         // Target: the reference as it was muTargetDelay samples ago, rotated
-        // by the Doppler phase. ((n mod fs) * fd) mod fs equals (n * fd) mod
+        // by the Doppler phase. ((uN mod fs) * fd) mod fs equals (uN * fd) mod
         // fs, so the phase stays exact and continuous without overflow.
-        const uint64_t uPhaseSteps = ((n % muSampleRateHz) * muDopplerSteps) % muSampleRateHz;
+        const uint64_t uPhaseSteps = ((uN % muSampleRateHz) * muDopplerSteps) % muSampleRateHz;
         const double   dPhase      = dTwoPiOverFs * static_cast<double>(uPhaseSteps);
         const double   dCos        = std::cos(dPhase);
         const double   dSin        = std::sin(dPhase);
 
-        const double dDelI = kRefRmsCodes * noiseAt(kRefSeedI, n - muTargetDelay);
-        const double dDelQ = kRefRmsCodes * noiseAt(kRefSeedQ, n - muTargetDelay);
+        const double dDelI = kRefRmsCodes * noiseAt(kRefSeedI, uN - muTargetDelay);
+        const double dDelQ = kRefRmsCodes * noiseAt(kRefSeedQ, uN - muTargetDelay);
         const double dTgtI = kTargetGain * (dDelI * dCos - dDelQ * dSin);
         const double dTgtQ = kTargetGain * (dDelI * dSin + dDelQ * dCos);
 
-        const double dSurI = kDirectPathGain * dRefI + dTgtI + kSurNoiseRms * noiseAt(kSurSeedI, n);
-        const double dSurQ = kDirectPathGain * dRefQ + dTgtQ + kSurNoiseRms * noiseAt(kSurSeedQ, n);
+        const double dSurI = kDirectPathGain * dRefI + dTgtI + kSurNoiseRms * noiseAt(kSurSeedI, uN);
+        const double dSurQ = kDirectPathGain * dRefQ + dTgtQ + kSurNoiseRms * noiseAt(kSurSeedQ, uN);
 
         pRef[2 * u]     = toCode(dRefI);
         pRef[2 * u + 1] = toCode(dRefQ);

@@ -52,10 +52,10 @@ bool parseVita49Packet(const uint8_t* pBytes, size_t uLength, Vita49Packet& oPac
     oPacket.uTsf           = (static_cast<uint32_t>(pBytes[1]) >> 4) & 0x3u;
     oPacket.uPacketCount   = static_cast<uint32_t>(pBytes[1]) & 0x0Fu;
     oPacket.uDeclaredWords = readBe16(pBytes + 2);
-    oPacket.uStreamId      = readBe32(pBytes + 4);
-    oPacket.uClassId       = readBe64(pBytes + 8);
-    oPacket.uTimestampSec  = readBe32(pBytes + 16);
-    oPacket.uTimestampPs   = readBe64(pBytes + 20);
+    oPacket.uStreamId      = readBe32(pBytes + kVita49StreamIdOffset);
+    oPacket.uClassId       = readBe64(pBytes + kVita49ClassIdOffset);
+    oPacket.uTimestampSec  = readBe32(pBytes + kVita49SecondsOffset);
+    oPacket.uTimestampPs   = readBe64(pBytes + kVita49PicosecondsOffset);
 
     // The class ID is our only defence against unrelated traffic arriving on
     // the port. If FERS ever changes its profile identifier this is the first
@@ -72,28 +72,23 @@ bool parseVita49Packet(const uint8_t* pBytes, size_t uLength, Vita49Packet& oPac
 
     // Follows from TSF = 2, and absoluteIndex()'s overflow headroom depends
     // on it.
-    CHECK(oPacket.uTimestampPs < 1000000000000ULL,
+    CHECK(oPacket.uTimestampPs < kPicosecondsPerSecond,
           "fractional timestamp is not less than one second");
 
-    // The header's declared size must account for the whole datagram. This is
-    // now enforced: a 30 s live FERS run matched on 18001 of 18001 packets on
-    // each channel, so the field is populated and trustworthy, and checking it
-    // gives free corruption and truncation detection.
+    // See the header for why the declared size is enforced.
     CHECK(static_cast<size_t>(oPacket.uDeclaredWords) * 4 == uLength,
           "declared packet size disagrees with the datagram length");
 
     if (uTypeNibble == 0x1) {
         oPacket.eType = Vita49Type::Data;
 
-        CHECK(uLength >= kVita49CommonHeaderBytes + kVita49TrailerBytes,
+        CHECK(uLength >= kVita49DataOverheadBytes,
               "data packet too short to hold a header and a trailer");
 
         // Four bytes per sample: int16 I followed by int16 Q. No separate
         // check that this divides evenly -- the datagram length is already
-        // required to be a multiple of 4 and the overhead is 32 bytes, so the
-        // payload always is too.
-        const size_t uPayloadBytes =
-            uLength - kVita49CommonHeaderBytes - kVita49TrailerBytes;
+        // required to be a multiple of 4, and so is the overhead.
+        const size_t uPayloadBytes = uLength - kVita49DataOverheadBytes;
 
         oPacket.pPayload     = pBytes + kVita49CommonHeaderBytes;
         oPacket.uSampleCount = uPayloadBytes / 4;

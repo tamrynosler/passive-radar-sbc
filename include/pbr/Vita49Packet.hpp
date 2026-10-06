@@ -38,11 +38,20 @@ namespace pbr {
 // FERS's placeholder VRT profile identifier.
 constexpr uint64_t kVita49ClassId = 0xFA52530001000101ULL;
 
-// Fixed byte offsets and sizes, named so the parser reads as the table above.
+// Fixed byte offsets and sizes, named so the parser and the writer
+// (Vita49Writer.cpp) both read as the table above.
+constexpr size_t kVita49StreamIdOffset     = 4;
+constexpr size_t kVita49ClassIdOffset      = 8;
+constexpr size_t kVita49SecondsOffset      = 16;
+constexpr size_t kVita49PicosecondsOffset  = 20;
 constexpr size_t kVita49CommonHeaderBytes  = 28;
 constexpr size_t kVita49TrailerBytes       = 4;
+constexpr size_t kVita49DataOverheadBytes  = kVita49CommonHeaderBytes + kVita49TrailerBytes;
 constexpr size_t kVita49ContextHeaderBytes = 92;
 constexpr size_t kVita49SampleRateOffset   = 44;
+
+// TSF = 2: the fractional timestamp counts picoseconds, below one second.
+constexpr uint64_t kPicosecondsPerSecond = 1000000000000ULL;
 
 enum class Vita49Type {
     Data,      // signal data packet, header nibble 0x1
@@ -85,11 +94,9 @@ struct Vita49Packet {
 // error -- the format is officially unverified, so tolerating unexpected
 // types is cheap insurance.
 //
-// uDeclaredWords IS validated against uLength. It was recorded but not
-// enforced until a 30 s live FERS run confirmed the field is populated
-// correctly (18001 of 18001 packets on each channel), which makes it a free
-// corruption and truncation check. Relax this if a future FERS version stops
-// setting it.
+// uDeclaredWords IS validated against uLength: a 30 s live FERS run matched
+// on 18001 of 18001 packets per channel, so it is a free corruption and
+// truncation check. Relax this if a future FERS version stops setting it.
 bool parseVita49Packet(const uint8_t* pBytes, size_t uLength, Vita49Packet& oPacket);
 
 } // namespace pbr
