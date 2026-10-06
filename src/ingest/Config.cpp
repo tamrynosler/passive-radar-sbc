@@ -30,14 +30,14 @@ void configMessage(const char* pFormat, ...)
         g_pMessageSink->append(achLine);
 }
 
-std::string trim(const std::string& s)
+std::string trim(const std::string& sText)
 {
     const char* pWhitespace = " \t\r\n";
-    const size_t uFirst = s.find_first_not_of(pWhitespace);
+    const size_t uFirst = sText.find_first_not_of(pWhitespace);
     if (uFirst == std::string::npos)
         return std::string();
-    const size_t uLast = s.find_last_not_of(pWhitespace);
-    return s.substr(uFirst, uLast - uFirst + 1);
+    const size_t uLast = sText.find_last_not_of(pWhitespace);
+    return sText.substr(uFirst, uLast - uFirst + 1);
 }
 
 typedef std::map<std::string, std::string> KeyValueMap;
@@ -184,13 +184,41 @@ void getUInt64(const KeyValueMap& mValues, const char* pKey,
     uOut = static_cast<uint64_t>(ullValue);
 }
 
+void getPort(const KeyValueMap& mValues, const char* pKey,
+             uint16_t& uOut, bool& bOk)
+{
+    uint64_t uPort = 0;
+    getUInt64(mValues, pKey, uPort, bOk);
+    if (uPort > 65535) {
+        configMessage("config: %s %llu is out of range\n",
+                     pKey, static_cast<unsigned long long>(uPort));
+        bOk = false;
+    }
+    uOut = static_cast<uint16_t>(uPort);
+}
+
+// 0 or 1, read as an integer so a typo like "yes" is a load error rather
+// than a silent false.
+void getFlag(const KeyValueMap& mValues, const char* pKey,
+             bool& bOut, bool& bOk)
+{
+    uint64_t uFlag = 0;
+    getUInt64(mValues, pKey, uFlag, bOk);
+    if (uFlag > 1) {
+        configMessage("config: %s must be 0 or 1\n", pKey);
+        bOk = false;
+    }
+    bOut = (uFlag == 1);
+}
+
 // Round a duration in seconds to a whole number of samples.
 uint64_t toSamples(double dSeconds, uint64_t uSampleRateHz)
 {
     return static_cast<uint64_t>(dSeconds * static_cast<double>(uSampleRateHz) + 0.5);
 }
 
-bool validate(PbrConfig& oConfig)
+// Each value on its own: ranges, names, choices. Reports every problem.
+bool checkValues(const PbrConfig& oConfig)
 {
     bool bOk = true;
 
@@ -280,11 +308,38 @@ bool validate(PbrConfig& oConfig)
         configMessage("config: ECA_CD_DOPPLER_TAPS must be at most 3\n");
         bOk = false;
     }
+    return bOk;
+}
 
-    if (!bOk)
-        return false;
+// A window that must tile the CPI exactly: a partial trailing window would be
+// solved from fewer samples than the rest and quietly behave differently.
+bool dividesCpi(const char* pKey, uint64_t uWindow, uint64_t uCpiSamples)
+{
+    if (uWindow != 0 && uCpiSamples % uWindow == 0)
+        return true;
+    configMessage("config: %s (%llu samples) does not divide the %llu samples per CPI exactly\n",
+                  pKey, static_cast<unsigned long long>(uWindow),
+                  static_cast<unsigned long long>(uCpiSamples));
+    return false;
+}
 
-    // ---- derived values ---------------------------------------------------
+// Fewer samples than unknowns leaves the least-squares problem
+// underdetermined and the Gram matrix singular.
+bool exceedsTaps(const char* pKey, uint64_t uWindow, uint64_t uClutterTaps)
+{
+    if (uWindow > uClutterTaps)
+        return true;
+    configMessage("config: %s gives %llu samples, which is not more than the %llu "
+                  "clutter taps being solved for\n",
+                  pKey, static_cast<unsigned long long>(uWindow),
+                  static_cast<unsigned long long>(uClutterTaps));
+    return false;
+}
+
+// The derived sample counts, and the rules that tie the windows together.
+// Stops at the first failure, since later rules assume earlier ones held.
+bool deriveWindows(PbrConfig& oConfig)
+{
     oConfig.uCpiSamples     = toSamples(oConfig.dCpiSeconds,    oConfig.uSampleRateHz);
     oConfig.uHopSamples     = toSamples(oConfig.dHopSeconds,    oConfig.uSampleRateHz);
     oConfig.uBufferCapacity = toSamples(oConfig.dBufferSeconds, oConfig.uSampleRateHz);
@@ -347,14 +402,8 @@ bool validate(PbrConfig& oConfig)
                      static_cast<unsigned long long>(oConfig.uCpiSamples));
         return false;
     }
-    if (oConfig.uCpiSamples % oConfig.uEcaUpdateSamples != 0) {
-        configMessage(
-                     "config: ECA_UPDATE_INTERVAL_s (%llu samples) does not divide "
-                     "the %llu samples per CPI exactly\n",
-                     static_cast<unsigned long long>(oConfig.uEcaUpdateSamples),
-                     static_cast<unsigned long long>(oConfig.uCpiSamples));
+    if (!dividesCpi("ECA_UPDATE_INTERVAL_s", oConfig.uEcaUpdateSamples, oConfig.uCpiSamples))
         return false;
-    }
     // ECA-S shares one partial Gram per update window between the estimation
     // windows that span it, which needs the estimation window to be a whole
     // number of them (docs/design_decisions.md 1d.9). ECA-B satisfies this
@@ -367,20 +416,11 @@ bool validate(PbrConfig& oConfig)
                      static_cast<unsigned long long>(oConfig.uEcaEstimateSamples));
         return false;
     }
-    // Fewer samples than unknowns leaves the least-squares problem
-    // underdetermined and the Gram matrix singular.
-    if (oConfig.uEcaEstimateSamples <= oConfig.uClutterTaps) {
-        configMessage(
-                     "config: ECA_BATCH_LENGTH_s gives %llu samples, which is not "
-                     "more than the %llu clutter taps being solved for\n",
-                     static_cast<unsigned long long>(oConfig.uEcaEstimateSamples),
-                     static_cast<unsigned long long>(oConfig.uClutterTaps));
+    if (!exceedsTaps("ECA_BATCH_LENGTH_s", oConfig.uEcaEstimateSamples, oConfig.uClutterTaps))
         return false;
-    }
 
     // ECA-CD batch. The CPU backend's FFT is radix-2, so the length must be a
-    // power of two; it must also tile the CPI exactly for the same reason the
-    // ECA update window must.
+    // power of two; it must also tile the CPI.
     oConfig.uCdBatchSamples = toSamples(oConfig.dCdBatchSeconds, oConfig.uSampleRateHz);
     if (oConfig.uCdBatchSamples == 0 ||
         (oConfig.uCdBatchSamples & (oConfig.uCdBatchSamples - 1)) != 0) {
@@ -390,35 +430,15 @@ bool validate(PbrConfig& oConfig)
                      static_cast<unsigned long long>(oConfig.uCdBatchSamples));
         return false;
     }
-    if (oConfig.uCpiSamples % oConfig.uCdBatchSamples != 0) {
-        configMessage(
-                     "config: ECA_CD_BATCH_s (%llu samples) does not divide the "
-                     "%llu samples per CPI exactly\n",
-                     static_cast<unsigned long long>(oConfig.uCdBatchSamples),
-                     static_cast<unsigned long long>(oConfig.uCpiSamples));
+    if (!dividesCpi("ECA_CD_BATCH_s", oConfig.uCdBatchSamples, oConfig.uCpiSamples))
         return false;
-    }
 
     // CGLS window: the same two rules as the ECA update window, on its own key
     // so the two can be tuned apart.
     oConfig.uCglsBatchSamples = toSamples(oConfig.dCglsBatchSeconds, oConfig.uSampleRateHz);
-    if (oConfig.uCglsBatchSamples == 0 ||
-        oConfig.uCpiSamples % oConfig.uCglsBatchSamples != 0) {
-        configMessage(
-                     "config: CGLS_BATCH_s (%llu samples) does not divide the %llu "
-                     "samples per CPI exactly\n",
-                     static_cast<unsigned long long>(oConfig.uCglsBatchSamples),
-                     static_cast<unsigned long long>(oConfig.uCpiSamples));
+    if (!dividesCpi("CGLS_BATCH_s", oConfig.uCglsBatchSamples, oConfig.uCpiSamples) ||
+        !exceedsTaps("CGLS_BATCH_s", oConfig.uCglsBatchSamples, oConfig.uClutterTaps))
         return false;
-    }
-    if (oConfig.uCglsBatchSamples <= oConfig.uClutterTaps) {
-        configMessage(
-                     "config: CGLS_BATCH_s gives %llu samples, which is not more "
-                     "than the %llu clutter taps being solved for\n",
-                     static_cast<unsigned long long>(oConfig.uCglsBatchSamples),
-                     static_cast<unsigned long long>(oConfig.uClutterTaps));
-        return false;
-    }
 
     if (oConfig.uBufferCapacity < 2 * oConfig.uCpiSamples) {
         configMessage(
@@ -431,32 +451,17 @@ bool validate(PbrConfig& oConfig)
     return true;
 }
 
-} // namespace
+bool validate(PbrConfig& oConfig)
+{
+    return checkValues(oConfig) && deriveWindows(oConfig);
+}
 
-namespace {
-
-// Every key the loader knows, for refusing a live change that names one it
-// does not. Keep in step with configFromKeyValues() below.
-const char* const kKnownKeys[] = {
-    "SAMPLE_RATE_Hz", "REFERENCE_RECEIVER_NAME", "SURVEILLANCE_RECEIVER_NAME",
-    "UDP_PORT", "CONTROL_PORT", "VITA49_FULLSCALE", "BUFFER_LENGTH_s",
-    "CPI_LENGTH_s", "CPI_HOP_s", "N_RANGE_BINS", "N_CLUTTER_TAPS",
-    "DOPPLER_HALF_SPAN_Hz", "DOPPLER_DECIMATION", "MIN_CPI_COVERAGE",
-    "ARD_ALGORITHM", "DSI_ALGORITHM", "DSI_BACKEND", "DSI_MATH_PRECISION",
-    "ECA_BATCH_LENGTH_s", "ECA_UPDATE_INTERVAL_s", "ECA_DOPPLER_TAPS",
-    "ECA_DIAGONAL_LOADING", "ECA_CD_BATCH_s", "ECA_CD_DOPPLER_TAPS",
-    "ARD_SNAPSHOT_EVERY", "ARD_WRITE_FILES", "ARD_STREAM", "ARD_STREAM_DEST",
-    "CGLS_ITERATIONS", "CGLS_BATCH_s", "CGLS_PRIME",
-    "CFAR_PFA", "CFAR_GUARD_RANGE", "CFAR_GUARD_DOPPLER",
-    "CFAR_TRAIN_RANGE", "CFAR_TRAIN_DOPPLER",
-};
-
+// A key the loader knows, for refusing a live change that names one it does
+// not. pbrConfigToText writes every key, so it is the one list of them.
 bool isKnownKey(const std::string& sKey)
 {
-    for (size_t u = 0; u < sizeof(kKnownKeys) / sizeof(kKnownKeys[0]); ++u)
-        if (sKey == kKnownKeys[u])
-            return true;
-    return false;
+    const std::string sAll = "\n" + pbrConfigToText(PbrConfig());
+    return sAll.find("\n" + sKey + " = ") != std::string::npos;
 }
 
 // From parsed key/values to a validated config with its derived fields.
@@ -470,24 +475,8 @@ bool configFromKeyValues(const KeyValueMap& mValues, const char* pLabel, PbrConf
     getString(mValues, "REFERENCE_RECEIVER_NAME",    oConfig.sReferenceName,     bOk);
     getString(mValues, "SURVEILLANCE_RECEIVER_NAME", oConfig.sSurveillanceName,  bOk);
 
-    uint64_t uPort = 0;
-    getUInt64(mValues, "UDP_PORT", uPort, bOk);
-    if (uPort > 65535) {
-        configMessage("config: UDP_PORT %llu is out of range\n",
-                     static_cast<unsigned long long>(uPort));
-        bOk = false;
-    }
-    oConfig.uUdpPort = static_cast<uint16_t>(uPort);
-
-    // The chain's control port for live changes; 0 disables it.
-    uint64_t uControl = 0;
-    getUInt64(mValues, "CONTROL_PORT", uControl, bOk);
-    if (uControl > 65535) {
-        configMessage("config: CONTROL_PORT %llu is out of range\n",
-                     static_cast<unsigned long long>(uControl));
-        bOk = false;
-    }
-    oConfig.uControlPort = static_cast<uint16_t>(uControl);
+    getPort(mValues, "UDP_PORT",     oConfig.uUdpPort,     bOk);
+    getPort(mValues, "CONTROL_PORT", oConfig.uControlPort, bOk);   // 0 = off
 
     getDouble(mValues, "VITA49_FULLSCALE",     oConfig.dFullScale,         bOk);
     getDouble(mValues, "BUFFER_LENGTH_s",      oConfig.dBufferSeconds,     bOk);
@@ -513,20 +502,11 @@ bool configFromKeyValues(const KeyValueMap& mValues, const char* pLabel, PbrConf
     getUInt64(mValues, "ECA_CD_DOPPLER_TAPS",  oConfig.uCdDopplerTaps,     bOk);
     getUInt64(mValues, "ARD_SNAPSHOT_EVERY",   oConfig.uArdSnapshotEvery,  bOk);
 
-    // The two ARD outputs, 0 or 1 each, and the stream destination as
-    // host:port. Read even when the stream is off, so a bad line is caught
-    // before the day it is turned on.
-    uint64_t uWriteFiles = 0;
-    uint64_t uStream     = 0;
-    getUInt64(mValues, "ARD_WRITE_FILES", uWriteFiles, bOk);
-    getUInt64(mValues, "ARD_STREAM",      uStream,     bOk);
-    if (uWriteFiles > 1 || uStream > 1) {
-        configMessage("config: ARD_WRITE_FILES and ARD_STREAM must be 0 or 1\n");
-        bOk = false;
-    }
-    oConfig.bArdWriteFiles = (uWriteFiles == 1);
-    oConfig.bArdStream     = (uStream == 1);
+    getFlag(mValues, "ARD_WRITE_FILES", oConfig.bArdWriteFiles, bOk);
+    getFlag(mValues, "ARD_STREAM",      oConfig.bArdStream,     bOk);
 
+    // HOST:PORT. Read even when the stream is off, so a bad line is caught
+    // before the day it is turned on.
     std::string sDest;
     getString(mValues, "ARD_STREAM_DEST", sDest, bOk);
     if (!sDest.empty()) {
@@ -544,16 +524,7 @@ bool configFromKeyValues(const KeyValueMap& mValues, const char* pLabel, PbrConf
     }
     getUInt64(mValues, "CGLS_ITERATIONS",      oConfig.uCglsIterations,    bOk);
     getDouble(mValues, "CGLS_BATCH_s",         oConfig.dCglsBatchSeconds,  bOk);
-
-    // 0 or 1, read as an integer so a typo like "yes" is a load error rather
-    // than a silent false.
-    uint64_t uPrime = 0;
-    getUInt64(mValues, "CGLS_PRIME", uPrime, bOk);
-    if (uPrime > 1) {
-        configMessage("config: CGLS_PRIME must be 0 or 1\n");
-        bOk = false;
-    }
-    oConfig.bCglsPrime = (uPrime == 1);
+    getFlag(mValues,   "CGLS_PRIME",           oConfig.bCglsPrime,         bOk);
 
     getDouble(mValues, "CFAR_PFA",             oConfig.dCfarPfa,           bOk);
     getUInt64(mValues, "CFAR_GUARD_RANGE",     oConfig.uCfarGuardRange,    bOk);
@@ -579,15 +550,21 @@ std::string secondsText(uint64_t uSamples, uint64_t uSampleRateHz)
     return ach;
 }
 
-uint64_t gcd64(uint64_t a, uint64_t b)
+uint64_t gcd64(uint64_t uA, uint64_t uB)
 {
-    while (b != 0) { const uint64_t t = a % b; a = b; b = t; }
-    return a;
+    while (uB != 0) { const uint64_t uRem = uA % uB; uA = uB; uB = uRem; }
+    return uA;
 }
 
-uint64_t lcm64(uint64_t a, uint64_t b)
+uint64_t lcm64(uint64_t uA, uint64_t uB)
 {
-    return (a / gcd64(a, b)) * b;
+    return (uA / gcd64(uA, uB)) * uB;
+}
+
+// |uA - uB| for unsigned values.
+uint64_t distance(uint64_t uA, uint64_t uB)
+{
+    return (uA > uB) ? uA - uB : uB - uA;
 }
 
 // The power of two nearest to uTarget, at least 2.
@@ -595,9 +572,7 @@ uint64_t nearestPowerOfTwo(uint64_t uTarget)
 {
     uint64_t uBest = 2;
     for (uint64_t u = 2; u != 0 && u <= (1ULL << 40); u <<= 1) {
-        const uint64_t dBest = (uBest > uTarget) ? uBest - uTarget : uTarget - uBest;
-        const uint64_t dThis = (u > uTarget) ? u - uTarget : uTarget - u;
-        if (dThis <= dBest)
+        if (distance(u, uTarget) <= distance(uBest, uTarget))
             uBest = u;
         if (u > uTarget)
             break;
@@ -609,18 +584,14 @@ uint64_t nearestPowerOfTwo(uint64_t uTarget)
 uint64_t nearestDivisor(uint64_t uOf, uint64_t uTarget, uint64_t uMin)
 {
     uint64_t uBest = uOf;
-    for (uint64_t d = 1; d * d <= uOf; ++d) {
-        if (uOf % d != 0)
+    for (uint64_t uDivisor = 1; uDivisor * uDivisor <= uOf; ++uDivisor) {
+        if (uOf % uDivisor != 0)
             continue;
-        const uint64_t aCandidates[2] = { d, uOf / d };
+        const uint64_t auCandidates[2] = { uDivisor, uOf / uDivisor };
         for (int i = 0; i < 2; ++i) {
-            const uint64_t c = aCandidates[i];
-            if (c < uMin)
-                continue;
-            const uint64_t dBest = (uBest > uTarget) ? uBest - uTarget : uTarget - uBest;
-            const uint64_t dThis = (c > uTarget) ? c - uTarget : uTarget - c;
-            if (dThis < dBest)
-                uBest = c;
+            const uint64_t uCandidate = auCandidates[i];
+            if (uCandidate >= uMin && distance(uCandidate, uTarget) < distance(uBest, uTarget))
+                uBest = uCandidate;
         }
     }
     return uBest;
@@ -660,7 +631,7 @@ bool loadPbrConfigFromText(const std::string& sText, PbrConfig& oConfig, std::st
     return bOk;
 }
 
-std::string pbrConfigToText(const PbrConfig& o)
+std::string pbrConfigToText(const PbrConfig& oConfig)
 {
     char ach[8192];
     std::snprintf(ach, sizeof(ach),
@@ -700,23 +671,23 @@ std::string pbrConfigToText(const PbrConfig& o)
         "CFAR_GUARD_DOPPLER = %llu\n"
         "CFAR_TRAIN_RANGE = %llu\n"
         "CFAR_TRAIN_DOPPLER = %llu\n",
-        (unsigned long long)o.uSampleRateHz,
-        o.sReferenceName.c_str(), o.sSurveillanceName.c_str(),
-        (unsigned)o.uUdpPort, (unsigned)o.uControlPort,
-        o.dFullScale, o.dBufferSeconds, o.dCpiSeconds, o.dHopSeconds,
-        (unsigned long long)o.uRangeBins, (unsigned long long)o.uClutterTaps,
-        o.dDopplerHalfSpanHz, (unsigned long long)o.uDopplerDecimation,
-        o.dMinCpiCoverage, o.sArdAlgorithm.c_str(),
-        o.sDsiAlgorithm.c_str(), o.sDsiBackend.c_str(), o.sDsiMathPrecision.c_str(),
-        o.dEcaBatchSeconds, o.dEcaUpdateSeconds, (unsigned long long)o.uEcaDopplerTaps,
-        o.dEcaDiagLoading, o.dCdBatchSeconds, (unsigned long long)o.uCdDopplerTaps,
-        (unsigned long long)o.uArdSnapshotEvery,
-        o.bArdWriteFiles ? 1 : 0, o.bArdStream ? 1 : 0,
-        o.sArdStreamHost.c_str(), (unsigned)o.uArdStreamPort,
-        (unsigned long long)o.uCglsIterations, o.dCglsBatchSeconds, o.bCglsPrime ? 1 : 0,
-        o.dCfarPfa,
-        (unsigned long long)o.uCfarGuardRange, (unsigned long long)o.uCfarGuardDoppler,
-        (unsigned long long)o.uCfarTrainRange, (unsigned long long)o.uCfarTrainDoppler);
+        (unsigned long long)oConfig.uSampleRateHz,
+        oConfig.sReferenceName.c_str(), oConfig.sSurveillanceName.c_str(),
+        (unsigned)oConfig.uUdpPort, (unsigned)oConfig.uControlPort,
+        oConfig.dFullScale, oConfig.dBufferSeconds, oConfig.dCpiSeconds, oConfig.dHopSeconds,
+        (unsigned long long)oConfig.uRangeBins, (unsigned long long)oConfig.uClutterTaps,
+        oConfig.dDopplerHalfSpanHz, (unsigned long long)oConfig.uDopplerDecimation,
+        oConfig.dMinCpiCoverage, oConfig.sArdAlgorithm.c_str(),
+        oConfig.sDsiAlgorithm.c_str(), oConfig.sDsiBackend.c_str(), oConfig.sDsiMathPrecision.c_str(),
+        oConfig.dEcaBatchSeconds, oConfig.dEcaUpdateSeconds, (unsigned long long)oConfig.uEcaDopplerTaps,
+        oConfig.dEcaDiagLoading, oConfig.dCdBatchSeconds, (unsigned long long)oConfig.uCdDopplerTaps,
+        (unsigned long long)oConfig.uArdSnapshotEvery,
+        oConfig.bArdWriteFiles ? 1 : 0, oConfig.bArdStream ? 1 : 0,
+        oConfig.sArdStreamHost.c_str(), (unsigned)oConfig.uArdStreamPort,
+        (unsigned long long)oConfig.uCglsIterations, oConfig.dCglsBatchSeconds, oConfig.bCglsPrime ? 1 : 0,
+        oConfig.dCfarPfa,
+        (unsigned long long)oConfig.uCfarGuardRange, (unsigned long long)oConfig.uCfarGuardDoppler,
+        (unsigned long long)oConfig.uCfarTrainRange, (unsigned long long)oConfig.uCfarTrainDoppler);
     return ach;
 }
 

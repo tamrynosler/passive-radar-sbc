@@ -47,8 +47,6 @@ using namespace pbr;
 
 namespace {
 
-const char* const kDefaultConfigPath = "config/prb.conf";
-
 struct Options {
     std::string sCpiPath;
     std::string sGoldenPath;

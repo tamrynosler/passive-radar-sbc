@@ -90,7 +90,6 @@ namespace {
 
 const size_t   kDatagramCapacity = 2048;
 const uint64_t kMaxDetections    = 8192;
-const char* const kDefaultConfigPath = "config/prb.conf";
 
 // Bins in the before-processing spectrum streamed with each frame: 512
 // int16 values fit one 1400-byte datagram, and 400 Hz per bin at 204800 Hz

@@ -24,7 +24,7 @@ using namespace pbr;
 
 int main(int argc, char* argv[])
 {
-    std::string sCleaned, sConfig = "config/prb.conf", sBackend, sCsv;
+    std::string sCleaned, sConfig = kDefaultConfigPath, sBackend, sCsv;
     uint64_t uIters = 20;
 
     for (int i = 1; i < argc; ++i) {

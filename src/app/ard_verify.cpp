@@ -39,7 +39,6 @@ using namespace pbr;
 
 namespace {
 
-const char* const kDefaultConfigPath = "config/prb.conf";
 const uint64_t    kMaxDetections     = 8192;
 
 struct Options {

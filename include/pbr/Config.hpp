@@ -6,6 +6,10 @@
 
 namespace pbr {
 
+// The config every tool reads when not given --config: the USRP setup.
+// config/fers.conf is the FERS scenario.
+const char* const kDefaultConfigPath = "config/prb.conf";
+
 // Parameters for the whole processing chain, loaded from a .conf file.
 //
 // The file format is the legacy Commensal Radar ProcServer convention:
