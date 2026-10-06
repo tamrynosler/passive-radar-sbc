@@ -110,27 +110,24 @@ VRT profile).
 Raw datagram captures for replaying a FERS stream without FERS. Format is in
 `include/pbr/CaptureFile.hpp`: a 16-byte header then length-prefixed records.
 
-Record one:
+Record one with `pbr_run`, which can also freeze the first CPI it
+extracts. Start it before `fers-cli`:
 
 ```
-./bin/ingest_probe --seconds 5 --capture data/fers_capture.pbrcap
+./bin/pbr_run --live --config config/fers.conf --seconds 5 \
+    --capture data/S0_clean/capture.pbrcap --dump-cpi data/S0_clean/cpi_0000.bin
 # then start fers-cli as above
 ```
 
-Replay it, and optionally dump decoded fields for the MATLAB cross-check:
-
-```
-./bin/ingest_replay --file data/fers_capture.pbrcap --csv data/cpp_decode.csv
-```
+Replay it with `pbr_run --file data/S0_clean/capture.pbrcap --config config/fers.conf`.
 
 About 1.7 MB per second of capture. A 3 s capture is ample for regression use.
 
-**Record the fullscale a capture was made with.** Both tools take their
-parameters from `config/prb.conf`, which now specifies
-`VITA49_FULLSCALE = 0.0022`. A capture recorded at a different value needs
-`--fullscale` to override it, or every sample comes out scaled wrongly with no
-indication that anything is amiss. The capture currently in this directory was
-recorded at 0.005, so it needs `--fullscale 0.005`.
+**Record the fullscale a capture was made with.** `pbr_run` descales with
+`VITA49_FULLSCALE` from the config it is given, so the config must carry the
+value the capture was sent with, or every sample comes out scaled wrongly with
+no indication that anything is amiss. `config/fers.conf` is set to 0.005, the
+value the capture in `data/S0_clean/` was recorded at.
 
 ## TODO
 

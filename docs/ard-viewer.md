@@ -42,8 +42,8 @@ the chain.
                               `make host-test`.
     Makefile                  `make view`, `make host-view`, host-test hook.
 
-`scripts/` is already where Python tooling lives (`replay_udp.py`). This is
-not the `src/display/` stage — that remains reserved for a native viewer.
+(This plan put the viewer in `scripts/`; `docs/ard-stream-design.md` later
+moved it to `src/display/` as the C++ `ard_view`.)
 
 ## Board constraints the code must respect
 

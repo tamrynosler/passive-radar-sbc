@@ -480,8 +480,9 @@ route remains unimplemented.
 ### 1d.8 Benchmark isolation
 
 Timing the canceller inside the live pipeline would measure the socket, the
-packet decode and the scheduler along with it. Instead `ingest_replay
---dump-cpi` freezes one extracted CPI to a self-describing file, and
+packet decode and the scheduler along with it. Instead `pbr_run --dump-cpi`
+(originally `ingest_replay --dump-cpi`, archived 2026-10-06) freezes one
+extracted CPI to a self-describing file, and
 `bench/dsi_bench` loads it once, calls `init()` once, and times only `cancel()`.
 
 Consequences: every algorithm and every run sees byte-identical input, so the

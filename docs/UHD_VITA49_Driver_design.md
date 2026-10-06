@@ -553,8 +553,8 @@ Then per `recv`: for each channel, if `uSampleIndex − uLastContextIndex[ch]
 packet. This puts heartbeats at 1 Hz per stream, sample-locked, like FERS.
 
 Data for both channels is sent back-to-back from the same `recv`, ref first.
-The replay script (`scripts/replay_udp.py`) already assumes this
-interleaving when pacing.
+The replay script (`scripts/replay_udp.py`, removed 2026-10-06) assumed
+this interleaving when pacing.
 
 ### 6.4 `UsrpSource` (UHD 3.10 API, the only UHD-touching code)
 
@@ -670,7 +670,7 @@ are ignored by every other tool, so adding them is safe.
 ### 6.7 `SynthSource` (no hardware)
 
 Same `receive()` shape as `UsrpSource`. Produces, at the real rate (sleep
-until the deadline like `replay_udp.py`), two channels:
+until the deadline), two channels:
 
 - ref: a strong tone at +1 kHz plus white noise, amplitude ~10000 codes
 - sur: the same tone delayed by `d` samples and attenuated 30 dB, plus a
@@ -879,8 +879,8 @@ Repo:
 - `include/pbr/Vita49Packet.hpp`, `src/ingest/Vita49Packet.cpp` — the parser; the writer is its mirror
 - `include/pbr/ChannelIngest.hpp`, `src/ingest/ChannelIngest.cpp` — role resolution, `absoluteIndex`, packet-count tracking, sample-rate check
 - `src/ingest/Config.cpp` — the chain constraints (§7)
-- `scripts/replay_udp.py` — pacing model and `.pbrcap` reader
-- `data/fers_capture.pbrcap` — real FERS datagrams for byte-compare tests
+- `data/S0_clean/capture.pbrcap` — real FERS datagrams for byte-compare tests
+  (`pbr_run --capture` records more)
 - `docs/design_decisions.md` §1.1, §1.5, §1c, §5 — index-addressed buffer, zero-fill, CPI extraction, live results
 - `docs/legacy-audit.md` — §4.1–4.3 on PXGF and `UCTUSRP.conf` (note: out of date about `UHDToPXGF/` and `CudaProcServer/` being empty)
 

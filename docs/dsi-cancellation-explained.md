@@ -115,7 +115,8 @@ a physical correctness check the golden file cannot provide.
 
 ### Starting up — `bench/dsi_bench.cpp`
 
-1. Parse the command line. `--cpi data/cpi_0000.bin` is required.
+1. Parse the command line. `--cpi data/S0_clean/cpi_0000.bin` is required
+   (written by `pbr_run --dump-cpi`).
 2. `loadPbrConfig()` reads `config/prb.conf`. Any missing key is fatal — no
    silent defaults.
 3. If `--algorithm` or `--backend` was given, overwrite those two config
@@ -171,8 +172,8 @@ Two details worth pointing at:
 - **The accumulator is `double`** while the samples are `float`. We are
   adding up 204,800 products; in single precision, rounding errors pile up
   and eat about four decimal digits — which alone would fail the 1e-4
-  agreement with MATLAB. The GPU version has to confront this properly,
-  because cuBLAS accumulates in whatever precision it is handed.
+  agreement with MATLAB. The GPU has no fast double at all; `EcaGpu.cu`
+  explains why it gets away with float.
 
 Then a much shorter loop builds `v`: 120 sums instead of 7,260.
 
@@ -184,7 +185,7 @@ the reference. Same arithmetic, 1700× less memory.
 
 ### Step 2 — `solveWeights()`
 
-First, **diagonal loading**. The diagonal of `G` holds the reference signal's
+First, **diagonal loading** (`loadingLambda()`). The diagonal of `G` holds the reference signal's
 energy under each delay, so its average is the natural scale of the whole
 matrix. We add a tiny fraction of that (1e-6) to each diagonal entry. This is
 insurance: if the matrix is nearly singular, the solution can blow up into
@@ -227,7 +228,8 @@ would reach before the start of the CPI contribute nothing.
 ### After all 40 windows
 
 Sum the power of the original surveillance signal, sum the power of the
-output, and report the ratio in decibels.
+output, and report the ratio in decibels (`hostSuppressionDb()`, shared by
+the three CPU cancellers).
 
 ### Where the time goes
 

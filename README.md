@@ -12,7 +12,7 @@ frames are multicast to a small C++ viewer that serves a browser page, from
 which the chain's parameters can be changed while it runs.
 
 
-## Status (2026-09-29)
+## Status (2026-10-06)
 
 - [x] Jetson Nano bring-up, CUDA 10.2, remote build workflow (edit on the
       Mac, build and run on the Jetson over SSH; `make help`)
@@ -31,9 +31,11 @@ which the chain's parameters can be changed while it runs.
       boundaries, logged; sample-rate mismatch adapts automatically
 - [x] **Full chain in real time on the Jetson from the USRP2**: 25 ms per
       1.024 s CPI with clocks pinned (ECA-CD), 80 to 230 ms unpinned
-- [ ] Antennas connected, spectrum orientation checked, first aircraft  ← next
+- [ ] Code cleanup: simple, readable, behaviour-preserving  ← in progress
+- [ ] Tests redesigned around FERS streaming to MATLAB, the laptop or the Jetson
 - [ ] Algorithm benchmarking study (suppression vs latency), the thesis
-      contribution; MATLAB goldens to be regenerated for the 200 kHz config
+      contribution
+- [ ] Antennas connected, spectrum orientation checked, first aircraft
 
 > Timing figures with clocks pinned come from `make run`, which needs an
 > interactive sudo password; unpinned numbers are provisional.
@@ -51,22 +53,21 @@ passive-radar-sbc/
 │                         (`make help` lists every target)
 ├── README.md
 ├── .gitignore
-├── bench/                standalone benchmarking harnesses
-│   └── cufft_bench.cu    cuFFT timing + memory-ceiling tool
+├── bench/                timing harnesses: dsi_bench, ard_bench, cufft_bench
 ├── include/pbr/          public headers for the processing library (flat)
 ├── src/
 │   ├── ingest/           VITA 49.2 UDP receiver, circular buffer, config
-│   ├── dsi/              DSI cancellation: ECA-B, ECA-S, ECA-CD, CGLS
+│   ├── dsi/              DSI cancellation: ECA-m, ECA-B, ECA-S, ECA-CD, CGLS
 │   ├── ard/              CAF / range–Doppler map, 2D CA-CFAR, map output
 │   ├── display/          HttpServer + ard_viewer.html, served by ard_view
-│   └── app/              pbr_run, uhd_to_vita49, ard_view, probes, verifiers
-├── tests/                unit + integration tests, MATLAB-vs-CUDA validation
+│   └── app/              pbr_run, uhd_to_vita49, ard_view, dsi_verify, ard_verify
+├── tests/                unit tests, one executable per file
 ├── matlab/               the reference implementation (validation ground truth)
 ├── config/               prb.conf (USRP, 200 kHz) and fers.conf (FERS, 204800 Hz)
 ├── third_party/          approved external headers (currently none)
 ├── scripts/              Jetson run scripts, clock pinning, CGLS tuning tools
-├── docs/                 architecture notes, benchmarking methodology, results
-└── cmake/                helper modules
+├── scenarios/            FERS scenarios (.fersxml) and how each capture was made
+└── docs/                 architecture notes, benchmarking methodology, results
 ```
 
 `src/` is grouped by pipeline stage, not by library: cuFFT and cuBLAS calls
@@ -76,14 +77,13 @@ implements them, so every include reads `#include "pbr/<Name>.hpp"`.
 
 Large data (captured IQ, FERS output, `.mat` files, benchmark CSVs, tegrastats
 logs) is **not** version-controlled — it lives on the microSD card at `/data`
-and is regenerated from the FERS scenarios in `config/`. See `.gitignore`.
+and is regenerated from the FERS scenarios in `scenarios/`. See `.gitignore`.
 
 ## Requirements
 
-- Jetson Nano, L4T R32.7.x, CUDA 10.2 (cuFFT, cuBLAS; cuSOLVER on Orin)
-- CMake >= 3.10 — the stock version from L4T apt works. The CMakeLists uses
-  explicit `-gencode arch=compute_53,code=sm_53` below CMake 3.18 and the modern
-  `CMAKE_CUDA_ARCHITECTURES` path at/above it, so a newer CMake is optional.
+- Jetson Nano, L4T R32.7.x, CUDA 10.2 (cuFFT, cuBLAS, cuSOLVER)
+- CMake 3.10, the stock version from L4T apt. The CMakeLists passes
+  `-gencode arch=compute_53,code=sm_53` explicitly.
 - A C++14-capable host compiler (g++ 7.5 shipped with L4T is fine). CUDA 10.2
   device code is limited to C++14; do not use C++17 features in `.cu` files.
 
@@ -237,20 +237,20 @@ to `src/dsi/`.
 Find the memory ceiling (single long transform, doubling N until allocation fails):
 
 ```bash
-./cufft_bench --sweep-size --min-size 1024 --max-size 268435456 --batch 1 --csv > size_sweep.csv
+./build/cufft_bench --sweep-size --min-size 1024 --max-size 268435456 --batch 1 --csv > size_sweep.csv
 ```
 
 Find the batch ceiling at a fixed Doppler length:
 
 ```bash
-./cufft_bench --sweep-batch --size 128 --max-batch 4194304 --csv > batch_sweep.csv
+./build/cufft_bench --sweep-batch --size 128 --max-batch 4194304 --csv > batch_sweep.csv
 ```
 
 Characterise the two plan configs against a real-time budget:
 
 ```bash
-./cufft_bench --size 204800 --batch 1    --iters 200 --budget-ms 1000   # full 1 s CPI
-./cufft_bench --size 128    --batch 1600 --iters 200 --budget-ms 5      # batched Doppler
+./build/cufft_bench --size 204800 --batch 1    --iters 200 --budget-ms 1000   # full 1 s CPI
+./build/cufft_bench --size 128    --batch 1600 --iters 200 --budget-ms 5      # batched Doppler
 ```
 
 Under controlled clocks/fan with a tegrastats trace (for the methodology chapter):

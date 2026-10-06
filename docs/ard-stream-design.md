@@ -267,7 +267,7 @@ count is added. Parsing, colour scale, axes, detections, polling: unchanged.
 | move | `scripts/ard_viewer.html` → `src/display/ard_viewer.html` |
 | add | `include/pbr/ArdStream.hpp`, `src/ard/ArdStream.cpp`, `include/pbr/HttpServer.hpp`, `src/display/HttpServer.cpp`, `src/app/ard_view.cpp`, `tests/test_ard_stream.cpp` |
 | change | `ArdFile.hpp/.cpp`, `pbr_run.cpp`, `Config.hpp/.cpp`, `UdpReceiver` (blocking flag), `config/prb.conf`, `config/fers.conf`, `tests/test_config.cpp`, `Makefile` (`view`, `host-view`, host lists), `docs/ard-viewer.md` (pointer to this note) |
-| keep | `scripts/replay_udp.py` (a test tool, runs for one replay and exits) |
+| keep | `scripts/replay_udp.py` (a test tool; removed 2026-10-06 with the other test scripts) |
 
 `make view` becomes: stop any old `ard_view` on the board, start
 `./build/ard_view --group 239.192.0.2`, forward 8080. `make host-view`
