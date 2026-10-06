@@ -242,21 +242,26 @@ double EcaCpu::loadingLambda() const
     //
     // ECA-m instead adds the MATLAB reference's absolute 1e-3, because
     // reproducing that chain bit for bit is its entire job.
+    //
+    // The FP32 mode computes lambda exactly as addLoadingKernel does, in
+    // float throughout. A lambda that differed would show up as a
+    // disagreement that had nothing to do with the code being compared.
+    if (moParams.bFloat32Math) {
+        const float fLoading = static_cast<float>(moParams.dDiagonalLoading);
+        if (moParams.bAbsoluteLoading)
+            return fLoading;
+        if (!(moParams.dDiagonalLoading > 0.0))
+            return 0.0;
+        float fTrace = 0.0f;
+        for (uint64_t i = 0; i < uK; ++i)
+            fTrace += static_cast<float>(mvcGram[static_cast<size_t>(i * uK + i)].real());
+        return fLoading * (fTrace / static_cast<float>(uK));
+    }
+
     if (moParams.bAbsoluteLoading)
         return moParams.dDiagonalLoading;
     if (!(moParams.dDiagonalLoading > 0.0))
         return 0.0;
-
-    // Summed in the working precision, so the FP32 mode computes the same
-    // lambda the GPU kernel does. A lambda that differed would show up as
-    // a disagreement that had nothing to do with the code being compared.
-    if (moParams.bFloat32Math) {
-        float fTrace = 0.0f;
-        for (uint64_t i = 0; i < uK; ++i)
-            fTrace += static_cast<float>(mvcGram[static_cast<size_t>(i * uK + i)].real());
-        return moParams.dDiagonalLoading *
-               (static_cast<double>(fTrace) / static_cast<double>(uK));
-    }
     double dTrace = 0.0;
     for (uint64_t i = 0; i < uK; ++i)
         dTrace += mvcGram[static_cast<size_t>(i * uK + i)].real();

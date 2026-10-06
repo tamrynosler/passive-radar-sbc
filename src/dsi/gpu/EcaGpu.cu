@@ -523,6 +523,10 @@ bool EcaGpu::shareChunks()
 
 bool EcaGpu::addLoading()
 {
+    // Relative loading of zero adds nothing. Skipped, as the CPU skips it, so
+    // a non-finite trace cannot turn "no loading" into NaN.
+    if (!moParams.bAbsoluteLoading && !(moParams.dDiagonalLoading > 0.0))
+        return true;
     addLoadingKernel<<<blocksFor(muWindows, kBlock), kBlock>>>(
         md_cGram, static_cast<uint32_t>(muTaps), static_cast<uint32_t>(muWindows),
         static_cast<float>(moParams.dDiagonalLoading), moParams.bAbsoluteLoading);

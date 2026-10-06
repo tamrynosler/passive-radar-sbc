@@ -294,8 +294,10 @@ uint64_t CglsCpu::solveWindowT(const ComplexF* pcRef, const ComplexF* pcSur, uin
 
         // s = R^H r;  beta = |s|^2 / gamma;  p = s + beta p
         adjointT<Acc>(pcRef, mvcR.data(), uK, uStart, uEnd, mvcS.data());
+        // gamma can only be zero here after an underflow, since a zero
+        // gradient stops the window first; the guard matches the GPU's.
         const Acc tGammaNew = normSqT<Acc>(mvcS.data(), uK);
-        const Acc tBeta     = tGammaNew / tGamma;
+        const Acc tBeta     = (tGamma > Acc(0)) ? tGammaNew / tGamma : Acc(0);
         tGamma = tGammaNew;
         newDirectionT<Acc>(tBeta, mvcS.data(), mvcP.data(), uK);
 

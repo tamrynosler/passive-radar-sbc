@@ -49,6 +49,7 @@
 #include "GpuCommon.cuh"
 
 #include <climits>
+#include <vector>
 
 namespace pbr {
 
@@ -61,16 +62,21 @@ namespace {
 //
 // Re(p^H s) was left in d_fPs by the adjoint kernel. On a refresh iteration
 // the residual update is skipped and a convolveKernel recomputes r from x.
+// A window that has stopped (see below) is left alone; each step taken is
+// counted in d_uSteps.
 // ---------------------------------------------------------------------------
 __global__ void stepKernel(const cufftComplex* d_cQ, cufftComplex* d_cR,
                            const cufftComplex* d_cP, cufftComplex* d_cX,
-                           const float* d_fPs,
+                           const float* d_fPs, bool* d_bStopped, uint32_t* d_uSteps,
                            uint32_t uTaps, uint32_t uWindow, bool bUpdateResidual)
 {
     __shared__ float afShared[kBlock];
 
     const uint32_t w     = blockIdx.x;
     const uint32_t uBase = w * uWindow;
+
+    if (d_bStopped[w])   // the same for every thread of the block
+        return;
 
     float fPartial = 0.0f;
     for (uint32_t n = threadIdx.x; n < uWindow; n += kBlock) {
@@ -79,9 +85,16 @@ __global__ void stepKernel(const cufftComplex* d_cQ, cufftComplex* d_cR,
     }
     const float fDelta = blockSum(fPartial, afShared);
 
-    // A zero delta means p is zero and there is nothing left to fit; a zero
-    // step leaves x and r as they are, which is the right answer.
-    const float fAlpha = (fDelta > 0.0f) ? d_fPs[w] / fDelta : 0.0f;
+    // A zero delta means p is zero: the residual is already orthogonal to
+    // every column and there is nothing left to fit. Stop this window for the
+    // rest of the CPI, exactly where the CPU stops it, so x keeps its value.
+    // fDelta is the same in every thread, so the whole block returns.
+    if (!(fDelta > 0.0f)) {
+        if (threadIdx.x == 0)
+            d_bStopped[w] = true;
+        return;
+    }
+    const float fAlpha = d_fPs[w] / fDelta;
 
     for (uint32_t k = threadIdx.x; k < uTaps; k += kBlock) {
         const size_t u = static_cast<size_t>(w) * uTaps + k;
@@ -94,6 +107,8 @@ __global__ void stepKernel(const cufftComplex* d_cQ, cufftComplex* d_cR,
             d_cR[uBase + n].y -= fAlpha * d_cQ[uBase + n].y;
         }
     }
+    if (threadIdx.x == 0)
+        ++d_uSteps[w];
 }
 
 // ---------------------------------------------------------------------------
@@ -105,15 +120,18 @@ __global__ void stepKernel(const cufftComplex* d_cQ, cufftComplex* d_cR,
 // Thread k sums conj(r[n-k]) r_res[n] over the window: neighbouring threads
 // read neighbouring reference samples and share the residual sample, so the
 // reads coalesce. With bInit set this is the start of a window: p = s and
-// beta plays no part.
+// beta plays no part. A stopped window is left alone.
 // ---------------------------------------------------------------------------
 __global__ void adjointKernel(const cufftComplex* d_cRef, const cufftComplex* d_cR,
                               cufftComplex* d_cP, float* d_fGamma, float* d_fPs,
+                              const bool* d_bStopped,
                               uint32_t uTaps, uint32_t uWindow, bool bInit)
 {
     __shared__ float afShared[kBlock];
 
     const uint32_t w     = blockIdx.x;
+    if (d_bStopped[w])   // the same for every thread of the block
+        return;
     const uint32_t uBase = w * uWindow;
     const uint32_t k     = threadIdx.x;
     const bool     bTap  = (k < uTaps);
@@ -133,6 +151,8 @@ __global__ void adjointKernel(const cufftComplex* d_cRef, const cufftComplex* d_
     }
 
     const float fGammaNew = blockSum(bTap ? (cS.x * cS.x + cS.y * cS.y) : 0.0f, afShared);
+    // gamma can only be zero here after an underflow, since a zero gradient
+    // stops the window first; the guard matches the CPU's.
     const float fGammaOld = d_fGamma[w];
     const float fBeta = (bInit || !(fGammaOld > 0.0f)) ? 0.0f : fGammaNew / fGammaOld;
 
@@ -190,6 +210,8 @@ private:
     cufftComplex*   md_cP           = nullptr;   // windows x K, search direction
     float*          md_fGamma       = nullptr;   // per window, |s|^2
     float*          md_fPs          = nullptr;   // per window, Re(p^H s)
+    bool*           md_bStopped     = nullptr;   // per window, nothing left to fit
+    uint32_t*       md_uSteps       = nullptr;   // per window, steps taken this CPI
 
     bool            mbHaveWeights   = false;
     bool            mbReady         = false;
@@ -210,11 +232,15 @@ void CglsGpu::release()
     cudaFree(md_cP);
     cudaFree(md_fGamma);
     cudaFree(md_fPs);
+    cudaFree(md_bStopped);
+    cudaFree(md_uSteps);
     if (mhCublas)
         cublasDestroy(mhCublas);
 
     md_cRef = md_cSur = md_cOut = md_cR = md_cQ = md_cX = md_cP = nullptr;
     md_fGamma = md_fPs = nullptr;
+    md_bStopped = nullptr;
+    md_uSteps   = nullptr;
     mhCublas = nullptr;
     mbReady  = false;
 }
@@ -258,6 +284,8 @@ bool CglsGpu::setUp(const DSIParams& oParams)
     CUDA_CHECK(cudaMalloc(&md_cP,     uWBytes));
     CUDA_CHECK(cudaMalloc(&md_fGamma, static_cast<size_t>(muWindows) * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&md_fPs,    static_cast<size_t>(muWindows) * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&md_bStopped, static_cast<size_t>(muWindows) * sizeof(bool)));
+    CUDA_CHECK(cudaMalloc(&md_uSteps,   static_cast<size_t>(muWindows) * sizeof(uint32_t)));
 
     mbReady = true;
     return true;
@@ -270,11 +298,14 @@ bool CglsGpu::iterate()
     const uint32_t uWindow = static_cast<uint32_t>(muWindowSamples);
     const uint32_t uWindows = static_cast<uint32_t>(muWindows);
 
+    CUDA_CHECK(cudaMemset(md_bStopped, 0, static_cast<size_t>(muWindows) * sizeof(bool)));
+    CUDA_CHECK(cudaMemset(md_uSteps,   0, static_cast<size_t>(muWindows) * sizeof(uint32_t)));
+
     // r = b - R x;  s = R^H r;  p = s;  gamma = |s|^2;  ps = |s|^2
     if (!launchConvolve(md_cRef, md_cX, md_cSur, md_cR, uTotal, muTaps, muWindowSamples))
         return false;
     adjointKernel<<<uWindows, kBlock>>>(md_cRef, md_cR, md_cP, md_fGamma, md_fPs,
-                                        uTaps, uWindow, true);
+                                        md_bStopped, uTaps, uWindow, true);
     CUDA_CHECK(cudaGetLastError());
 
     for (uint64_t uIt = 1; uIt <= moParams.uMaxIterations; ++uIt) {
@@ -285,7 +316,7 @@ bool CglsGpu::iterate()
             return false;
 
         stepKernel<<<uWindows, kBlock>>>(md_cQ, md_cR, md_cP, md_cX, md_fPs,
-                                         uTaps, uWindow, !bRefresh);
+                                         md_bStopped, md_uSteps, uTaps, uWindow, !bRefresh);
         CUDA_CHECK(cudaGetLastError());
 
         // r = b - R x, computed honestly every kCglsResidualRefresh steps.
@@ -294,7 +325,7 @@ bool CglsGpu::iterate()
             return false;
 
         adjointKernel<<<uWindows, kBlock>>>(md_cRef, md_cR, md_cP, md_fGamma, md_fPs,
-                                            uTaps, uWindow, false);
+                                            md_bStopped, uTaps, uWindow, false);
         CUDA_CHECK(cudaGetLastError());
     }
     return true;
@@ -344,8 +375,16 @@ bool CglsGpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
                               uCpiBytes, cudaMemcpyDeviceToHost));
     }
 
+    // Iterations actually run: the most any window took, as on the CPU.
+    std::vector<uint32_t> vuSteps(static_cast<size_t>(muWindows), 0);
+    CUDA_CHECK(cudaMemcpy(vuSteps.data(), md_uSteps, vuSteps.size() * sizeof(uint32_t),
+                          cudaMemcpyDeviceToHost));
+    oStats.uIterations = 0;
+    for (size_t u = 0; u < vuSteps.size(); ++u)
+        if (vuSteps[u] > oStats.uIterations)
+            oStats.uIterations = vuSteps[u];
+
     mbHaveWeights = true;
-    oStats.uIterations = moParams.uMaxIterations;
     return true;
 }
 
