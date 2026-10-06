@@ -79,7 +79,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -87,6 +86,8 @@
 using namespace pbr;
 
 namespace {
+
+typedef std::chrono::steady_clock::time_point TimePoint;
 
 const size_t   kDatagramCapacity = 2048;
 
@@ -99,14 +100,6 @@ const uint32_t kSpectrumBins = 512;
 // on; this many in a row means the fault is not in the data, and the run
 // stops so the error does not scroll past for hours.
 const uint64_t kMaxConsecutiveFailures = 10;
-
-// Keys a live change may not touch: each one sizes or names something that
-// exists only once per run. A change to one is refused by name.
-const char* const kRestartKeys[] = {
-    "SAMPLE_RATE_Hz", "REFERENCE_RECEIVER_NAME", "SURVEILLANCE_RECEIVER_NAME",
-    "UDP_PORT", "CONTROL_PORT", "VITA49_FULLSCALE", "BUFFER_LENGTH_s",
-    "DSI_BACKEND", "ARD_WRITE_FILES", "ARD_STREAM", "ARD_STREAM_DEST",
-};
 
 // Everything that describes the SIGNAL PROCESSING lives in the config file, so
 // a run is fully reproducible from a tracked file. What is left here is only
@@ -121,6 +114,7 @@ struct Options {
     std::string sDumpCpiPath;       // empty means no CPI is written
     double      dSeconds    = 0.0;  // 0 means "until the source ends"
     bool        bLive       = false;
+    bool        bSaveConfig = false;
 };
 
 void printUsage(const char* pProgram)
@@ -128,11 +122,12 @@ void printUsage(const char* pProgram)
     std::printf("usage: %s (--live | --file CAPTURE) [options]\n", pProgram);
     std::printf("  --live           receive VITA 49 over UDP (uhd_to_vita49 or FERS)\n");
     std::printf("  --file FILE      replay a .pbrcap capture instead\n");
-    std::printf("  --seconds N      stop after N seconds (live only)\n");
+    std::printf("  --seconds N      stop after N seconds\n");
     std::printf("  --group ADDR     also join this multicast group (live only), the\n");
     std::printf("                   way uhd_to_vita49 feeds several clients at once\n");
     std::printf("  --out DIR        write telemetry.csv, detections.csv and changes.log\n");
     std::printf("                   here, and ard/ frames if the config has ARD_WRITE_FILES = 1\n");
+    std::printf("  --save-config    with --out: copy the config file to DIR/config.conf\n");
     std::printf("  --config FILE    configuration (default %s)\n", kDefaultConfigPath);
     std::printf("  --capture FILE   also record every datagram to FILE (.pbrcap), for\n");
     std::printf("                   replaying the same stream later with --file\n");
@@ -156,6 +151,7 @@ bool parseArgs(int argc, char* argv[], Options& o)
         else if (sArg == "--file" && bV)        o.sCapturePath = argv[++i];
         else if (sArg == "--config" && bV)      o.sConfigPath = argv[++i];
         else if (sArg == "--out" && bV)         o.sOutDir = argv[++i];
+        else if (sArg == "--save-config")       o.bSaveConfig = true;
         else if (sArg == "--seconds" && bV)     o.dSeconds = std::atof(argv[++i]);
         else if (sArg == "--group" && bV)       o.sMulticastGroup = argv[++i];
         else if (sArg == "--capture" && bV)     o.sSaveCapturePath = argv[++i];
@@ -172,6 +168,24 @@ bool parseArgs(int argc, char* argv[], Options& o)
         std::fprintf(stderr, "give exactly one of --live or --file CAPTURE\n");
         return false;
     }
+    if (o.bSaveConfig && o.sOutDir.empty()) {
+        std::fprintf(stderr, "--save-config needs --out DIR to save it in\n");
+        return false;
+    }
+    return true;
+}
+
+// The energy in one channel, or false if a sample is not finite.
+bool channelPower(const std::vector<ComplexF>& vc, double& dPowerOut)
+{
+    dPowerOut = 0.0;
+    for (size_t u = 0; u < vc.size(); ++u) {
+        const float fI = vc[u].real();
+        const float fQ = vc[u].imag();
+        if (!std::isfinite(fI) || !std::isfinite(fQ))
+            return false;
+        dPowerOut += double(fI) * fI + double(fQ) * fQ;
+    }
     return true;
 }
 
@@ -185,27 +199,15 @@ bool inputIsProcessable(const std::vector<ComplexF>& vcRef,
                         const char*& pReasonOut)
 {
     double dRefPower = 0.0;
-    for (size_t u = 0; u < vcRef.size(); ++u) {
-        const float fI = vcRef[u].real();
-        const float fQ = vcRef[u].imag();
-        if (!std::isfinite(fI) || !std::isfinite(fQ)) {
-            pReasonOut = "non-finite sample in the reference";
-            return false;
-        }
-        dRefPower += double(fI) * fI + double(fQ) * fQ;
-    }
-
     double dSurPower = 0.0;
-    for (size_t u = 0; u < vcSur.size(); ++u) {
-        const float fI = vcSur[u].real();
-        const float fQ = vcSur[u].imag();
-        if (!std::isfinite(fI) || !std::isfinite(fQ)) {
-            pReasonOut = "non-finite sample in the surveillance";
-            return false;
-        }
-        dSurPower += double(fI) * fI + double(fQ) * fQ;
+    if (!channelPower(vcRef, dRefPower)) {
+        pReasonOut = "non-finite sample in the reference";
+        return false;
     }
-
+    if (!channelPower(vcSur, dSurPower)) {
+        pReasonOut = "non-finite sample in the surveillance";
+        return false;
+    }
     if (dRefPower == 0.0) {
         pReasonOut = "reference channel is all zeros";
         return false;
@@ -237,10 +239,15 @@ std::string runNameFrom(const std::string& sOutDir)
     return sName.empty() ? "live" : sName;
 }
 
-double nowSeconds(const std::chrono::steady_clock::time_point& oStart)
+double nowSeconds(const TimePoint& oStart)
 {
     return std::chrono::duration<double>(
         std::chrono::steady_clock::now() - oStart).count();
+}
+
+double msBetween(const TimePoint& oFrom, const TimePoint& oTo)
+{
+    return std::chrono::duration<double, std::milli>(oTo - oFrom).count();
 }
 
 // ---------------------------------------------------------------------------
@@ -272,7 +279,7 @@ struct Chain {
 // of stages would not fit side by side. On failure oChain must not be run.
 bool buildChain(const PbrConfig& oCfg, Chain& oChain, double& dMsOut)
 {
-    const std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    const TimePoint tStart = std::chrono::steady_clock::now();
 
     oChain.pDsi.reset();
     oChain.pArd.reset();
@@ -353,8 +360,7 @@ bool buildChain(const PbrConfig& oCfg, Chain& oChain, double& dMsOut)
         return false;
     }
 
-    dMsOut = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - t0).count();
+    dMsOut = msBetween(tStart, std::chrono::steady_clock::now());
     return true;
 }
 
@@ -380,37 +386,8 @@ bool buildIngest(const PbrConfig& oCfg, std::unique_ptr<ChannelIngest>& pIngest)
 }
 
 // ---------------------------------------------------------------------------
-// Live changes: the control port and the change log.
+// Live changes: the control port.
 // ---------------------------------------------------------------------------
-
-// Which keys differ between two parameter sets, as "KEY: old -> new" lines.
-std::string configDiff(const PbrConfig& oOld, const PbrConfig& oNew,
-                       std::vector<std::string>* pKeysOut)
-{
-    std::map<std::string, std::string> mOld, mNew;
-    const std::string aTexts[2] = { pbrConfigToText(oOld), pbrConfigToText(oNew) };
-    for (int i = 0; i < 2; ++i) {
-        size_t uPos = 0;
-        while (uPos < aTexts[i].size()) {
-            size_t uEnd = aTexts[i].find('\n', uPos);
-            if (uEnd == std::string::npos) uEnd = aTexts[i].size();
-            const std::string sLine = aTexts[i].substr(uPos, uEnd - uPos);
-            uPos = uEnd + 1;
-            const size_t uEq = sLine.find(" = ");
-            if (uEq == std::string::npos) continue;
-            (i == 0 ? mOld : mNew)[sLine.substr(0, uEq)] = sLine.substr(uEq + 3);
-        }
-    }
-    std::string sOut;
-    for (std::map<std::string, std::string>::const_iterator it = mNew.begin(); it != mNew.end(); ++it) {
-        if (mOld[it->first] != it->second) {
-            sOut += it->first + ": " + mOld[it->first] + " -> " + it->second + "\n";
-            if (pKeysOut != nullptr)
-                pKeysOut->push_back(it->first);
-        }
-    }
-    return sOut;
-}
 
 // What the control port's handler needs to see and set. The handler runs in
 // the main loop's thread (servePending is polled), so no locking.
@@ -428,13 +405,36 @@ void setText(HttpResponse& oResponse, const std::string& sText)
     oResponse.vBody.assign(sText.begin(), sText.end());
 }
 
+void refuse(HttpResponse& oResponse, const std::string& sText)
+{
+    oResponse.iStatus = 400;
+    setText(oResponse, sText);
+}
+
+// Queue oCandidate for the next CPI boundary, or say there is nothing to do.
+void queueChange(Control& oCtl, const PbrConfig& oCandidate, const char* pAccepted,
+                 const char* pNoChange, HttpResponse& oResponse)
+{
+    const std::string sDiff = pbrConfigDiff(*oCtl.pCurrent, oCandidate);
+    if (sDiff.empty()) {
+        oCtl.bPending = false;
+        setText(oResponse, pNoChange);
+        return;
+    }
+    oCtl.oPending     = oCandidate;
+    oCtl.bPending     = true;
+    oCtl.sPendingDiff = sDiff;
+    setText(oResponse, std::string(pAccepted) + "; applies at the next CPI boundary (after CPI " +
+                       std::to_string(oCtl.uCpiIndex) + "):\n" + sDiff);
+}
+
 bool controlHandler(const std::string& sMethod, const std::string& sPath,
                     const std::string& sBody, void* pContext, HttpResponse& oResponse)
 {
-    Control* pCtl = static_cast<Control*>(pContext);
+    Control& oCtl = *static_cast<Control*>(pContext);
 
     if (sPath == "/api/config" && sMethod == "GET") {
-        setText(oResponse, pbrConfigToText(*pCtl->pCurrent));
+        setText(oResponse, pbrConfigToText(*oCtl.pCurrent));
         return true;
     }
 
@@ -442,105 +442,157 @@ bool controlHandler(const std::string& sMethod, const std::string& sPath,
         // Back to the config file's values. If the source's sample rate made
         // the chain adapt, the file's windows are re-adapted the same way, so
         // the reset lands on what the file would have meant at this rate.
-        PbrConfig   oCandidate = *pCtl->pInitial;
+        PbrConfig   oCandidate = *oCtl.pInitial;
         std::string sReport;
-        if (oCandidate.uSampleRateHz != pCtl->pCurrent->uSampleRateHz &&
-            !adaptPbrConfigToSampleRate(*pCtl->pInitial, pCtl->pCurrent->uSampleRateHz,
+        if (oCandidate.uSampleRateHz != oCtl.pCurrent->uSampleRateHz &&
+            !adaptPbrConfigToSampleRate(*oCtl.pInitial, oCtl.pCurrent->uSampleRateHz,
                                         oCandidate, sReport)) {
-            oResponse.iStatus = 400;
-            setText(oResponse, "refused: the file's settings cannot be adapted to the "
-                               "source's rate:\n" + sReport);
+            refuse(oResponse, "refused: the file's settings cannot be adapted to the "
+                              "source's rate:\n" + sReport);
             return true;
         }
-        std::vector<std::string> vKeys;
-        const std::string sDiff = configDiff(*pCtl->pCurrent, oCandidate, &vKeys);
-        if (vKeys.empty()) {
-            pCtl->bPending = false;
-            setText(oResponse, "already at the config file's values\n");
-            return true;
-        }
-        pCtl->oPending     = oCandidate;
-        pCtl->bPending     = true;
-        pCtl->sPendingDiff = sDiff;
-        setText(oResponse, "reset accepted; applies at the next CPI boundary (after CPI " +
-                           std::to_string(pCtl->uCpiIndex) + "):\n" + sDiff);
+        queueChange(oCtl, oCandidate, "reset accepted",
+                    "already at the config file's values\n", oResponse);
         return true;
     }
 
     if (sPath == "/api/apply" && sMethod == "POST") {
-        // Restart-only keys are refused by name before anything else, so
-        // the answer says why rather than whatever the validator trips on.
-        {
-            size_t uPos = 0;
-            while (uPos < sBody.size()) {
-                size_t uEnd = sBody.find('\n', uPos);
-                if (uEnd == std::string::npos) uEnd = sBody.size();
-                std::string sLine = sBody.substr(uPos, uEnd - uPos);
-                uPos = uEnd + 1;
-                const size_t uHash = sLine.find('#');
-                if (uHash != std::string::npos) sLine.erase(uHash);
-                const size_t uEq = sLine.find('=');
-                if (uEq == std::string::npos) continue;
-                std::string sKey = sLine.substr(0, uEq);
-                while (!sKey.empty() && (sKey[sKey.size() - 1] == ' ' || sKey[sKey.size() - 1] == '\t'))
-                    sKey.erase(sKey.size() - 1);
-                while (!sKey.empty() && (sKey[0] == ' ' || sKey[0] == '\t'))
-                    sKey.erase(0, 1);
-                for (size_t k = 0; k < sizeof(kRestartKeys) / sizeof(kRestartKeys[0]); ++k) {
-                    if (sKey != kRestartKeys[k])
-                        continue;
-                    // Only a change is refused; restating the current value
-                    // (the page sends the whole set back) is fine.
-                    const std::string sCurrent = pbrConfigToText(*pCtl->pCurrent);
-                    std::string sValue = sLine.substr(uEq + 1);
-                    while (!sValue.empty() && (sValue[0] == ' ' || sValue[0] == '\t')) sValue.erase(0, 1);
-                    while (!sValue.empty() && (sValue[sValue.size() - 1] == ' ' || sValue[sValue.size() - 1] == '\t' || sValue[sValue.size() - 1] == '\r'))
-                        sValue.erase(sValue.size() - 1);
-                    if (sCurrent.find(sKey + " = " + sValue + "\n") == std::string::npos) {
-                        oResponse.iStatus = 400;
-                        setText(oResponse, "refused: " + sKey +
-                                           " cannot change while running; restart with it in the config\n");
-                        return true;
-                    }
-                }
-            }
+        const std::string sKey = restartKeyChanged(*oCtl.pCurrent, sBody);
+        if (!sKey.empty()) {
+            refuse(oResponse, "refused: " + sKey +
+                              " cannot change while running; restart with it in the config\n");
+            return true;
         }
-
         PbrConfig   oCandidate;
         std::string sWhy;
-        if (!applyPbrConfigLines(*pCtl->pCurrent, sBody, oCandidate, sWhy)) {
-            oResponse.iStatus = 400;
-            setText(oResponse, "refused:\n" + sWhy);
+        if (!applyPbrConfigLines(*oCtl.pCurrent, sBody, oCandidate, sWhy)) {
+            refuse(oResponse, "refused:\n" + sWhy);
             return true;
         }
-
-        std::vector<std::string> vKeys;
-        const std::string sDiff = configDiff(*pCtl->pCurrent, oCandidate, &vKeys);
-        if (vKeys.empty()) {
-            pCtl->bPending = false;
-            setText(oResponse, "no change: every value is already what it is\n");
-            return true;
-        }
-        for (size_t u = 0; u < vKeys.size(); ++u) {
-            for (size_t k = 0; k < sizeof(kRestartKeys) / sizeof(kRestartKeys[0]); ++k) {
-                if (vKeys[u] == kRestartKeys[k]) {
-                    oResponse.iStatus = 400;
-                    setText(oResponse, "refused: " + vKeys[u] +
-                                       " cannot change while running; restart with it in the config\n");
-                    return true;
-                }
-            }
-        }
-
-        pCtl->oPending     = oCandidate;
-        pCtl->bPending     = true;
-        pCtl->sPendingDiff = sDiff;
-        setText(oResponse, "accepted; applies at the next CPI boundary (after CPI " +
-                           std::to_string(pCtl->uCpiIndex) + "):\n" + sDiff);
+        queueChange(oCtl, oCandidate, "accepted",
+                    "no change: every value is already what it is\n", oResponse);
         return true;
     }
 
     return false;
+}
+
+// ---------------------------------------------------------------------------
+// Outputs.
+// ---------------------------------------------------------------------------
+
+struct Outputs {
+    bool        bWriteFrames  = false;   // ARD frames to DIR/ard/
+    bool        bStreamFrames = false;   // ARD frames over UDP
+    std::string sArdDir;
+    std::FILE*  pDetCsv    = nullptr;
+    std::FILE*  pTelCsv    = nullptr;
+    std::FILE*  pChangeLog = nullptr;
+    ArdStreamSender oSender;
+    std::string sRunName;
+};
+
+// Decide what is written and streamed, and make the output directory. The
+// CSVs and the change log always go to DIR; ARD frames only if the config
+// says to write them (1.5 MB per CPI), and DIR/ard/ is not even created
+// otherwise. The output flags are fixed for the run.
+bool makeOutputDir(const Options& oOptions, const PbrConfig& oCfg, Outputs& oOut)
+{
+    oOut.bWriteFrames  = oCfg.bArdWriteFiles && !oOptions.sOutDir.empty();
+    oOut.bStreamFrames = oCfg.bArdStream;
+    oOut.sRunName      = runNameFrom(oOptions.sOutDir);
+
+    if (!oOptions.sOutDir.empty()) {
+        if (oOut.bWriteFrames)
+            oOut.sArdDir = oOptions.sOutDir + "/ard";
+        // mkdir -p, so a run never fails at the first CPI for want of a
+        // directory it could have made at startup.
+        const std::string sCmd = "mkdir -p '" +
+                                 (oOut.bWriteFrames ? oOut.sArdDir : oOptions.sOutDir) + "'";
+        if (std::system(sCmd.c_str()) != 0) {
+            std::fprintf(stderr, "pbr_run: cannot create %s\n", oOptions.sOutDir.c_str());
+            return false;
+        }
+    }
+    if (oCfg.bArdWriteFiles && oOptions.sOutDir.empty())
+        std::fprintf(stderr, "pbr_run: ARD_WRITE_FILES is on but no --out was given; "
+                             "no frames will be written\n");
+    return true;
+}
+
+std::FILE* openForWriting(const std::string& sPath)
+{
+    std::FILE* pFile = std::fopen(sPath.c_str(), "w");
+    if (pFile == nullptr)
+        std::fprintf(stderr, "pbr_run: cannot open %s\n", sPath.c_str());
+    return pFile;
+}
+
+bool copyFile(const std::string& sFrom, const std::string& sTo)
+{
+    std::FILE* pIn = std::fopen(sFrom.c_str(), "rb");
+    if (pIn == nullptr) {
+        std::fprintf(stderr, "pbr_run: cannot read %s\n", sFrom.c_str());
+        return false;
+    }
+    std::FILE* pOut = openForWriting(sTo);
+    bool bOk = (pOut != nullptr);
+    char achChunk[4096];
+    while (bOk) {
+        const size_t uGot = std::fread(achChunk, 1, sizeof(achChunk), pIn);
+        if (uGot == 0)
+            break;
+        bOk = std::fwrite(achChunk, 1, uGot, pOut) == uGot;
+    }
+    std::fclose(pIn);
+    if (pOut != nullptr && std::fclose(pOut) != 0)
+        bOk = false;
+    if (!bOk)
+        std::fprintf(stderr, "pbr_run: could not copy %s to %s\n", sFrom.c_str(), sTo.c_str());
+    return bOk;
+}
+
+// The three files in DIR, each with its header line, and the config copy if
+// it was asked for. Nothing to do without --out.
+bool openOutputFiles(const Options& oOptions, Outputs& oOut)
+{
+    if (oOptions.sOutDir.empty())
+        return true;
+
+    oOut.pDetCsv = openForWriting(oOptions.sOutDir + "/detections.csv");
+    if (oOut.pDetCsv == nullptr)
+        return false;
+    std::fprintf(oOut.pDetCsv, "cpi,signalTimeS,rangeBin,dopplerBin,"
+                               "rangeKm,dopplerHz,powerDb,snrDb\n");
+
+    oOut.pTelCsv = openForWriting(oOptions.sOutDir + "/telemetry.csv");
+    if (oOut.pTelCsv == nullptr)
+        return false;
+    std::fprintf(oOut.pTelCsv, "cpi,cpiStartIndex,signalTimeS,wallTimeS,lagS,"
+                               "dsiMs,ardMs,totalMs,suppressionDb,peakDb,"
+                               "detections,borderDetections,skipped,datagrams,"
+                               "waitMs,printMs,detCsvMs,ardWriteMs,status\n");
+
+    if (oOptions.bSaveConfig &&
+        !copyFile(oOptions.sConfigPath, oOptions.sOutDir + "/config.conf"))
+        return false;
+
+    oOut.pChangeLog = openForWriting(oOptions.sOutDir + "/changes.log");
+    if (oOut.pChangeLog == nullptr)
+        return false;
+    std::fprintf(oOut.pChangeLog, "# live parameter changes; the starting set is %s%s\n",
+                 oOptions.sConfigPath.c_str(),
+                 oOptions.bSaveConfig ? ", copied to config.conf beside this file" : "");
+    std::fflush(oOut.pChangeLog);
+    return true;
+}
+
+void closeOutputFiles(Outputs& oOut)
+{
+    if (oOut.pDetCsv != nullptr)    std::fclose(oOut.pDetCsv);
+    if (oOut.pTelCsv != nullptr)    std::fclose(oOut.pTelCsv);
+    if (oOut.pChangeLog != nullptr) std::fclose(oOut.pChangeLog);
+    oOut.pDetCsv = oOut.pTelCsv = oOut.pChangeLog = nullptr;
 }
 
 // Append to DIR/changes.log (and echo to the console).
@@ -553,180 +605,27 @@ void logChange(std::FILE* pLog, uint64_t uCpiIndex, const char* pWhat, const std
     }
 }
 
-} // namespace
-
-int main(int argc, char* argv[])
+std::string rebuiltIn(double dMs)
 {
-    Options oOptions;
-    if (!parseArgs(argc, argv, oOptions)) {
-        printUsage(argv[0]);
-        return 1;
-    }
+    char achMs[64];
+    std::snprintf(achMs, sizeof(achMs), "rebuilt in %.0f ms\n", dMs);
+    return achMs;
+}
 
+// ---------------------------------------------------------------------------
+// The run: everything the loop reads and updates, in one place.
+// ---------------------------------------------------------------------------
+struct Run {
+    Options   oOptions;
     PbrConfig oCfg;
-    if (!loadPbrConfig(oOptions.sConfigPath.c_str(), oCfg))
-        return 1;
-
-    // Build the output paths from the one directory the caller gave. The
-    // CSVs and the change log always go there; ARD frames only if the config
-    // says to write them (1.5 MB per CPI), and DIR/ard/ is not even created
-    // otherwise. The output flags are fixed for the run.
-    const bool bWriteFrames  = oCfg.bArdWriteFiles && !oOptions.sOutDir.empty();
-    const bool bStreamFrames = oCfg.bArdStream;
-    std::string sArdDir, sTelemetryPath, sDetectionsPath, sChangesPath;
-    if (!oOptions.sOutDir.empty()) {
-        sTelemetryPath  = oOptions.sOutDir + "/telemetry.csv";
-        sDetectionsPath = oOptions.sOutDir + "/detections.csv";
-        sChangesPath    = oOptions.sOutDir + "/changes.log";
-        if (bWriteFrames)
-            sArdDir = oOptions.sOutDir + "/ard";
-        // mkdir -p, so a run never fails at the first CPI for want of a
-        // directory it could have made at startup.
-        const std::string sCmd = "mkdir -p '" +
-                                 (bWriteFrames ? sArdDir : oOptions.sOutDir) + "'";
-        if (std::system(sCmd.c_str()) != 0) {
-            std::fprintf(stderr, "pbr_run: cannot create %s\n", oOptions.sOutDir.c_str());
-            return 1;
-        }
-    }
-    if (oCfg.bArdWriteFiles && oOptions.sOutDir.empty())
-        std::fprintf(stderr, "pbr_run: ARD_WRITE_FILES is on but no --out was given; "
-                             "no frames will be written\n");
-
-    // ---- build the chain and the ingest -------------------------------------
-    Chain  oChain;
-    double dBuildMs = 0.0;
-    if (!buildChain(oCfg, oChain, dBuildMs))
-        return 1;
-
+    Chain     oChain;
     std::unique_ptr<ChannelIngest> pIngest;
-    if (!buildIngest(oCfg, pIngest))
-        return 1;
+    Outputs   oOut;
+    Control   oControl;
+    TimePoint oStart;
 
-    std::vector<uint8_t> vDatagram(kDatagramCapacity);
-
-    ArdStreamSender oArdSender;
-    if (bStreamFrames &&
-        !oArdSender.open(oCfg.sArdStreamHost.c_str(), oCfg.uArdStreamPort, nullptr))
-        return 1;
-    const std::string sRunName = runNameFrom(oOptions.sOutDir);
-
-    printPbrConfig(oCfg);
-    std::printf("\npbr_run\n");
-    std::printf("  source        %s\n",
-                oOptions.bLive ? "live UDP" : oOptions.sCapturePath.c_str());
-    std::printf("  output        %s\n",
-                oOptions.sOutDir.empty() ? "console only" : oOptions.sOutDir.c_str());
-    std::printf("  frames        %s%s%s\n",
-                bWriteFrames ? "written to disk" : "",
-                (bWriteFrames && bStreamFrames) ? " and " : "",
-                bStreamFrames ? "streamed" : (bWriteFrames ? "" : "neither written nor streamed"));
-    std::printf("  chain         %s -> %s\n", oChain.pDsi->name(), oChain.pArd->name());
-    std::printf("  coupling      %s\n",
-                oChain.bDeviceCoupled ? "device-coupled: samples stay on the GPU"
-                                      : "via host: the cleaned CPI round-trips");
-    std::printf("  build+warm-up %.1f ms (not counted)\n", dBuildMs);
-    if (oOptions.bLive && !oChain.bDeviceCoupled) {
-        std::fprintf(stderr,
-            "\npbr_run: refusing a live run on the CPU backend. It is a\n"
-            "         correctness reference -- the direct DFT alone takes tens\n"
-            "         of seconds per CPI -- so it cannot keep up with a live\n"
-            "         stream and the run would only measure how far behind it\n"
-            "         fell. Use DSI_BACKEND = GPU.\n");
-        return 1;
-    }
-
-    // ---- the control port ---------------------------------------------------
-    const PbrConfig oInitialCfg = oCfg;   // the file's set, for the Reset button
-    Control    oControl;
-    oControl.pCurrent = &oCfg;
-    oControl.pInitial = &oInitialCfg;
-    HttpServer oControlServer;
-    if (oCfg.uControlPort != 0) {
-        if (!oControlServer.open(oCfg.uControlPort))
-            return 1;
-        std::printf("  control       http://<this host>:%u  (GET /api/config, POST /api/apply, POST /api/reset)\n",
-                    static_cast<unsigned>(oCfg.uControlPort));
-    }
-    std::printf("\n");
-
-    // ---- open the source ---------------------------------------------------
-    UdpReceiver   oReceiver;
-    CaptureReader oReader;
-    if (oOptions.bLive) {
-        if (!oReceiver.open(oCfg.uUdpPort))
-            return 1;
-        if (!oOptions.sMulticastGroup.empty()) {
-            if (!oReceiver.joinMulticastGroup(oOptions.sMulticastGroup.c_str()))
-                return 1;
-            std::printf("joined multicast group %s\n", oOptions.sMulticastGroup.c_str());
-        }
-        // The single-threaded design rests on this buffer absorbing what
-        // arrives while a CPI is being processed, so report what the kernel
-        // actually granted rather than what was asked for.
-        const double dSlackSeconds =
-            double(oReceiver.actualRcvBufBytes()) / (1198.0 * 1400.0);
-        std::printf("socket buffer %d bytes (%.2f s of slack)\n",
-                    oReceiver.actualRcvBufBytes(), dSlackSeconds);
-        if (dSlackSeconds < 1.0)
-            std::printf("  WARNING: under 1 s of slack. Raise "
-                        "net.core.rmem_max on the board.\n");
-        std::printf("listening on UDP port %u -- start uhd_to_vita49 (make drive) or fers-cli now\n\n",
-                    static_cast<unsigned>(oCfg.uUdpPort));
-    } else if (!oReader.open(oOptions.sCapturePath.c_str())) {
-        return 1;
-    }
-
-    CaptureWriter oCapture;
-    if (!oOptions.sSaveCapturePath.empty()) {
-        if (!oCapture.open(oOptions.sSaveCapturePath.c_str()))
-            return 1;
-        std::printf("recording every datagram to %s\n", oOptions.sSaveCapturePath.c_str());
-    }
-    bool bCpiDumped = false;
-
-    // ---- output files ------------------------------------------------------
-    std::FILE* pDetCsv = nullptr;
-    if (!sDetectionsPath.empty()) {
-        pDetCsv = std::fopen(sDetectionsPath.c_str(), "w");
-        if (pDetCsv == nullptr) {
-            std::fprintf(stderr, "pbr_run: cannot open %s\n", sDetectionsPath.c_str());
-            return 1;
-        }
-        std::fprintf(pDetCsv, "cpi,signalTimeS,rangeBin,dopplerBin,"
-                              "rangeKm,dopplerHz,powerDb,snrDb\n");
-    }
-
-    std::FILE* pTelCsv = nullptr;
-    if (!sTelemetryPath.empty()) {
-        pTelCsv = std::fopen(sTelemetryPath.c_str(), "w");
-        if (pTelCsv == nullptr) {
-            std::fprintf(stderr, "pbr_run: cannot open %s\n", sTelemetryPath.c_str());
-            return 1;
-        }
-        std::fprintf(pTelCsv, "cpi,cpiStartIndex,signalTimeS,wallTimeS,lagS,"
-                              "dsiMs,ardMs,totalMs,suppressionDb,peakDb,"
-                              "detections,borderDetections,skipped,datagrams,"
-                              "waitMs,printMs,detCsvMs,ardWriteMs,status\n");
-    }
-
-    std::FILE* pChangeLog = nullptr;
-    if (!sChangesPath.empty()) {
-        pChangeLog = std::fopen(sChangesPath.c_str(), "w");
-        if (pChangeLog == nullptr) {
-            std::fprintf(stderr, "pbr_run: cannot open %s\n", sChangesPath.c_str());
-            return 1;
-        }
-        std::fprintf(pChangeLog, "# live parameter changes; the starting set is prb.conf beside this file\n");
-        std::fflush(pChangeLog);
-    }
-
-    // ---- the loop ----------------------------------------------------------
-    const std::chrono::steady_clock::time_point oStart =
-        std::chrono::steady_clock::now();
-
-    uint64_t uCpiIndex     = 0;
-    uint64_t uDatagrams    = 0;
+    uint64_t uCpiIndex      = 0;
+    uint64_t uDatagrams     = 0;
     uint64_t uParseFailures = 0;
     uint64_t uFirstCpiStart = 0;
     // Two different instants, and conflating them was a bug worth naming.
@@ -742,475 +641,526 @@ int main(int argc, char* argv[])
     // slower algorithms sat closest to the failure threshold for no reason.
     double   dStartupOffset  = 0.0;
     double   dWallAtFirstCpi = 0.0;
-    bool     bHaveFirst     = false;
-    double   dMaxLag        = 0.0;
-    double   dWorstTotalMs  = 0.0;
+    bool     bHaveFirst      = false;
+    double   dMaxLag         = 0.0;
     std::vector<double> vdTotalMs;
-    bool     bReadError     = false;
-    bool     bProcessError  = false;
+    bool     bCpiDumped      = false;
     double   dLastUnresolvedNote = 0.0;   // first reminder five seconds in, not at the first datagram
-    uint64_t uNullCpis      = 0;   // blank frames: input not processable
-    uint64_t uFailedCpis    = 0;   // blank frames: a stage returned false
+    uint64_t uNullCpis       = 0;   // blank frames: input not processable
+    uint64_t uFailedCpis     = 0;   // blank frames: a stage returned false
     uint64_t uConsecutiveFailures = 0;
-    uint64_t uLiveChanges   = 0;
-    uint64_t uRateAdaptions = 0;
-    uint64_t uRateRefusedHz = 0;   // a source rate that could not be adapted to, reported once
+    uint64_t uLiveChanges    = 0;
+    uint64_t uRateAdaptions  = 0;
+    uint64_t uRateRefusedHz  = 0;   // a source rate that could not be adapted to, reported once
 
-    // ---- transient diagnostics --------------------------------------------
-    // Splits the rest of the loop into the places a stall could hide: writing
-    // the frame, writing the CSVs, printing the progress line (which on a
-    // `make run` goes through tee and an ssh pipe, and blocks if that backs
-    // up), and waiting for the next CPI's packets.
-    std::chrono::steady_clock::time_point oLastOutputEnd = oStart;
-    bool     bHaveLastOutput = false;
+    // When the previous CPI's output finished, so the next CPI's waitMs can
+    // say how long the loop spent draining the socket and waiting for data.
+    TimePoint oLastOutputEnd;
+    bool      bHaveLastOutput = false;
+};
 
-    for (;;) {
-        if (oOptions.dSeconds > 0.0 && nowSeconds(oStart) >= oOptions.dSeconds)
-            break;
+// Apply a change the control port accepted, at the boundary. False only if
+// neither the new set nor the previous one could be built.
+bool applyPendingChange(Run& oRun)
+{
+    Control& oCtl = oRun.oControl;
+    oCtl.bPending = false;
+    const PbrConfig oNewCfg = oCtl.oPending;
+    const bool bCpiChanged = (oNewCfg.uCpiSamples != oRun.oCfg.uCpiSamples ||
+                              oNewCfg.uHopSamples != oRun.oCfg.uHopSamples);
+    double dMs = 0.0;
+    // buildChain releases the old stages first, so the GPU never holds two
+    // sets; if the new set fails to build, the old one is built again from
+    // the config that is still current.
+    if (!buildChain(oNewCfg, oRun.oChain, dMs)) {
+        std::fprintf(stderr, "pbr_run: the accepted change could not be built; "
+                             "rebuilding the previous set\n");
+        return buildChain(oRun.oCfg, oRun.oChain, dMs);
+    }
+    if (bCpiChanged && !oRun.pIngest->setCpi(oNewCfg.uCpiSamples, oNewCfg.uHopSamples)) {
+        std::fprintf(stderr, "pbr_run: the ingest refused the new CPI; keeping the previous set\n");
+        return buildChain(oRun.oCfg, oRun.oChain, dMs);
+    }
+    oRun.oCfg = oNewCfg;
+    ++oRun.uLiveChanges;
+    logChange(oRun.oOut.pChangeLog, oRun.uCpiIndex, "live change applied",
+              oCtl.sPendingDiff + rebuiltIn(dMs));
+    return true;
+}
 
-        // ---- live changes, at the boundary --------------------------------
-        // Nothing is mid-CPI here: the previous iteration's drain loop ran
-        // to NotYet. Serve the control port (microseconds when idle), then
-        // apply whatever it accepted.
-        if (oControlServer.isOpen()) {
-            bool bServed = false;
-            oControl.uCpiIndex = uCpiIndex;
-            oControlServer.servePending(controlHandler, &oControl, bServed);
-        }
-        if (oControl.bPending) {
-            oControl.bPending = false;
-            const PbrConfig oNewCfg = oControl.oPending;
-            const bool bCpiChanged = (oNewCfg.uCpiSamples != oCfg.uCpiSamples ||
-                                      oNewCfg.uHopSamples != oCfg.uHopSamples);
-            double dMs = 0.0;
-            // buildChain releases the old stages first, so the GPU never
-            // holds two sets; if the new set fails to build, the old one is
-            // built again from the config that is still current.
-            if (!buildChain(oNewCfg, oChain, dMs)) {
-                std::fprintf(stderr, "pbr_run: the accepted change could not be built; "
-                                     "rebuilding the previous set\n");
-                if (!buildChain(oCfg, oChain, dMs)) {
-                    bProcessError = true;
-                    break;
-                }
-            } else if (bCpiChanged && !pIngest->setCpi(oNewCfg.uCpiSamples, oNewCfg.uHopSamples)) {
-                std::fprintf(stderr, "pbr_run: the ingest refused the new CPI; keeping the previous set\n");
-                if (!buildChain(oCfg, oChain, dMs)) {
-                    bProcessError = true;
-                    break;
-                }
-            } else {
-                oCfg = oNewCfg;
-                ++uLiveChanges;
-                char achMs[64];
-                std::snprintf(achMs, sizeof(achMs), "rebuilt in %.0f ms\n", dMs);
-                logChange(pChangeLog, uCpiIndex, "live change applied", oControl.sPendingDiff + achMs);
-            }
-        }
+// A context packet declared a rate the config did not expect. Adapt every
+// window to it (the author's rule: pick the nearest settings that work and
+// say so), rebuild the chain AND the ingest, since every buffered index
+// depends on the rate, and carry on. A rate that cannot be adapted to is
+// reported once and nothing is processed. False only if the previous set
+// could not be restored after a failed rebuild.
+bool followSourceRate(Run& oRun)
+{
+    const double   dSource = oRun.pIngest->sourceSampleRateHz();
+    const uint64_t uSource = static_cast<uint64_t>(std::llround(dSource));
+    if (dSource <= 0.0 || uSource == oRun.oCfg.uSampleRateHz || uSource == oRun.uRateRefusedHz)
+        return true;
 
-        size_t uLength = 0;
-        bool   bGot    = false;
-
-        if (oOptions.bLive) {
-            const ReceiveResult eResult =
-                oReceiver.receive(vDatagram.data(), vDatagram.size(), uLength);
-            if (eResult == ReceiveResult::WouldBlock)
-                continue;   // nothing waiting; the socket is non-blocking
-            if (eResult == ReceiveResult::Error) {
-                bReadError = true;
-                break;
-            }
-            bGot = true;
-        } else {
-            bool bEof = false;
-            if (!oReader.read(vDatagram.data(), vDatagram.size(), uLength, bEof)) {
-                if (!bEof)
-                    bReadError = true;
-                break;
-            }
-            bGot = true;
-        }
-        if (!bGot)
-            continue;
-
-        ++uDatagrams;
-
-        if (oCapture.isOpen() && !oCapture.write(vDatagram.data(), uLength)) {
-            bProcessError = true;
-            break;
-        }
-
-        Vita49Packet oPacket;
-        if (!parseVita49Packet(vDatagram.data(), uLength, oPacket)) {
-            ++uParseFailures;
-            continue;
-        }
-        if (!pIngest->handlePacket(oPacket)) {
-            bProcessError = true;
-            break;
-        }
-
-        // ---- the source's sample rate ----------------------------------------
-        // A context packet declared a rate the config did not expect. Adapt
-        // every window to it (the author's rule: pick the nearest settings
-        // that work and say so), rebuild the chain AND the ingest, since every
-        // buffered index depends on the rate, and carry on. A rate that
-        // cannot be adapted to is reported once and nothing is processed.
-        {
-            const double   dSource = pIngest->sourceSampleRateHz();
-            const uint64_t uSource = static_cast<uint64_t>(std::llround(dSource));
-            if (dSource > 0.0 && uSource != oCfg.uSampleRateHz && uSource != uRateRefusedHz) {
-                PbrConfig   oNewCfg;
-                std::string sReport;
-                double      dMs = 0.0;
-                const bool bInteger = std::fabs(dSource - static_cast<double>(uSource)) < 1e-6;
-                if (!bInteger) {
-                    sReport = "source sample rate " + std::to_string(dSource) +
-                              " Hz is not a whole number of hertz; the chain cannot index it\n";
-                }
-                if (bInteger && adaptPbrConfigToSampleRate(oCfg, uSource, oNewCfg, sReport) &&
-                    buildChain(oNewCfg, oChain, dMs) && buildIngest(oNewCfg, pIngest)) {
-                    oCfg = oNewCfg;
-                    ++uRateAdaptions;
-                    bHaveFirst = false;   // a new timeline: lag and signal time start again
-                    char achMs[64];
-                    std::snprintf(achMs, sizeof(achMs), "rebuilt in %.0f ms\n", dMs);
-                    logChange(pChangeLog, uCpiIndex, "sample rate adapted", sReport + achMs);
-                } else {
-                    uRateRefusedHz = uSource;
-                    std::fprintf(stderr, "pbr_run: %s         nothing will be processed until the "
-                                         "source or the config changes\n", sReport.c_str());
-                    if (!oChain.pDsi && !buildChain(oCfg, oChain, dMs)) {
-                        bProcessError = true;
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Packets are arriving but the streams have not been matched to the
-        // configured receiver names: nothing will ever be processed, and
-        // without this line the only sign is a summary at the end. A
-        // reminder, not a deadline; it repeats until the names agree.
-        if (!pIngest->rolesResolved()) {
-            const double dNow = nowSeconds(oStart);
-            if (dNow - dLastUnresolvedNote >= 5.0) {
-                dLastUnresolvedNote = dNow;
-                std::fprintf(stderr,
-                    "pbr_run: %llu datagrams received but the channels are not identified yet.\n"
-                    "         seen: %s\n"
-                    "         config expects \"%s\" (reference) and \"%s\" (surveillance)\n",
-                    (unsigned long long)uDatagrams, pIngest->streamSummary().c_str(),
-                    oCfg.sReferenceName.c_str(), oCfg.sSurveillanceName.c_str());
-            }
-        }
-
-        // Drain whatever CPIs the new data completed.
-        for (;;) {
-            uint64_t uCpiStart = 0;
-            const CpiStatus eCpi = pIngest->tryExtractCpi(
-                oChain.vcRef.data(), oChain.vcSur.data(), oCfg.uCpiSamples, uCpiStart);
-
-            if (eCpi == CpiStatus::NotYet)  break;
-            if (eCpi == CpiStatus::Skipped) continue;
-
-            if (!oOptions.sDumpCpiPath.empty() && !bCpiDumped) {
-                CpiFileHeader oHeader;
-                oHeader.uSampleCount  = oCfg.uCpiSamples;
-                oHeader.uSampleRateHz = oCfg.uSampleRateHz;
-                oHeader.uStartIndex   = uCpiStart;
-                if (!writeCpiFile(oOptions.sDumpCpiPath.c_str(), oHeader,
-                                  oChain.vcRef.data(), oChain.vcSur.data())) {
-                    bProcessError = true;
-                    break;
-                }
-                bCpiDumped = true;
-                std::printf("wrote the first CPI (start index %llu) to %s\n",
-                            (unsigned long long)uCpiStart, oOptions.sDumpCpiPath.c_str());
-            }
-
-            if (!bHaveFirst) {
-                uFirstCpiStart = uCpiStart;
-                dStartupOffset = nowSeconds(oStart);
-            }
-
-            // ---- cancel ---------------------------------------------------
-            const std::chrono::steady_clock::time_point t0 =
-                std::chrono::steady_clock::now();
-
-            // Everything since the previous CPI's output finished: draining
-            // the socket, parsing, and spinning while the next window fills.
-            const double dWaitMs = bHaveLastOutput
-                ? std::chrono::duration<double, std::milli>(t0 - oLastOutputEnd).count()
-                : 0.0;
-            const bool bWantMap = (bWriteFrames || bStreamFrames) &&
-                                  (uCpiIndex % oCfg.uArdSnapshotEvery == 0);
-            ComplexF* pMap = bWantMap ? oChain.vcMap.data() : nullptr;
-
-            // A CPI the chain cannot process is not a crash and not a stop:
-            // it goes out as a BLANK frame carrying a status word, so a dead
-            // front end shows as "receiving, nothing to process" downstream.
-            // The input guard runs first, so the solver is never handed a
-            // window that would break it; a stage that still returns false is
-            // counted, and only a run of them ends the program.
-            uint64_t    uStatus = kArdStatusOk;
-            const char* pReason = "";
-            DSIStats oDsiStats;
-            ArdStats oArdStats;
-
-            bool bCancelOk = false;
-            if (!inputIsProcessable(oChain.vcRef, oChain.vcSur, pReason))
-                uStatus = kArdStatusNullInput;
-            else
-                bCancelOk = oChain.pDsi->cancel(oChain.vcRef.data(), oChain.vcSur.data(),
-                                                oChain.bDeviceCoupled ? nullptr : oChain.vcCleaned.data(),
-                                                oDsiStats);
-
-            const std::chrono::steady_clock::time_point t1 =
-                std::chrono::steady_clock::now();
-
-            if (uStatus == kArdStatusOk && !bCancelOk) {
-                uStatus = kArdStatusFailed;
-                pReason = "cancellation returned an error";
-            }
-
-            // ---- map and detect -------------------------------------------
-            if (uStatus == kArdStatusOk) {
-                const bool bArdOk = oChain.bDeviceCoupled
-                    ? oChain.pArd->processDevice(oChain.pDsi->deviceReference(),
-                                                 oChain.pDsi->deviceOutput(),
-                                                 pMap, oChain.vDet.data(), kMaxArdDetections, oArdStats)
-                    : oChain.pArd->process(oChain.vcRef.data(), oChain.vcCleaned.data(), pMap,
-                                           oChain.vDet.data(), kMaxArdDetections, oArdStats);
-                if (!bArdOk) {
-                    uStatus = kArdStatusFailed;
-                    pReason = "map formation or CFAR returned an error";
-                }
-            }
-            const std::chrono::steady_clock::time_point t2 =
-                std::chrono::steady_clock::now();
-
-            if (uStatus != kArdStatusOk) {
-                // The blank frame: zero map, no detections, zero statistics.
-                if (pMap != nullptr)
-                    std::fill(oChain.vcMap.begin(), oChain.vcMap.end(), ComplexF(0.0f, 0.0f));
-                oDsiStats = DSIStats();
-                oArdStats = ArdStats();
-                if (uStatus == kArdStatusNullInput) {
-                    ++uNullCpis;
-                    uConsecutiveFailures = 0;
-                } else {
-                    ++uFailedCpis;
-                    ++uConsecutiveFailures;
-                    if (uConsecutiveFailures >= kMaxConsecutiveFailures) {
-                        std::fprintf(stderr, "pbr_run: %llu consecutive processing "
-                                             "failures; this is not the data. Stopping.\n",
-                                     (unsigned long long)uConsecutiveFailures);
-                        bProcessError = true;
-                        break;
-                    }
-                }
-            } else {
-                uConsecutiveFailures = 0;
-            }
-
-            const double dDsiMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
-            const double dArdMs = std::chrono::duration<double, std::milli>(t2 - t1).count();
-            const double dTotalMs = dDsiMs + dArdMs;
-
-            // Signal time is where this CPI sits in the stream; wall time is
-            // how long we have been running. What matters is not the gap
-            // between them but whether that gap GROWS.
-            //
-            // Both clocks are zeroed at the first CPI. Anything before it --
-            // waiting for the transmitter to start, the socket filling, the
-            // first window completing -- is a fixed startup offset, not a
-            // backlog, and measuring from program start would bake it in
-            // permanently and make a chain that is keeping up perfectly look
-            // like one that is seconds behind.
-            const double dSignalS = double(uCpiStart - uFirstCpiStart) /
-                                    double(oCfg.uSampleRateHz);
-            const double dWallS   = nowSeconds(oStart);
-
-            // Both clocks are zeroed at the same instant: the moment the
-            // first CPI finished processing. A chain that keeps up then holds
-            // the lag at zero, whatever the algorithm costs per CPI.
-            if (!bHaveFirst) {
-                bHaveFirst      = true;
-                dWallAtFirstCpi = dWallS;
-            }
-
-            const double dLagS    = (dWallS - dWallAtFirstCpi) - dSignalS;
-            if (dLagS > dMaxLag) dMaxLag = dLagS;
-            if (dTotalMs > dWorstTotalMs) dWorstTotalMs = dTotalMs;
-            vdTotalMs.push_back(dTotalMs);
-
-            const ChannelIngest::Stats& oIngestStats = pIngest->stats();
-
-            const std::chrono::steady_clock::time_point t3 =
-                std::chrono::steady_clock::now();
-
-            if (uStatus == kArdStatusOk) {
-                std::printf("CPI %4llu  t=%7.3f s  dsi %6.1f  ard %5.1f  "
-                            "total %6.1f ms  %5.2f dB  %3llu det  lag %6.3f s\n",
-                            (unsigned long long)uCpiIndex, dSignalS,
-                            dDsiMs, dArdMs, dTotalMs,
-                            oDsiStats.dSuppressionDb,
-                            (unsigned long long)oArdStats.uDetections, dLagS);
-            } else {
-                std::printf("CPI %4llu  t=%7.3f s  %s: %s -- blank frame  lag %6.3f s\n",
-                            (unsigned long long)uCpiIndex, dSignalS,
-                            (uStatus == kArdStatusNullInput) ? "NULL INPUT" : "FAILED",
-                            pReason, dLagS);
-            }
-            std::fflush(stdout);
-
-            const std::chrono::steady_clock::time_point t4 =
-                std::chrono::steady_clock::now();
-
-            if (pDetCsv != nullptr) {
-                for (uint64_t u = 0; u < oArdStats.uDetections; ++u) {
-                    const Detection& d = oChain.vDet[static_cast<size_t>(u)];
-                    std::fprintf(pDetCsv, "%llu,%.6f,%llu,%llu,%.4f,%.4f,%.4f,%.4f\n",
-                                 (unsigned long long)uCpiIndex, dSignalS,
-                                 (unsigned long long)d.uRangeBin,
-                                 (unsigned long long)d.uDopplerBin,
-                                 d.dRangeKm, d.dDopplerHz, d.dPowerDb, d.dSnrDb);
-                }
-            }
-
-            const std::chrono::steady_clock::time_point t5 =
-                std::chrono::steady_clock::now();
-
-            if (bWantMap) {
-                ArdFileHeader oArdHeader;
-                oArdHeader.uRangeBins         = oChain.oArdParams.uRangeBins;
-                oArdHeader.uDopplerBins       = oChain.oArdParams.uDopplerBins;
-                oArdHeader.uSampleRateHz      = oChain.oArdParams.uSampleRateHz;
-                oArdHeader.uDopplerDecimation = oChain.oArdParams.uDopplerDecimation;
-                oArdHeader.uCpiStartIndex     = uCpiStart;
-                oArdHeader.uDetections        = oArdStats.uDetections;
-                oArdHeader.uStatus            = uStatus;
-
-                size_t uFrameBytes = 0;
-                if (!serialiseArdFrame(oArdHeader, oChain.vcMap.data(), oChain.vDet.data(),
-                                       oChain.vFrame.data(), oChain.vFrame.size(), uFrameBytes)) {
-                    bProcessError = true;
-                    break;
-                }
-
-                if (bWriteFrames) {
-                    char achPath[512];
-                    std::snprintf(achPath, sizeof(achPath), "%s/ard_%05llu.bin",
-                                  sArdDir.c_str(), (unsigned long long)uCpiIndex);
-                    if (!writeArdFrameBytes(achPath, oChain.vFrame.data(), uFrameBytes)) {
-                        bProcessError = true;
-                        break;
-                    }
-                }
-
-                if (bStreamFrames) {
-                    // The frame, then its status: what the viewer's header
-                    // strip shows, with the telemetry column names as keys,
-                    // plus the live config values and where to send changes.
-                    const uint32_t uSequence = static_cast<uint32_t>(uCpiIndex);
-                    oArdSender.sendFrame(oChain.vFrame.data(), uFrameBytes, uSequence);
-
-                    // Then each channel's spectrum as it was handed to the
-                    // canceller, blank frames included: a dead input is
-                    // exactly what that panel is for. Timed inside ardWriteMs.
-                    const ComplexF* apChannel[2] = { oChain.vcRef.data(), oChain.vcSur.data() };
-                    for (uint32_t c = 0; c < 2; ++c) {
-                        if (oChain.oSpectrum.compute(apChannel[c], oCfg.uCpiSamples,
-                                                     oChain.vfSpectrum.data()))
-                            oArdSender.sendSpectrum(oChain.vfSpectrum.data(), kSpectrumBins, c,
-                                                    static_cast<uint32_t>(oCfg.uSampleRateHz),
-                                                    uSequence);
-                    }
-
-                    char achStatus[1200];
-                    const int iLen = std::snprintf(
-                        achStatus, sizeof(achStatus),
-                        "{\"runName\":\"%s\",\"cpi\":%llu,\"status\":%llu,"
-                        "\"reason\":\"%s\",\"signalTimeS\":%.3f,\"lagS\":%.3f,"
-                        "\"dsiMs\":%.1f,\"ardMs\":%.1f,\"totalMs\":%.1f,"
-                        "\"suppressionDb\":%.2f,\"peakDb\":%.2f,"
-                        "\"detections\":%llu,\"borderDetections\":%llu,\"skipped\":%llu,"
-                        "\"controlPort\":%u,\"liveChanges\":%llu,"
-                        "\"config\":{\"DSI_ALGORITHM\":\"%s\",\"DSI_BACKEND\":\"%s\","
-                        "\"ARD_ALGORITHM\":\"%s\",\"CFAR_PFA\":\"%g\",\"CPI_LENGTH_s\":\"%g\","
-                        "\"SAMPLE_RATE_Hz\":\"%llu\"}}",
-                        sRunName.c_str(), (unsigned long long)uCpiIndex,
-                        (unsigned long long)uStatus, pReason, dSignalS, dLagS,
-                        dDsiMs, dArdMs, dTotalMs,
-                        oDsiStats.dSuppressionDb, oArdStats.dPeakDb,
-                        (unsigned long long)oArdStats.uDetections,
-                        (unsigned long long)oArdStats.uDetectionsInBorder,
-                        (unsigned long long)oIngestStats.uCpisOvertaken,
-                        static_cast<unsigned>(oCfg.uControlPort),
-                        (unsigned long long)uLiveChanges,
-                        oCfg.sDsiAlgorithm.c_str(), oCfg.sDsiBackend.c_str(),
-                        oCfg.sArdAlgorithm.c_str(), oCfg.dCfarPfa, oCfg.dCpiSeconds,
-                        (unsigned long long)oCfg.uSampleRateHz);
-                    if (iLen > 0 && static_cast<size_t>(iLen) < sizeof(achStatus))
-                        oArdSender.sendStatus(achStatus, uSequence);
-                }
-            }
-
-            const std::chrono::steady_clock::time_point t6 =
-                std::chrono::steady_clock::now();
-
-            // Written last, so the row can carry every phase of this CPI.
-            // The telemetry write itself is one fprintf and falls into the
-            // next CPI's waitMs, which is where it belongs.
-            if (pTelCsv != nullptr) {
-                std::fprintf(pTelCsv,
-                    "%llu,%llu,%.6f,%.6f,%.6f,%.4f,%.4f,%.4f,%.4f,%.4f,"
-                    "%llu,%llu,%llu,%llu,%.4f,%.4f,%.4f,%.4f,%llu\n",
-                    (unsigned long long)uCpiIndex,
-                    (unsigned long long)uCpiStart,
-                    dSignalS, dWallS, dLagS, dDsiMs, dArdMs, dTotalMs,
-                    oDsiStats.dSuppressionDb, oArdStats.dPeakDb,
-                    (unsigned long long)oArdStats.uDetections,
-                    (unsigned long long)oArdStats.uDetectionsInBorder,
-                    (unsigned long long)oIngestStats.uCpisOvertaken,
-                    (unsigned long long)uDatagrams,
-                    dWaitMs,
-                    std::chrono::duration<double, std::milli>(t4 - t3).count(),
-                    std::chrono::duration<double, std::milli>(t5 - t4).count(),
-                    std::chrono::duration<double, std::milli>(t6 - t5).count(),
-                    (unsigned long long)uStatus);
-            }
-
-            oLastOutputEnd   = std::chrono::steady_clock::now();
-            bHaveLastOutput  = true;
-
-            ++uCpiIndex;
-        }
-
-        if (bProcessError)
-            break;
+    PbrConfig   oNewCfg;
+    std::string sReport;
+    double      dMs = 0.0;
+    const bool bInteger = std::fabs(dSource - static_cast<double>(uSource)) < 1e-6;
+    if (!bInteger) {
+        sReport = "source sample rate " + std::to_string(dSource) +
+                  " Hz is not a whole number of hertz; the chain cannot index it\n";
+    }
+    const bool bAdapted = bInteger &&
+                          adaptPbrConfigToSampleRate(oRun.oCfg, uSource, oNewCfg, sReport);
+    const bool bChainOk  = bAdapted && buildChain(oNewCfg, oRun.oChain, dMs);
+    const bool bIngestOk = bChainOk && buildIngest(oNewCfg, oRun.pIngest);
+    if (bIngestOk) {
+        oRun.oCfg = oNewCfg;
+        ++oRun.uRateAdaptions;
+        oRun.bHaveFirst = false;   // a new timeline: lag and signal time start again
+        logChange(oRun.oOut.pChangeLog, oRun.uCpiIndex, "sample rate adapted",
+                  sReport + rebuiltIn(dMs));
+        return true;
     }
 
-    if (pDetCsv != nullptr)    std::fclose(pDetCsv);
-    if (pTelCsv != nullptr)    std::fclose(pTelCsv);
-    if (pChangeLog != nullptr) std::fclose(pChangeLog);
+    oRun.uRateRefusedHz = uSource;
+    std::fprintf(stderr, "pbr_run: %s         nothing will be processed until the "
+                         "source or the config changes\n", sReport.c_str());
+    // A build that was attempted and failed may have left the chain or the
+    // ingest half made for the new rate: put back the current set's.
+    if (bAdapted && !buildChain(oRun.oCfg, oRun.oChain, dMs))
+        return false;
+    if (bChainOk && !buildIngest(oRun.oCfg, oRun.pIngest))
+        return false;
+    return true;
+}
 
-    // ---- report ------------------------------------------------------------
-    const ChannelIngest::Stats& oStats = pIngest->stats();
-    const double dElapsed = nowSeconds(oStart);
+// Packets are arriving but the streams have not been matched to the
+// configured receiver names: nothing will ever be processed, and without
+// this line the only sign is a summary at the end. A reminder, not a
+// deadline; it repeats until the names agree.
+void noteUnresolvedRoles(Run& oRun)
+{
+    if (oRun.pIngest->rolesResolved())
+        return;
+    const double dNow = nowSeconds(oRun.oStart);
+    if (dNow - oRun.dLastUnresolvedNote < 5.0)
+        return;
+    oRun.dLastUnresolvedNote = dNow;
+    std::fprintf(stderr,
+        "pbr_run: %llu datagrams received but the channels are not identified yet.\n"
+        "         seen: %s\n"
+        "         config expects \"%s\" (reference) and \"%s\" (surveillance)\n",
+        (unsigned long long)oRun.uDatagrams, oRun.pIngest->streamSummary().c_str(),
+        oRun.oCfg.sReferenceName.c_str(), oRun.oCfg.sSurveillanceName.c_str());
+}
 
-    std::sort(vdTotalMs.begin(), vdTotalMs.end());
-    const double dMedianMs = vdTotalMs.empty() ? 0.0
-                           : vdTotalMs[vdTotalMs.size() / 2];
-    const double dBudgetMs = 1000.0 * double(oCfg.uHopSamples) /
-                             double(oCfg.uSampleRateHz);
+// ---------------------------------------------------------------------------
+// One CPI: process it, then publish the results.
+// ---------------------------------------------------------------------------
+
+struct CpiResult {
+    uint64_t    uCpiStart = 0;
+    uint64_t    uStatus   = kArdStatusOk;
+    const char* pReason   = "";
+    DSIStats    oDsiStats;
+    ArdStats    oArdStats;
+    double      dDsiMs    = 0.0;
+    double      dArdMs    = 0.0;
+    double      dWaitMs   = 0.0;
+    double      dSignalS  = 0.0;
+    double      dWallS    = 0.0;
+    double      dLagS     = 0.0;
+};
+
+// Cancel, then map and detect. A CPI the chain cannot process is not a crash
+// and not a stop: it goes out as a BLANK frame carrying a status word, so a
+// dead front end shows as "receiving, nothing to process" downstream. The
+// input guard runs first, so the solver is never handed a window that would
+// break it.
+void processCpi(Chain& oChain, ComplexF* pMap, CpiResult& oResult)
+{
+    const TimePoint tStart = std::chrono::steady_clock::now();
+
+    bool bCancelOk = false;
+    if (!inputIsProcessable(oChain.vcRef, oChain.vcSur, oResult.pReason))
+        oResult.uStatus = kArdStatusNullInput;
+    else
+        bCancelOk = oChain.pDsi->cancel(oChain.vcRef.data(), oChain.vcSur.data(),
+                                        oChain.bDeviceCoupled ? nullptr : oChain.vcCleaned.data(),
+                                        oResult.oDsiStats);
+
+    const TimePoint tCancelled = std::chrono::steady_clock::now();
+
+    if (oResult.uStatus == kArdStatusOk && !bCancelOk) {
+        oResult.uStatus = kArdStatusFailed;
+        oResult.pReason = "cancellation returned an error";
+    }
+
+    if (oResult.uStatus == kArdStatusOk) {
+        const bool bArdOk = oChain.bDeviceCoupled
+            ? oChain.pArd->processDevice(oChain.pDsi->deviceReference(),
+                                         oChain.pDsi->deviceOutput(),
+                                         pMap, oChain.vDet.data(), kMaxArdDetections,
+                                         oResult.oArdStats)
+            : oChain.pArd->process(oChain.vcRef.data(), oChain.vcCleaned.data(), pMap,
+                                   oChain.vDet.data(), kMaxArdDetections, oResult.oArdStats);
+        if (!bArdOk) {
+            oResult.uStatus = kArdStatusFailed;
+            oResult.pReason = "map formation or CFAR returned an error";
+        }
+    }
+    const TimePoint tMapped = std::chrono::steady_clock::now();
+
+    if (oResult.uStatus != kArdStatusOk) {
+        // The blank frame: zero map, no detections, zero statistics.
+        if (pMap != nullptr)
+            std::fill(oChain.vcMap.begin(), oChain.vcMap.end(), ComplexF(0.0f, 0.0f));
+        oResult.oDsiStats = DSIStats();
+        oResult.oArdStats = ArdStats();
+    }
+
+    oResult.dDsiMs = msBetween(tStart, tCancelled);
+    oResult.dArdMs = msBetween(tCancelled, tMapped);
+}
+
+// Count a blank frame. False when stage failures have run on long enough
+// that the fault is not in the data.
+bool countStatus(Run& oRun, uint64_t uStatus)
+{
+    if (uStatus == kArdStatusOk) {
+        oRun.uConsecutiveFailures = 0;
+    } else if (uStatus == kArdStatusNullInput) {
+        ++oRun.uNullCpis;
+        oRun.uConsecutiveFailures = 0;
+    } else {
+        ++oRun.uFailedCpis;
+        ++oRun.uConsecutiveFailures;
+        if (oRun.uConsecutiveFailures >= kMaxConsecutiveFailures) {
+            std::fprintf(stderr, "pbr_run: %llu consecutive processing "
+                                 "failures; this is not the data. Stopping.\n",
+                         (unsigned long long)oRun.uConsecutiveFailures);
+            return false;
+        }
+    }
+    return true;
+}
+
+// Signal time is where this CPI sits in the stream; wall time is how long we
+// have been running. What matters is not the gap between them but whether
+// that gap GROWS.
+//
+// Both clocks are zeroed at the same instant: the moment the first CPI
+// finished processing. Anything before it -- waiting for the transmitter to
+// start, the socket filling, the first window completing -- is a fixed
+// startup offset, not a backlog, and measuring from program start would bake
+// it in permanently and make a chain that is keeping up perfectly look like
+// one that is seconds behind. A chain that keeps up then holds the lag at
+// zero, whatever the algorithm costs per CPI.
+void updateTimeline(Run& oRun, CpiResult& oResult)
+{
+    oResult.dSignalS = double(oResult.uCpiStart - oRun.uFirstCpiStart) /
+                       double(oRun.oCfg.uSampleRateHz);
+    oResult.dWallS   = nowSeconds(oRun.oStart);
+    if (!oRun.bHaveFirst) {
+        oRun.bHaveFirst      = true;
+        oRun.dWallAtFirstCpi = oResult.dWallS;
+    }
+    oResult.dLagS = (oResult.dWallS - oRun.dWallAtFirstCpi) - oResult.dSignalS;
+    if (oResult.dLagS > oRun.dMaxLag)
+        oRun.dMaxLag = oResult.dLagS;
+    oRun.vdTotalMs.push_back(oResult.dDsiMs + oResult.dArdMs);
+}
+
+void printCpiLine(uint64_t uCpiIndex, const CpiResult& oResult)
+{
+    if (oResult.uStatus == kArdStatusOk) {
+        std::printf("CPI %4llu  t=%7.3f s  dsi %6.1f  ard %5.1f  "
+                    "total %6.1f ms  %5.2f dB  %3llu det  lag %6.3f s\n",
+                    (unsigned long long)uCpiIndex, oResult.dSignalS,
+                    oResult.dDsiMs, oResult.dArdMs, oResult.dDsiMs + oResult.dArdMs,
+                    oResult.oDsiStats.dSuppressionDb,
+                    (unsigned long long)oResult.oArdStats.uDetections, oResult.dLagS);
+    } else {
+        std::printf("CPI %4llu  t=%7.3f s  %s: %s -- blank frame  lag %6.3f s\n",
+                    (unsigned long long)uCpiIndex, oResult.dSignalS,
+                    (oResult.uStatus == kArdStatusNullInput) ? "NULL INPUT" : "FAILED",
+                    oResult.pReason, oResult.dLagS);
+    }
+    std::fflush(stdout);
+}
+
+void writeDetections(std::FILE* pDetCsv, uint64_t uCpiIndex, const Chain& oChain,
+                     const CpiResult& oResult)
+{
+    if (pDetCsv == nullptr)
+        return;
+    for (uint64_t u = 0; u < oResult.oArdStats.uDetections; ++u) {
+        const Detection& oDet = oChain.vDet[static_cast<size_t>(u)];
+        std::fprintf(pDetCsv, "%llu,%.6f,%llu,%llu,%.4f,%.4f,%.4f,%.4f\n",
+                     (unsigned long long)uCpiIndex, oResult.dSignalS,
+                     (unsigned long long)oDet.uRangeBin,
+                     (unsigned long long)oDet.uDopplerBin,
+                     oDet.dRangeKm, oDet.dDopplerHz, oDet.dPowerDb, oDet.dSnrDb);
+    }
+}
+
+// The frame, then each channel's spectrum as it was handed to the canceller
+// (blank frames included: a dead input is exactly what that panel is for),
+// then the status: what the viewer's header strip shows, with the telemetry
+// column names as keys, plus the live config values and where to send
+// changes.
+void streamFrame(Run& oRun, size_t uFrameBytes, const CpiResult& oResult)
+{
+    Chain&           oChain  = oRun.oChain;
+    const PbrConfig& oCfg    = oRun.oCfg;
+    ArdStreamSender& oSender = oRun.oOut.oSender;
+    const uint32_t uSequence = static_cast<uint32_t>(oRun.uCpiIndex);
+
+    oSender.sendFrame(oChain.vFrame.data(), uFrameBytes, uSequence);
+
+    const ComplexF* apChannel[2] = { oChain.vcRef.data(), oChain.vcSur.data() };
+    for (uint32_t c = 0; c < 2; ++c) {
+        if (oChain.oSpectrum.compute(apChannel[c], oCfg.uCpiSamples, oChain.vfSpectrum.data()))
+            oSender.sendSpectrum(oChain.vfSpectrum.data(), kSpectrumBins, c,
+                                 static_cast<uint32_t>(oCfg.uSampleRateHz), uSequence);
+    }
+
+    char achStatus[1200];
+    const int iLen = std::snprintf(
+        achStatus, sizeof(achStatus),
+        "{\"runName\":\"%s\",\"cpi\":%llu,\"status\":%llu,"
+        "\"reason\":\"%s\",\"signalTimeS\":%.3f,\"lagS\":%.3f,"
+        "\"dsiMs\":%.1f,\"ardMs\":%.1f,\"totalMs\":%.1f,"
+        "\"suppressionDb\":%.2f,\"peakDb\":%.2f,"
+        "\"detections\":%llu,\"borderDetections\":%llu,\"skipped\":%llu,"
+        "\"controlPort\":%u,\"liveChanges\":%llu,"
+        "\"config\":{\"DSI_ALGORITHM\":\"%s\",\"DSI_BACKEND\":\"%s\","
+        "\"ARD_ALGORITHM\":\"%s\",\"CFAR_PFA\":\"%g\",\"CPI_LENGTH_s\":\"%g\","
+        "\"SAMPLE_RATE_Hz\":\"%llu\"}}",
+        oRun.oOut.sRunName.c_str(), (unsigned long long)oRun.uCpiIndex,
+        (unsigned long long)oResult.uStatus, oResult.pReason, oResult.dSignalS, oResult.dLagS,
+        oResult.dDsiMs, oResult.dArdMs, oResult.dDsiMs + oResult.dArdMs,
+        oResult.oDsiStats.dSuppressionDb, oResult.oArdStats.dPeakDb,
+        (unsigned long long)oResult.oArdStats.uDetections,
+        (unsigned long long)oResult.oArdStats.uDetectionsInBorder,
+        (unsigned long long)oRun.pIngest->stats().uCpisOvertaken,
+        static_cast<unsigned>(oCfg.uControlPort),
+        (unsigned long long)oRun.uLiveChanges,
+        oCfg.sDsiAlgorithm.c_str(), oCfg.sDsiBackend.c_str(),
+        oCfg.sArdAlgorithm.c_str(), oCfg.dCfarPfa, oCfg.dCpiSeconds,
+        (unsigned long long)oCfg.uSampleRateHz);
+    if (iLen > 0 && static_cast<size_t>(iLen) < sizeof(achStatus))
+        oSender.sendStatus(achStatus, uSequence);
+}
+
+// Serialise the map once, then write it and/or stream it.
+bool publishFrame(Run& oRun, const CpiResult& oResult)
+{
+    const Chain& oChain = oRun.oChain;
+    ArdFileHeader oHeader;
+    oHeader.uRangeBins         = oChain.oArdParams.uRangeBins;
+    oHeader.uDopplerBins       = oChain.oArdParams.uDopplerBins;
+    oHeader.uSampleRateHz      = oChain.oArdParams.uSampleRateHz;
+    oHeader.uDopplerDecimation = oChain.oArdParams.uDopplerDecimation;
+    oHeader.uCpiStartIndex     = oResult.uCpiStart;
+    oHeader.uDetections        = oResult.oArdStats.uDetections;
+    oHeader.uStatus            = oResult.uStatus;
+
+    size_t uFrameBytes = 0;
+    if (!serialiseArdFrame(oHeader, oChain.vcMap.data(), oChain.vDet.data(),
+                           oRun.oChain.vFrame.data(), oChain.vFrame.size(), uFrameBytes))
+        return false;
+
+    if (oRun.oOut.bWriteFrames) {
+        char achPath[512];
+        std::snprintf(achPath, sizeof(achPath), "%s/ard_%05llu.bin",
+                      oRun.oOut.sArdDir.c_str(), (unsigned long long)oRun.uCpiIndex);
+        if (!writeArdFrameBytes(achPath, oChain.vFrame.data(), uFrameBytes))
+            return false;
+    }
+    if (oRun.oOut.bStreamFrames)
+        streamFrame(oRun, uFrameBytes, oResult);
+    return true;
+}
+
+void writeTelemetry(const Run& oRun, const CpiResult& oResult,
+                    double dPrintMs, double dDetCsvMs, double dArdWriteMs)
+{
+    if (oRun.oOut.pTelCsv == nullptr)
+        return;
+    std::fprintf(oRun.oOut.pTelCsv,
+        "%llu,%llu,%.6f,%.6f,%.6f,%.4f,%.4f,%.4f,%.4f,%.4f,"
+        "%llu,%llu,%llu,%llu,%.4f,%.4f,%.4f,%.4f,%llu\n",
+        (unsigned long long)oRun.uCpiIndex,
+        (unsigned long long)oResult.uCpiStart,
+        oResult.dSignalS, oResult.dWallS, oResult.dLagS,
+        oResult.dDsiMs, oResult.dArdMs, oResult.dDsiMs + oResult.dArdMs,
+        oResult.oDsiStats.dSuppressionDb, oResult.oArdStats.dPeakDb,
+        (unsigned long long)oResult.oArdStats.uDetections,
+        (unsigned long long)oResult.oArdStats.uDetectionsInBorder,
+        (unsigned long long)oRun.pIngest->stats().uCpisOvertaken,
+        (unsigned long long)oRun.uDatagrams,
+        oResult.dWaitMs, dPrintMs, dDetCsvMs, dArdWriteMs,
+        (unsigned long long)oResult.uStatus);
+}
+
+// The first CPI's input, once, if --dump-cpi asked for it.
+bool dumpFirstCpi(Run& oRun, uint64_t uCpiStart)
+{
+    if (oRun.oOptions.sDumpCpiPath.empty() || oRun.bCpiDumped)
+        return true;
+    CpiFileHeader oHeader;
+    oHeader.uSampleCount  = oRun.oCfg.uCpiSamples;
+    oHeader.uSampleRateHz = oRun.oCfg.uSampleRateHz;
+    oHeader.uStartIndex   = uCpiStart;
+    if (!writeCpiFile(oRun.oOptions.sDumpCpiPath.c_str(), oHeader,
+                      oRun.oChain.vcRef.data(), oRun.oChain.vcSur.data()))
+        return false;
+    oRun.bCpiDumped = true;
+    std::printf("wrote the first CPI (start index %llu) to %s\n",
+                (unsigned long long)uCpiStart, oRun.oOptions.sDumpCpiPath.c_str());
+    return true;
+}
+
+// One extracted CPI, start to finish. False on an error that ends the run.
+bool handleCpi(Run& oRun, uint64_t uCpiStart)
+{
+    if (!dumpFirstCpi(oRun, uCpiStart))
+        return false;
+
+    if (!oRun.bHaveFirst) {
+        oRun.uFirstCpiStart = uCpiStart;
+        oRun.dStartupOffset = nowSeconds(oRun.oStart);
+    }
+
+    CpiResult oResult;
+    oResult.uCpiStart = uCpiStart;
+    // Everything since the previous CPI's output finished: draining the
+    // socket, parsing, and spinning while the next window fills.
+    oResult.dWaitMs = oRun.bHaveLastOutput
+                    ? msBetween(oRun.oLastOutputEnd, std::chrono::steady_clock::now())
+                    : 0.0;
+
+    const bool bWantMap = (oRun.oOut.bWriteFrames || oRun.oOut.bStreamFrames) &&
+                          (oRun.uCpiIndex % oRun.oCfg.uArdSnapshotEvery == 0);
+    processCpi(oRun.oChain, bWantMap ? oRun.oChain.vcMap.data() : nullptr, oResult);
+    if (!countStatus(oRun, oResult.uStatus))
+        return false;
+    updateTimeline(oRun, oResult);
+
+    // The rest is split into the places a stall could hide: printing the
+    // progress line (which on a `make run` goes through tee and an ssh pipe,
+    // and blocks if that backs up), writing the CSV, and writing or
+    // streaming the frame.
+    const TimePoint tPrintStart = std::chrono::steady_clock::now();
+    printCpiLine(oRun.uCpiIndex, oResult);
+    const TimePoint tPrinted = std::chrono::steady_clock::now();
+    writeDetections(oRun.oOut.pDetCsv, oRun.uCpiIndex, oRun.oChain, oResult);
+    const TimePoint tDetectionsWritten = std::chrono::steady_clock::now();
+    if (bWantMap && !publishFrame(oRun, oResult))
+        return false;
+    const TimePoint tFramePublished = std::chrono::steady_clock::now();
+
+    // Written last, so the row can carry every phase of this CPI. The
+    // telemetry write itself is one fprintf and falls into the next CPI's
+    // waitMs, which is where it belongs.
+    writeTelemetry(oRun, oResult, msBetween(tPrintStart, tPrinted),
+                   msBetween(tPrinted, tDetectionsWritten),
+                   msBetween(tDetectionsWritten, tFramePublished));
+
+    oRun.oLastOutputEnd  = std::chrono::steady_clock::now();
+    oRun.bHaveLastOutput = true;
+    ++oRun.uCpiIndex;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Startup and the summary.
+// ---------------------------------------------------------------------------
+
+void printStartup(const Run& oRun, double dBuildMs)
+{
+    const Outputs& oOut = oRun.oOut;
+    printPbrConfig(oRun.oCfg);
+    std::printf("\npbr_run\n");
+    std::printf("  source        %s\n",
+                oRun.oOptions.bLive ? "live UDP" : oRun.oOptions.sCapturePath.c_str());
+    std::printf("  output        %s\n",
+                oRun.oOptions.sOutDir.empty() ? "console only" : oRun.oOptions.sOutDir.c_str());
+    std::printf("  frames        %s%s%s\n",
+                oOut.bWriteFrames ? "written to disk" : "",
+                (oOut.bWriteFrames && oOut.bStreamFrames) ? " and " : "",
+                oOut.bStreamFrames ? "streamed" : (oOut.bWriteFrames ? "" : "neither written nor streamed"));
+    std::printf("  chain         %s -> %s\n", oRun.oChain.pDsi->name(), oRun.oChain.pArd->name());
+    std::printf("  coupling      %s\n",
+                oRun.oChain.bDeviceCoupled ? "device-coupled: samples stay on the GPU"
+                                           : "via host: the cleaned CPI round-trips");
+    std::printf("  build+warm-up %.1f ms (not counted)\n", dBuildMs);
+    if (oRun.oOptions.bLive && !oRun.oChain.bDeviceCoupled)
+        std::fprintf(stderr,
+            "\npbr_run: WARNING: a live run on the CPU backend. It is a correctness\n"
+            "         reference and may not keep up with a live stream; the summary's\n"
+            "         budget and lag checks will say if it fell behind.\n");
+}
+
+// Open the live socket or the capture file.
+bool openSource(const Run& oRun, UdpReceiver& oReceiver, CaptureReader& oReader)
+{
+    const PbrConfig& oCfg = oRun.oCfg;
+    if (!oRun.oOptions.bLive)
+        return oReader.open(oRun.oOptions.sCapturePath.c_str());
+
+    if (!oReceiver.open(oCfg.uUdpPort))
+        return false;
+    if (!oRun.oOptions.sMulticastGroup.empty()) {
+        if (!oReceiver.joinMulticastGroup(oRun.oOptions.sMulticastGroup.c_str()))
+            return false;
+        std::printf("joined multicast group %s\n", oRun.oOptions.sMulticastGroup.c_str());
+    }
+    // The single-threaded design rests on this buffer absorbing what arrives
+    // while a CPI is being processed, so report what the kernel actually
+    // granted rather than what was asked for. Two channels of int16 I and Q;
+    // the packet headers add about 2% and are left out.
+    const double dBytesPerSecond = 2.0 * 4.0 * double(oCfg.uSampleRateHz);
+    const double dSlackSeconds   = double(oReceiver.actualRcvBufBytes()) / dBytesPerSecond;
+    std::printf("socket buffer %d bytes (%.2f s of slack)\n",
+                oReceiver.actualRcvBufBytes(), dSlackSeconds);
+    if (dSlackSeconds < 1.0)
+        std::printf("  WARNING: under 1 s of slack. Raise "
+                    "net.core.rmem_max on the board.\n");
+    std::printf("listening on UDP port %u -- start uhd_to_vita49 (make drive) or fers-cli now\n\n",
+                static_cast<unsigned>(oCfg.uUdpPort));
+    return true;
+}
+
+double medianOf(std::vector<double> vd)   // by value: sorted here
+{
+    if (vd.empty())
+        return 0.0;
+    std::sort(vd.begin(), vd.end());
+    const size_t uMid = vd.size() / 2;
+    return (vd.size() % 2 == 0) ? 0.5 * (vd[uMid - 1] + vd[uMid]) : vd[uMid];
+}
+
+// The counters, the timing and the verdict. True for PASS.
+bool printSummary(const Run& oRun, const CaptureWriter& oCapture, bool bCaptureClosed,
+                  bool bError)
+{
+    const ChannelIngest::Stats& oStats = oRun.pIngest->stats();
+    const double dElapsed  = nowSeconds(oRun.oStart);
+    const double dBudgetMs = 1000.0 * double(oRun.oCfg.uHopSamples) /
+                             double(oRun.oCfg.uSampleRateHz);
+    double dBestMs = 0.0, dWorstMs = 0.0;
+    if (!oRun.vdTotalMs.empty()) {
+        dBestMs  = *std::min_element(oRun.vdTotalMs.begin(), oRun.vdTotalMs.end());
+        dWorstMs = *std::max_element(oRun.vdTotalMs.begin(), oRun.vdTotalMs.end());
+    }
 
     std::printf("\n================ pbr_run summary ================\n");
     std::printf("elapsed                 %.2f s\n", dElapsed);
     std::printf("datagrams               %llu  (%llu parse failures)\n",
-                (unsigned long long)uDatagrams,
-                (unsigned long long)uParseFailures);
+                (unsigned long long)oRun.uDatagrams,
+                (unsigned long long)oRun.uParseFailures);
     std::printf("writes rejected (late)  %llu\n",
                 (unsigned long long)oStats.uRejectedWrites);
     std::printf("packet-count gaps       %llu\n",
@@ -1219,55 +1169,51 @@ int main(int argc, char* argv[])
                 (unsigned long long)oStats.uSessionChanges);
     std::printf("timeline re-anchors     %llu\n",
                 (unsigned long long)oStats.uReanchors);
-    std::printf("live changes applied    %llu\n", (unsigned long long)uLiveChanges);
-    std::printf("sample rate adaptions   %llu\n", (unsigned long long)uRateAdaptions);
-    bool bCaptureClosed = true;
-    if (oCapture.isOpen()) {
+    std::printf("live changes applied    %llu\n", (unsigned long long)oRun.uLiveChanges);
+    std::printf("sample rate adaptions   %llu\n", (unsigned long long)oRun.uRateAdaptions);
+    if (!oRun.oOptions.sSaveCapturePath.empty())
         std::printf("captured                %llu datagrams, %.1f MB to %s\n",
                     (unsigned long long)oCapture.recordCount(), oCapture.byteCount() / 1e6,
-                    oOptions.sSaveCapturePath.c_str());
-        bCaptureClosed = oCapture.close();
-    }
-    if (bStreamFrames)
+                    oRun.oOptions.sSaveCapturePath.c_str());
+    if (oRun.oOut.bStreamFrames)
         std::printf("ARD stream send fails   %llu\n",
-                    (unsigned long long)oArdSender.sendFailures());
+                    (unsigned long long)oRun.oOut.oSender.sendFailures());
     std::printf("\n-- CPIs\n");
-    std::printf("   processed              %llu\n", (unsigned long long)uCpiIndex);
+    std::printf("   processed              %llu\n", (unsigned long long)oRun.uCpiIndex);
     std::printf("   skipped, overtaken     %llu\n",
                 (unsigned long long)oStats.uCpisOvertaken);
     std::printf("   skipped, poor coverage %llu\n",
                 (unsigned long long)oStats.uCpisSkippedCoverage);
     std::printf("   blank, null input      %llu  (channel all zeros or non-finite)\n",
-                (unsigned long long)uNullCpis);
+                (unsigned long long)oRun.uNullCpis);
     std::printf("   blank, stage failed    %llu\n",
-                (unsigned long long)uFailedCpis);
+                (unsigned long long)oRun.uFailedCpis);
     std::printf("\n-- timing, against a %.0f ms budget per CPI\n", dBudgetMs);
-    if (!vdTotalMs.empty()) {
+    if (!oRun.vdTotalMs.empty()) {
         std::printf("   best / median / worst  %.1f / %.1f / %.1f ms\n",
-                    vdTotalMs.front(), dMedianMs, vdTotalMs.back());
-        std::printf("   worst as a fraction    %.3f of the budget\n",
-                    dWorstTotalMs / dBudgetMs);
+                    dBestMs, medianOf(oRun.vdTotalMs), dWorstMs);
+        std::printf("   worst as a fraction    %.3f of the budget\n", dWorstMs / dBudgetMs);
     }
     std::printf("   startup offset         %.3f s (before the first CPI; not a backlog)\n",
-                dStartupOffset);
-    std::printf("   lag growth since       %.3f s  <-- must stay near zero\n", dMaxLag);
+                oRun.dStartupOffset);
+    std::printf("   lag growth since       %.3f s  <-- must stay near zero\n", oRun.dMaxLag);
 
     // Blank frames for null input are the chain doing its job on a dead
     // input and do not fail the run; a stage failure does. A file replay
     // runs as fast as it can, so lag is meaningless there.
-    bool bPass = !bReadError && !bProcessError && bCaptureClosed &&
-                 uParseFailures == 0 &&
+    bool bPass = !bError && bCaptureClosed &&
+                 oRun.uParseFailures == 0 &&
                  oStats.uRejectedWrites == 0 &&
                  oStats.uCpisOvertaken == 0 &&
-                 uFailedCpis == 0 &&
-                 uCpiIndex > 0;
-    if (!oOptions.sDumpCpiPath.empty() && !bCpiDumped) {
+                 oRun.uFailedCpis == 0 &&
+                 oRun.uCpiIndex > 0;
+    if (!oRun.oOptions.sDumpCpiPath.empty() && !oRun.bCpiDumped) {
         std::printf("\n   NO CPI WAS EXTRACTED, so %s was not written\n",
-                    oOptions.sDumpCpiPath.c_str());
+                    oRun.oOptions.sDumpCpiPath.c_str());
         bPass = false;
     }
-    if (oOptions.bLive) {
-        if (dWorstTotalMs > dBudgetMs) {
+    if (oRun.oOptions.bLive) {
+        if (dWorstMs > dBudgetMs) {
             std::printf("\n   WORST CPI EXCEEDED THE BUDGET\n");
             bPass = false;
         }
@@ -1275,9 +1221,9 @@ int main(int argc, char* argv[])
         // that keeps up holds this near zero however long it runs; one that
         // falls behind grows it without bound.
         const double dLagLimit = dBudgetMs / 1000.0;
-        if (dMaxLag > dLagLimit) {
+        if (oRun.dMaxLag > dLagLimit) {
             std::printf("\n   LAG GREW BY %.3f s -- the chain is falling behind\n",
-                        dMaxLag);
+                        oRun.dMaxLag);
             bPass = false;
         }
     }
@@ -1288,10 +1234,140 @@ int main(int argc, char* argv[])
     // put a reassuring word next to a number that does not support it.
     if (!bPass)
         std::printf("FAIL -- see the counters above.\n");
-    else if (oOptions.bLive)
+    else if (oRun.oOptions.bLive)
         std::printf("PASS -- the chain kept up in real time, every check clean.\n");
     else
         std::printf("PASS -- every check clean. This was a file replay, so the\n"
                     "        timing above is throughput, NOT real-time behaviour.\n");
-    return bPass ? 0 : 1;
+    return bPass;
+}
+
+} // namespace
+
+int main(int argc, char* argv[])
+{
+    Run oRun;
+    if (!parseArgs(argc, argv, oRun.oOptions)) {
+        printUsage(argv[0]);
+        return 1;
+    }
+    const Options& oOptions = oRun.oOptions;
+
+    if (!loadPbrConfig(oOptions.sConfigPath.c_str(), oRun.oCfg))
+        return 1;
+    if (!makeOutputDir(oOptions, oRun.oCfg, oRun.oOut))
+        return 1;
+
+    // ---- build the chain and the ingest -------------------------------------
+    double dBuildMs = 0.0;
+    if (!buildChain(oRun.oCfg, oRun.oChain, dBuildMs) || !buildIngest(oRun.oCfg, oRun.pIngest))
+        return 1;
+    if (oRun.oOut.bStreamFrames &&
+        !oRun.oOut.oSender.open(oRun.oCfg.sArdStreamHost.c_str(), oRun.oCfg.uArdStreamPort, nullptr))
+        return 1;
+    printStartup(oRun, dBuildMs);
+
+    // ---- the control port ---------------------------------------------------
+    const PbrConfig oInitialCfg = oRun.oCfg;   // the file's set, for the Reset button
+    oRun.oControl.pCurrent = &oRun.oCfg;
+    oRun.oControl.pInitial = &oInitialCfg;
+    HttpServer oControlServer;
+    if (oRun.oCfg.uControlPort != 0) {
+        if (!oControlServer.open(oRun.oCfg.uControlPort))
+            return 1;
+        std::printf("  control       http://<this host>:%u  (GET /api/config, POST /api/apply, POST /api/reset)\n",
+                    static_cast<unsigned>(oRun.oCfg.uControlPort));
+    }
+    std::printf("\n");
+
+    // ---- the source and the outputs -----------------------------------------
+    UdpReceiver   oReceiver;
+    CaptureReader oReader;
+    if (!openSource(oRun, oReceiver, oReader))
+        return 1;
+
+    CaptureWriter oCapture;
+    if (!oOptions.sSaveCapturePath.empty()) {
+        if (!oCapture.open(oOptions.sSaveCapturePath.c_str()))
+            return 1;
+        std::printf("recording every datagram to %s\n", oOptions.sSaveCapturePath.c_str());
+    }
+    if (!openOutputFiles(oOptions, oRun.oOut))
+        return 1;
+
+    // ---- the loop ----------------------------------------------------------
+    std::vector<uint8_t> vDatagram(kDatagramCapacity);
+    oRun.oStart = std::chrono::steady_clock::now();
+    bool bError = false;
+
+    while (!bError) {
+        if (oOptions.dSeconds > 0.0 && nowSeconds(oRun.oStart) >= oOptions.dSeconds)
+            break;
+
+        // Live changes, at the boundary: nothing is mid-CPI here, since the
+        // previous iteration's drain loop ran to NotYet. Serve the control
+        // port (microseconds when idle), then apply whatever it accepted.
+        if (oControlServer.isOpen()) {
+            oRun.oControl.uCpiIndex = oRun.uCpiIndex;
+            oControlServer.servePending(controlHandler, &oRun.oControl);
+        }
+        if (oRun.oControl.bPending && !applyPendingChange(oRun)) {
+            bError = true;
+            break;
+        }
+
+        size_t uLength = 0;
+        if (oOptions.bLive) {
+            const ReceiveResult eResult =
+                oReceiver.receive(vDatagram.data(), vDatagram.size(), uLength);
+            if (eResult == ReceiveResult::WouldBlock)
+                continue;   // nothing waiting; the socket is non-blocking
+            if (eResult == ReceiveResult::Error) {
+                bError = true;
+                break;
+            }
+        } else {
+            bool bEof = false;
+            if (!oReader.read(vDatagram.data(), vDatagram.size(), uLength, bEof)) {
+                bError = !bEof;
+                break;
+            }
+        }
+        ++oRun.uDatagrams;
+
+        if (oCapture.isOpen() && !oCapture.write(vDatagram.data(), uLength)) {
+            bError = true;
+            break;
+        }
+
+        Vita49Packet oPacket;
+        if (!parseVita49Packet(vDatagram.data(), uLength, oPacket)) {
+            ++oRun.uParseFailures;
+            continue;
+        }
+        if (!oRun.pIngest->handlePacket(oPacket) || !followSourceRate(oRun)) {
+            bError = true;
+            break;
+        }
+        noteUnresolvedRoles(oRun);
+
+        // Drain whatever CPIs the new data completed.
+        for (;;) {
+            uint64_t uCpiStart = 0;
+            const CpiStatus eCpi = oRun.pIngest->tryExtractCpi(
+                oRun.oChain.vcRef.data(), oRun.oChain.vcSur.data(), oRun.oCfg.uCpiSamples, uCpiStart);
+            if (eCpi == CpiStatus::NotYet)
+                break;
+            if (eCpi == CpiStatus::Skipped)
+                continue;
+            if (!handleCpi(oRun, uCpiStart)) {
+                bError = true;
+                break;
+            }
+        }
+    }
+
+    closeOutputFiles(oRun.oOut);
+    const bool bCaptureClosed = !oCapture.isOpen() || oCapture.close();
+    return printSummary(oRun, oCapture, bCaptureClosed, bError) ? 0 : 1;
 }

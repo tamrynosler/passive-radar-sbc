@@ -172,11 +172,11 @@
       <div class="prow"><label title="Show, for every cell, the highest dB seen over the last N frames. Slow or intermittent targets stand out."><input type="checkbox" id="showHold">Max hold</label></div>
       <div class="prow"><label title="Before any processing: the power spectrum of the raw CPI, as the canceller received it, one row per CPI, newest at the bottom. Frequency offset from the carrier on x. Shows the station, neighbours, interference and a dead front end. A CPI without data is a black row."><input type="checkbox" id="showRf">Spectrogram before processing</label></div>
       <div class="prow"><label title="After DSI cancellation and the CAF: one row per CPI, newest at the bottom, the strongest cell over range for every Doppler bin (or over Doppler for every range bin). Shows cancellation residue and target Doppler tracks over time. A CPI without data is a black row."><input type="checkbox" id="showWf">Spectrogram after processing</label></div>
-      <div class="prow"><label title="Doppler window shown on every panel, symmetric about zero. Display only; the chain computes the full span." for="fdMax">Doppler span (&plusmn;Hz)</label><input type="text" id="fdMax" value="400"></div>
-      <div class="prow"><label title="Bottom of the colour scale, in dB below the 0 dB reference. Everything weaker is drawn in the darkest colour." for="floorDb">Floor (dB)</label><input type="text" id="floorDb" value="-50"></div>
-      <div class="prow"><label title="How many of the most recent frames the max hold is taken over." for="holdFrames">Max hold frames</label><input type="text" id="holdFrames" value="10"></div>
-      <div class="prow"><label title="How many previous frames of detections the Detections panel keeps as grey dots." for="histFrames">Detection history (frames)</label><input type="text" id="histFrames" value="20"></div>
-      <div class="prow"><label title="Rows both spectrograms show, one per CPI, newest at the bottom. Rows with no frame yet, or whose frame was blank or lost, are black." for="wfDepth">Spectrogram rows</label><input type="text" id="wfDepth" value="60"></div>
+      <div class="prow"><label title="Doppler window shown on every panel, symmetric about zero. Display only; the chain computes the full span." for="fdMax">Doppler span (&plusmn;Hz)</label><input type="text" id="fdMax"></div>
+      <div class="prow"><label title="Bottom of the colour scale, in dB below the 0 dB reference. Everything weaker is drawn in the darkest colour." for="floorDb">Floor (dB)</label><input type="text" id="floorDb"></div>
+      <div class="prow"><label title="How many of the most recent frames the max hold is taken over." for="holdFrames">Max hold frames</label><input type="text" id="holdFrames"></div>
+      <div class="prow"><label title="How many previous frames of detections the Detections panel keeps as grey dots." for="histFrames">Detection history (frames)</label><input type="text" id="histFrames"></div>
+      <div class="prow"><label title="Rows both spectrograms show, one per CPI, newest at the bottom. Rows with no frame yet, or whose frame was blank or lost, are black." for="wfDepth">Spectrogram rows</label><input type="text" id="wfDepth"></div>
       <div class="prow"><label title="After processing: Doppler puts the strongest cell over range per Doppler bin on x; Range the strongest over Doppler per range bin." for="wfAxis">After-processing axis</label>
         <select id="wfAxis"><option value="doppler">Doppler</option><option value="range">Range</option></select></div>
       <div class="prow"><label for="rfChannel" title="Before processing: which channel's spectrum to show. The reference sees the station directly; the surveillance is what the canceller cleans.">Before-processing channel</label>
@@ -272,6 +272,8 @@ var POLL_MS = 500;
 var STALE_S = 3;
 var RELOAD_AFTER_APPLY_MS = 4000;   // fallback reload; normally liveChanges triggers it
 
+// The display fields' starting values, and what Reset puts back. fdMax is
+// replaced by the chain's DOPPLER_HALF_SPAN_Hz once its config arrives.
 var DISPLAY_DEFAULTS = {
   fdMax: "400", floorDb: "-50", holdFrames: "10", histFrames: "20",
   wfDepth: "60", wfAxis: "doppler", rfChannel: "1"
@@ -304,9 +306,11 @@ var state = {
   rfRefDb: [null, null]  // running maximum per channel, the 0 dB of that panel
 };
 
-// The display settings, read from the panel fields (with defaults when a
-// field holds nonsense) so every draw uses the same numbers.
-var display = {fdMax: 400, floorDb: -50, holdFrames: 10, histFrames: 20, wfDepth: 60, wfAxis: "doppler", rfChannel: 1};
+// The display settings, read from the panel fields by readDisplayFields (with
+// the defaults when a field holds nonsense) so every draw uses the same
+// numbers.
+var display = {};
+var spanFromConfig = false;   // DOPPLER_HALF_SPAN_Hz applied to the field yet
 
 // --- format helpers --------------------------------------------------------
 
@@ -1058,21 +1062,21 @@ function layout() {
 
 // --- display fields --------------------------------------------------------
 
-function readNumberField(id, fallback, test) {
+function readNumberField(id, test) {
   var v = Number(el(id).value);
   if (!isFinite(v) || !test(v)) {
-    el(id).value = String(fallback);
-    return fallback;
+    el(id).value = DISPLAY_DEFAULTS[id];
+    return Number(DISPLAY_DEFAULTS[id]);
   }
   return v;
 }
 
 function readDisplayFields() {
-  display.fdMax = readNumberField("fdMax", 400, function (v) { return v > 0; });
-  display.floorDb = readNumberField("floorDb", -50, function (v) { return v < 0; });
-  display.holdFrames = Math.round(readNumberField("holdFrames", 10, function (v) { return v >= 1 && v <= 200; }));
-  display.histFrames = Math.round(readNumberField("histFrames", 20, function (v) { return v >= 0 && v <= 1000; }));
-  display.wfDepth = Math.round(readNumberField("wfDepth", 60, function (v) { return v >= 2 && v <= 2000; }));
+  display.fdMax = readNumberField("fdMax", function (v) { return v > 0; });
+  display.floorDb = readNumberField("floorDb", function (v) { return v < 0; });
+  display.holdFrames = Math.round(readNumberField("holdFrames", function (v) { return v >= 1 && v <= 200; }));
+  display.histFrames = Math.round(readNumberField("histFrames", function (v) { return v >= 0 && v <= 1000; }));
+  display.wfDepth = Math.round(readNumberField("wfDepth", function (v) { return v >= 2 && v <= 2000; }));
   display.wfAxis = el("wfAxis").value;
   display.rfChannel = (el("rfChannel").value === "0") ? 0 : 1;
   trimHistories();
@@ -1326,6 +1330,21 @@ function fillFields(map) {
   showAlgorithmRows();
 }
 
+// The chain's DOPPLER_HALF_SPAN_Hz becomes the Doppler span's default, and
+// the field's value the first time a config arrives; later it only changes
+// what Reset puts back, never a span the user has set.
+function useConfigSpan(map) {
+  var span = Number(map.DOPPLER_HALF_SPAN_Hz);
+  if (!isFinite(span) || span <= 0) { return; }
+  DISPLAY_DEFAULTS.fdMax = String(span);
+  if (!spanFromConfig) {
+    spanFromConfig = true;
+    el("fdMax").value = DISPLAY_DEFAULTS.fdMax;
+    readDisplayFields();
+    render();
+  }
+}
+
 function setCfgResult(text, isError, detail) {
   var node = el("cfgResult");
   node.textContent = text;
@@ -1346,7 +1365,9 @@ function loadConfig() {
   fetch("/api/config", {cache: "no-store"}).then(function (response) {
     return response.text().then(function (text) {
       if (!response.ok) { throw new Error(text.trim()); }
-      fillFields(parseConfigText(text));
+      var map = parseConfigText(text);
+      fillFields(map);
+      useConfigSpan(map);
       setCfgResult("loaded " + new Date().toLocaleTimeString(), false);
     });
   }).catch(function (err) {
@@ -1472,7 +1493,7 @@ window.addEventListener("resize", render);
   }
 })();
 
-readDisplayFields();
+resetDisplayFields();
 showAlgorithmRows();
 layout();
 loadConfig();

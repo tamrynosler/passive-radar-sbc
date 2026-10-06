@@ -195,9 +195,8 @@ void HttpServer::close()
     }
 }
 
-bool HttpServer::servePending(HttpHandler pHandler, void* pContext, bool& bServedOut)
+bool HttpServer::servePending(HttpHandler pHandler, void* pContext)
 {
-    bServedOut = false;
     CHECK(miListen >= 0, "HttpServer::servePending on a closed server");
 
     pollfd oPoll;
@@ -207,7 +206,6 @@ bool HttpServer::servePending(HttpHandler pHandler, void* pContext, bool& bServe
     const int iReady = ::poll(&oPoll, 1, 0);
     if (iReady <= 0)
         return true;    // nothing waiting, or a transient poll error
-    bServedOut = true;
     return serveOne(pHandler, pContext);
 }
 

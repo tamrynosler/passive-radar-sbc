@@ -135,7 +135,6 @@ bool ardParamsFromConfig(const PbrConfig& oConfig, ArdParams& oParams)
     oParams.uRangeBins         = oConfig.uRangeBins;
     oParams.uDopplerDecimation = oConfig.uDopplerDecimation;
     oParams.uDopplerBins       = oConfig.uDopplerBins;
-    oParams.dDopplerHalfSpanHz = oConfig.dDopplerHalfSpanHz;
 
     oParams.dCfarPfa          = oConfig.dCfarPfa;
     oParams.uCfarGuardRange   = oConfig.uCfarGuardRange;

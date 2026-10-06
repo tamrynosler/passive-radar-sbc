@@ -99,10 +99,10 @@ int main()
     oThread.join();
     assert(oCtx.iCalls == 4);   // PUT is refused before the handler
 
-    // Nothing pending: servePending returns at once.
-    bool bServed = true;
-    assert(oServer.servePending(handler, &oCtx, bServed));
-    assert(!bServed);
+    // Nothing pending: servePending returns at once, without calling the
+    // handler.
+    assert(oServer.servePending(handler, &oCtx));
+    assert(oCtx.iCalls == 4);
 
     // Nobody listening there: the client reports why, quickly.
     oServer.close();

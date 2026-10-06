@@ -6,7 +6,8 @@
 //
 //   1. pbr_run --dump-cpi freezes one CPI to data/<scenario>/cpi_0000.bin
 //   2. matlab/eca_golden.m reads those exact bytes, cancels in double
-//      precision, writes data/golden_ecam.bin and data/golden_ecab.bin
+//      precision, writes data/<scenario>/golden/golden_ecam.bin and
+//      golden_ecab.bin
 //   3. this tool runs the same algorithm on the same CPI and reports the
 //      relative L2 error against the golden output, PASS/FAIL by exit code
 //
@@ -27,7 +28,8 @@
 // explodes on noise that means nothing.
 //
 // Usage:
-//   dsi_verify --cpi data/cpi_0000.bin --golden data/golden_ecam.bin \
+//   dsi_verify --cpi data/S0_clean/cpi_0000.bin \
+//              --golden data/S0_clean/golden/golden_ecam.bin \
 //              --algorithm ECA-m [--backend CPU] [--tolerance 1e-4]
 
 #include "pbr/Config.hpp"
@@ -40,6 +42,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -147,8 +150,9 @@ bool readGolden(const char* pPath, GoldenHeader& oHeader,
     std::FILE* pFile = std::fopen(pPath, "rb");
     if (pFile == nullptr) {
         std::fprintf(stderr, "golden: cannot open %s: %s\n"
-                             "golden: run  matlab -batch \"run('matlab/eca_golden.m')\"  "
-                             "from the repo root first\n",
+                             "golden: make it from the repo root with\n"
+                             "  matlab -batch \"addpath('matlab'); "
+                             "eca_golden('config/fers.conf', 'data/<scenario>')\"\n",
                      pPath, std::strerror(errno));
         return false;
     }
@@ -176,6 +180,106 @@ bool readGolden(const char* pPath, GoldenHeader& oHeader,
     return bOk;
 }
 
+// The input CPI, which must hold exactly one CPI of the config's length.
+bool loadCpi(const std::string& sPath, uint64_t uCpiSamples, CpiFileHeader& oHeader,
+             std::vector<ComplexF>& vcRef, std::vector<ComplexF>& vcSur)
+{
+    if (!readCpiFileHeader(sPath.c_str(), oHeader))
+        return false;
+    if (oHeader.uSampleCount != uCpiSamples) {
+        std::fprintf(stderr, "dsi_verify: CPI file holds %llu samples but the "
+                             "config says %llu\n",
+                     (unsigned long long)oHeader.uSampleCount,
+                     (unsigned long long)uCpiSamples);
+        return false;
+    }
+    vcRef.assign(static_cast<size_t>(oHeader.uSampleCount), ComplexF());
+    vcSur.assign(static_cast<size_t>(oHeader.uSampleCount), ComplexF());
+    return readCpiFile(sPath.c_str(), oHeader, vcRef.data(), vcSur.data(),
+                       oHeader.uSampleCount);
+}
+
+// The output to compare against: the same algorithm on the --against
+// backend, described by a header made from its parameters.
+//
+// Backend-vs-backend is the stronger test for a GPU port. A golden file can
+// only be compared at a tolerance loose enough to absorb the single-precision
+// difference (~5e-3), and that is exactly the range where an off-by-one or a
+// race would hide. Running the CPU in FP32 mode against the GPU removes
+// precision as a variable, so what is left is structure.
+bool runOtherBackend(const PbrConfig& oCfg, const std::string& sBackend,
+                     const std::vector<ComplexF>& vcRef, const std::vector<ComplexF>& vcSur,
+                     GoldenHeader& oHeader, std::vector<ComplexF>& vcOut, std::string& sNameOut)
+{
+    PbrConfig oOther = oCfg;
+    oOther.sDsiBackend = sBackend;
+
+    DSIParams oParams;
+    if (!dsiParamsFromConfig(oOther, oParams))
+        return false;
+    std::unique_ptr<DSICanceller> pOther = makeDSICanceller(oParams.eAlgorithm, oParams.eBackend);
+    if (!pOther || !pOther->init(oParams))
+        return false;
+
+    vcOut.assign(vcRef.size(), ComplexF());
+    DSIStats oStats;
+    if (!pOther->cancel(vcRef.data(), vcSur.data(), vcOut.data(), oStats))
+        return false;
+
+    sNameOut                 = pOther->name();
+    oHeader.uSampleCount     = oParams.uCpiSamples;
+    oHeader.uClutterTaps     = oParams.uClutterTaps;
+    oHeader.uUpdateSamples   = oParams.uUpdateSamples;
+    oHeader.uAbsoluteLoading = oParams.bAbsoluteLoading ? 1 : 0;
+    oHeader.dLoading         = oParams.dDiagonalLoading;
+    return true;
+}
+
+// The golden output must have been made with THESE parameters. Comparing
+// against one made with different settings would "fail" a correct
+// implementation or, worse, pass a wrong one.
+bool goldenMatches(const GoldenHeader& oGolden, const DSIParams& oParams,
+                   const std::string& sGoldenName)
+{
+    const bool bMatch =
+        oGolden.uSampleCount == oParams.uCpiSamples &&
+        oGolden.uClutterTaps == oParams.uClutterTaps &&
+        oGolden.uUpdateSamples == oParams.uUpdateSamples &&
+        (oGolden.uAbsoluteLoading != 0) == oParams.bAbsoluteLoading &&
+        std::fabs(oGolden.dLoading - oParams.dDiagonalLoading) <=
+            1e-12 * std::fabs(oParams.dDiagonalLoading);
+    if (bMatch)
+        return true;
+
+    std::fprintf(stderr,
+        "dsi_verify: %s was generated with different parameters than the "
+        "current run:\n"
+        "              golden                current (%s)\n"
+        "  samples     %-20llu  %llu\n"
+        "  taps        %-20llu  %llu\n"
+        "  window      %-20llu  %llu\n"
+        "  loading     %g (%s)   %g (%s)\n"
+        "Re-run matlab/eca_golden.m, or pick the matching --algorithm.\n",
+        sGoldenName.c_str(), dsiAlgorithmName(oParams.eAlgorithm),
+        (unsigned long long)oGolden.uSampleCount,
+        (unsigned long long)oParams.uCpiSamples,
+        (unsigned long long)oGolden.uClutterTaps,
+        (unsigned long long)oParams.uClutterTaps,
+        (unsigned long long)oGolden.uUpdateSamples,
+        (unsigned long long)oParams.uUpdateSamples,
+        oGolden.dLoading, oGolden.uAbsoluteLoading ? "absolute" : "relative",
+        oParams.dDiagonalLoading, oParams.bAbsoluteLoading ? "absolute" : "relative");
+    return false;
+}
+
+double powerOf(const std::vector<ComplexF>& vc)
+{
+    double dPower = 0.0;
+    for (size_t u = 0; u < vc.size(); ++u)
+        dPower += double(vc[u].real()) * vc[u].real() + double(vc[u].imag()) * vc[u].imag();
+    return dPower;
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -189,7 +293,6 @@ int main(int argc, char* argv[])
     PbrConfig oCfg;
     if (!loadPbrConfig(oOptions.sConfigPath.c_str(), oCfg))
         return 1;
-
     if (!oOptions.sAlgorithm.empty())
         oCfg.sDsiAlgorithm = oOptions.sAlgorithm;
     if (!oOptions.sBackend.empty())
@@ -201,97 +304,24 @@ int main(int argc, char* argv[])
     if (!dsiParamsFromConfig(oCfg, oParams))
         return 1;
 
-    // ---- load both files ----------------------------------------------------
-    CpiFileHeader oCpiHeader;
-    if (!readCpiFileHeader(oOptions.sCpiPath.c_str(), oCpiHeader))
-        return 1;
-    if (oCpiHeader.uSampleCount != oParams.uCpiSamples) {
-        std::fprintf(stderr, "dsi_verify: CPI file holds %llu samples but the "
-                             "config says %llu\n",
-                     (unsigned long long)oCpiHeader.uSampleCount,
-                     (unsigned long long)oParams.uCpiSamples);
-        return 1;
-    }
-
-    std::vector<ComplexF> vcRef(static_cast<size_t>(oCpiHeader.uSampleCount));
-    std::vector<ComplexF> vcSur(static_cast<size_t>(oCpiHeader.uSampleCount));
-    if (!readCpiFile(oOptions.sCpiPath.c_str(), oCpiHeader,
-                     vcRef.data(), vcSur.data(), oCpiHeader.uSampleCount))
+    // ---- the input and the output to compare against ------------------------
+    CpiFileHeader         oCpiHeader;
+    std::vector<ComplexF> vcRef, vcSur;
+    if (!loadCpi(oOptions.sCpiPath, oParams.uCpiSamples, oCpiHeader, vcRef, vcSur))
         return 1;
 
-    // The reference output: either a MATLAB golden file, or the same
-    // algorithm run on the other backend.
-    //
-    // Backend-vs-backend is the stronger test for a GPU port. A golden file
-    // can only be compared at a tolerance loose enough to absorb the
-    // single-precision difference (~5e-3), and that is exactly the range
-    // where an off-by-one or a race would hide. Running the CPU in FP32 mode
-    // against the GPU removes precision as a variable, so what is left is
-    // structure.
     GoldenHeader          oGolden;
     std::vector<ComplexF> vcGold;
     std::string           sReferenceName = oOptions.sGoldenPath;
-
     if (!oOptions.sAgainst.empty()) {
-        PbrConfig oOther = oCfg;
-        oOther.sDsiBackend = oOptions.sAgainst;
-
-        DSIParams oOtherParams;
-        if (!dsiParamsFromConfig(oOther, oOtherParams))
+        if (!runOtherBackend(oCfg, oOptions.sAgainst, vcRef, vcSur, oGolden, vcGold,
+                             sReferenceName))
             return 1;
-
-        std::unique_ptr<DSICanceller> pOther =
-            makeDSICanceller(oOtherParams.eAlgorithm, oOtherParams.eBackend);
-        if (!pOther || !pOther->init(oOtherParams))
-            return 1;
-
-        vcGold.assign(static_cast<size_t>(oCpiHeader.uSampleCount), ComplexF());
-        DSIStats oOtherStats;
-        if (!pOther->cancel(vcRef.data(), vcSur.data(), vcGold.data(), oOtherStats))
-            return 1;
-
-        sReferenceName = pOther->name();
-        oGolden.uSampleCount     = oOtherParams.uCpiSamples;
-        oGolden.uClutterTaps     = oOtherParams.uClutterTaps;
-        oGolden.uUpdateSamples   = oOtherParams.uUpdateSamples;
-        oGolden.uAbsoluteLoading = oOtherParams.bAbsoluteLoading ? 1 : 0;
-        oGolden.dLoading         = oOtherParams.dDiagonalLoading;
     } else if (!readGolden(oOptions.sGoldenPath.c_str(), oGolden, vcGold)) {
         return 1;
     }
-
-    // ---- the golden file must have been generated with THESE parameters ----
-    // Comparing against a golden file made with different settings would
-    // "fail" a correct implementation or, worse, pass a wrong one.
-    bool bMatch = true;
-    if (oGolden.uSampleCount != oParams.uCpiSamples)     bMatch = false;
-    if (oGolden.uClutterTaps != oParams.uClutterTaps)    bMatch = false;
-    if (oGolden.uUpdateSamples != oParams.uUpdateSamples) bMatch = false;
-    if ((oGolden.uAbsoluteLoading != 0) != oParams.bAbsoluteLoading) bMatch = false;
-    if (std::fabs(oGolden.dLoading - oParams.dDiagonalLoading) >
-        1e-12 * std::fabs(oParams.dDiagonalLoading))     bMatch = false;
-
-    if (!bMatch) {
-        std::fprintf(stderr,
-            "dsi_verify: %s was generated with different parameters than the "
-            "current run:\n"
-            "              golden                current (%s)\n"
-            "  samples     %-20llu  %llu\n"
-            "  taps        %-20llu  %llu\n"
-            "  window      %-20llu  %llu\n"
-            "  loading     %g (%s)   %g (%s)\n"
-            "Re-run matlab/eca_golden.m, or pick the matching --algorithm.\n",
-            sReferenceName.c_str(), dsiAlgorithmName(oParams.eAlgorithm),
-            (unsigned long long)oGolden.uSampleCount,
-            (unsigned long long)oParams.uCpiSamples,
-            (unsigned long long)oGolden.uClutterTaps,
-            (unsigned long long)oParams.uClutterTaps,
-            (unsigned long long)oGolden.uUpdateSamples,
-            (unsigned long long)oParams.uUpdateSamples,
-            oGolden.dLoading, oGolden.uAbsoluteLoading ? "absolute" : "relative",
-            oParams.dDiagonalLoading, oParams.bAbsoluteLoading ? "absolute" : "relative");
+    if (!goldenMatches(oGolden, oParams, sReferenceName))
         return 1;
-    }
 
     // ---- run the canceller --------------------------------------------------
     std::unique_ptr<DSICanceller> pCanceller =
@@ -304,34 +334,27 @@ int main(int argc, char* argv[])
     if (!pCanceller->cancel(vcRef.data(), vcSur.data(), vcOut.data(), oStats))
         return 1;
 
+    // ---- compare ------------------------------------------------------------
     // Golden suppression, from the same input power, for the side-by-side.
-    double dSurPower  = 0.0;
-    double dGoldPower = 0.0;
-    for (size_t u = 0; u < vcGold.size(); ++u) {
-        dSurPower  += double(vcSur[u].real())  * vcSur[u].real() +
-                      double(vcSur[u].imag())  * vcSur[u].imag();
-        dGoldPower += double(vcGold[u].real()) * vcGold[u].real() +
-                      double(vcGold[u].imag()) * vcGold[u].imag();
-    }
+    const double dSurPower  = powerOf(vcSur);
+    const double dGoldPower = powerOf(vcGold);
     const double dGoldSuppressionDb =
         (dGoldPower > 0.0) ? 10.0 * std::log10(dSurPower / dGoldPower) : 0.0;
 
-    // ---- compare ------------------------------------------------------------
     double dDiffSq = 0.0;
-    double dMaxAbs = 0.0;
+    double dMaxSq  = 0.0;
     for (size_t u = 0; u < vcGold.size(); ++u) {
         const double dRe = double(vcOut[u].real()) - vcGold[u].real();
         const double dIm = double(vcOut[u].imag()) - vcGold[u].imag();
         const double dSq = dRe * dRe + dIm * dIm;
         dDiffSq += dSq;
-        if (dSq > dMaxAbs)
-            dMaxAbs = dSq;
+        if (dSq > dMaxSq)
+            dMaxSq = dSq;
     }
-    const double dRelL2 = std::sqrt(dDiffSq / dGoldPower);
-    const double dRms   = std::sqrt(dGoldPower / double(vcGold.size()));
-    const double dMaxVsRms = std::sqrt(dMaxAbs) / dRms;
-
-    const bool bPass = dRelL2 < oOptions.dTolerance;
+    const double dRelL2    = std::sqrt(dDiffSq / dGoldPower);
+    const double dRms      = std::sqrt(dGoldPower / double(vcGold.size()));
+    const double dMaxVsRms = std::sqrt(dMaxSq) / dRms;
+    const bool   bPass     = dRelL2 < oOptions.dTolerance;
 
     std::printf("dsi_verify: %s against %s\n",
                 pCanceller->name(), sReferenceName.c_str());
@@ -339,13 +362,13 @@ int main(int argc, char* argv[])
                 oStats.dSuppressionDb, dGoldSuppressionDb);
     std::printf("  relative L2   %.3e   (tolerance %g)\n", dRelL2, oOptions.dTolerance);
     std::printf("  worst sample  %.3e   (vs the golden RMS)\n", dMaxVsRms);
+
     // The cleaned CPI is what the range-Doppler stage consumes. Written in
     // the SAME format as the input CPI -- both hold two aligned channels, so
     // (reference, cleaned) fits with no new format and MATLAB reads it with
     // the loader it already has.
     if (!oOptions.sDumpPath.empty()) {
-        CpiFileHeader oOut = oCpiHeader;
-        if (!writeCpiFile(oOptions.sDumpPath.c_str(), oOut,
+        if (!writeCpiFile(oOptions.sDumpPath.c_str(), oCpiHeader,
                           vcRef.data(), vcOut.data()))
             return 1;
         std::printf("wrote (reference, cleaned) to %s\n",
@@ -355,6 +378,5 @@ int main(int argc, char* argv[])
     std::printf("%s\n", bPass
         ? "PASS -- the two agree within tolerance."
         : "FAIL -- the outputs disagree beyond tolerance.");
-
     return bPass ? 0 : 1;
 }

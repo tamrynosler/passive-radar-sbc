@@ -467,6 +467,23 @@ bool isKnownKey(const std::string& sKey)
     return sAll.find("\n" + sKey + " = ") != std::string::npos;
 }
 
+// Keys a live change may not touch: each one sizes or names something that
+// exists only once per run.
+const char* const kRestartKeys[] = {
+    "SAMPLE_RATE_Hz", "REFERENCE_RECEIVER_NAME", "SURVEILLANCE_RECEIVER_NAME",
+    "UDP_PORT", "CONTROL_PORT", "VITA49_FULLSCALE", "BUFFER_LENGTH_s",
+    "DSI_BACKEND", "ARD_WRITE_FILES", "ARD_STREAM", "ARD_STREAM_DEST",
+};
+
+bool isRestartKey(const std::string& sKey)
+{
+    for (size_t u = 0; u < sizeof(kRestartKeys) / sizeof(kRestartKeys[0]); ++u) {
+        if (sKey == kRestartKeys[u])
+            return true;
+    }
+    return false;
+}
+
 // From parsed key/values to a validated config with its derived fields.
 // pLabel names the source in the failure message.
 bool configFromKeyValues(const KeyValueMap& mValues, const char* pLabel, PbrConfig& oConfig)
@@ -728,6 +745,52 @@ bool applyPbrConfigLines(const PbrConfig& oCurrent, const std::string& sLines,
 
     g_pMessageSink = nullptr;
     return bOk;
+}
+
+std::string restartKeyChanged(const PbrConfig& oCurrent, const std::string& sLines)
+{
+    // Parsed by hand rather than with parseKeyValues, which logs: a line that
+    // does not parse is skipped here and reported by applyPbrConfigLines.
+    KeyValueMap mCurrent;
+    parseKeyValues(pbrConfigToText(oCurrent), "current config", mCurrent);
+
+    size_t uPos = 0;
+    while (uPos < sLines.size()) {
+        size_t uEnd = sLines.find('\n', uPos);
+        if (uEnd == std::string::npos)
+            uEnd = sLines.size();
+        std::string sLine = sLines.substr(uPos, uEnd - uPos);
+        uPos = uEnd + 1;
+
+        const size_t uHash = sLine.find('#');
+        if (uHash != std::string::npos)
+            sLine.erase(uHash);
+        const size_t uEquals = sLine.find('=');
+        if (uEquals == std::string::npos)
+            continue;
+
+        // Restating the current value is not a change: the viewer sends the
+        // whole set back.
+        const std::string sKey   = trim(sLine.substr(0, uEquals));
+        const std::string sValue = trim(sLine.substr(uEquals + 1));
+        if (isRestartKey(sKey) && mCurrent[sKey] != sValue)
+            return sKey;
+    }
+    return std::string();
+}
+
+std::string pbrConfigDiff(const PbrConfig& oOld, const PbrConfig& oNew)
+{
+    KeyValueMap mOld, mNew;
+    parseKeyValues(pbrConfigToText(oOld), "old config", mOld);
+    parseKeyValues(pbrConfigToText(oNew), "new config", mNew);
+
+    std::string sDiff;
+    for (KeyValueMap::const_iterator it = mNew.begin(); it != mNew.end(); ++it) {
+        if (mOld[it->first] != it->second)
+            sDiff += it->first + ": " + mOld[it->first] + " -> " + it->second + "\n";
+    }
+    return sDiff;
 }
 
 bool adaptPbrConfigToSampleRate(const PbrConfig& oCurrent, uint64_t uSourceRateHz,

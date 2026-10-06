@@ -124,6 +124,17 @@ std::string pbrConfigToText(const PbrConfig& oConfig);
 bool applyPbrConfigLines(const PbrConfig& oCurrent, const std::string& sLines,
                          PbrConfig& oOut, std::string& sMessagesOut);
 
+// The first key in sLines that cannot change while the chain runs (ports,
+// receiver names, full scale, buffer length, backend, output switches) and
+// that sLines sets to something other than its value in oCurrent; empty if
+// there is none. The chain refuses such a change by name, before validation,
+// so the answer says why rather than whatever the validator trips on.
+std::string restartKeyChanged(const PbrConfig& oCurrent, const std::string& sLines);
+
+// The keys whose values differ between two sets, as "KEY: old -> new" lines
+// in key order. Empty if the sets are the same.
+std::string pbrConfigDiff(const PbrConfig& oOld, const PbrConfig& oNew);
+
 // The source declares a sample rate the config did not expect. Re-express
 // every time-based window at the source's rate, each snapped to the nearest
 // value the chain allows, and the CPI to the nearest length they all divide,

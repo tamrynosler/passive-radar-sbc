@@ -211,22 +211,6 @@ double hostNowSeconds()
 
 class UsrpSource : public SampleSource {
 public:
-    UsrpSource()
-        : mvBuffs(2, nullptr),
-          mdActualRateHz(0.0),
-          mbExtRef(false),
-          mbRefLocked(false),
-          muMaxSamps(0),
-          mbFirstRecv(true),
-          muTimeouts(0),
-          muConsecutiveTimeouts(0),
-          muRestarts(0),
-          muOverflows(0),
-          muOtherErrors(0),
-          mbHaveTimeoutLog(false)
-    {
-    }
-
     bool open(const std::string& sArgs, double dFs, double dFc,
               double dGain0, double dGain1, bool bExtRef);
 
@@ -249,22 +233,22 @@ public:
 private:
     uhd::usrp::multi_usrp::sptr mpUsrp;
     uhd::rx_streamer::sptr      mpRx;
-    std::vector<void*>          mvBuffs;
+    std::vector<void*>          mvBuffs = std::vector<void*>(2, nullptr);
     std::string                 msMboardName;
 
-    double   mdActualRateHz;
-    bool     mbExtRef;
-    bool     mbRefLocked;
-    size_t   muMaxSamps;
-    bool     mbFirstRecv;
+    double   mdActualRateHz = 0.0;
+    bool     mbExtRef       = false;
+    bool     mbRefLocked    = false;
+    size_t   muMaxSamps     = 0;
+    bool     mbFirstRecv    = true;
 
-    uint64_t muTimeouts;
-    uint64_t muConsecutiveTimeouts;
-    uint64_t muRestarts;
-    uint64_t muOverflows;
-    uint64_t muOtherErrors;
+    uint64_t muTimeouts            = 0;
+    uint64_t muConsecutiveTimeouts = 0;
+    uint64_t muRestarts            = 0;
+    uint64_t muOverflows           = 0;
+    uint64_t muOtherErrors         = 0;
     std::chrono::steady_clock::time_point moLastTimeoutLog;
-    bool     mbHaveTimeoutLog;
+    bool     mbHaveTimeoutLog = false;
 };
 
 // Timeouts in a row before the stream command is re-issued. With a 1 s
@@ -541,94 +525,122 @@ bool sendData(StreamState& oStream, UdpSender& oSender, uint8_t* pBuf, size_t uC
     return true;
 }
 
-} // namespace
-
-int main(int argc, char* argv[])
+// One context packet on each stream, with the same flags.
+bool sendContexts(StreamState (&aStreams)[2], UdpSender& oSender, std::vector<uint8_t>& vDatagram,
+                  uint64_t uSampleIndex, uint64_t uFs, bool bLocked, uint32_t uFlags)
 {
-    Options o;
-    if (!parseArgs(argc, argv, o)) {
-        printUsage(argv[0]);
-        return 1;
+    for (unsigned u = 0; u < 2; ++u) {
+        if (!sendContext(aStreams[u], oSender, vDatagram.data(), vDatagram.size(),
+                         uSampleIndex, uFs, bLocked, uFlags))
+            return false;
     }
+    return true;
+}
 
-    // The chain's config supplies what both sides must agree on. Flags given
-    // explicitly still win, so a rate can be probed without editing the file.
-    if (!o.sConfigPath.empty()) {
-        PbrConfig oCfg;
-        if (!loadPbrConfig(o.sConfigPath.c_str(), oCfg))
-            return 1;
-        if (!o.bFsGiven)      o.dFs      = static_cast<double>(oCfg.uSampleRateHz);
-        if (!o.bRefNameGiven) o.sRefName = oCfg.sReferenceName;
-        if (!o.bSurNameGiven) o.sSurName = oCfg.sSurveillanceName;
-        if (!o.bDestGiven)    o.uDestPort = oCfg.uUdpPort;
-        if (oCfg.dFullScale != 1.0)
-            std::fprintf(stderr,
-                "WARNING: %s has VITA49_FULLSCALE = %g; this driver sends raw ADC codes\n"
-                "         and declares full scale 1.0, so the chain will scale amplitudes\n"
-                "         by %g. Set it to 1.0 for USRP runs.\n",
-                o.sConfigPath.c_str(), oCfg.dFullScale, oCfg.dFullScale);
+// One recv()'s samples as one data packet per stream, reference first, each
+// preceded by its heartbeat context once per second of samples.
+bool sendBlock(StreamState (&aStreams)[2], UdpSender& oSender, std::vector<uint8_t>& vDatagram,
+               uint64_t uSampleIndex, uint64_t uFs, const int16_t* const apSamples[2],
+               uint64_t uCount, bool bLocked, bool bSampleLoss)
+{
+    for (unsigned u = 0; u < 2; ++u) {
+        StreamState& oStream = aStreams[u];
+        if (uSampleIndex - oStream.uLastContextIndex >= uFs &&
+            !sendContext(oStream, oSender, vDatagram.data(), vDatagram.size(),
+                         uSampleIndex, uFs, bLocked, 0))
+            return false;
+        if (!sendData(oStream, oSender, vDatagram.data(), vDatagram.size(),
+                      uSampleIndex, uFs, apSamples[u], uCount, bLocked, bSampleLoss))
+            return false;
     }
+    return true;
+}
 
-    // Sanity on what the packets will say.
-    const uint64_t uFs = static_cast<uint64_t>(std::llround(o.dFs));
-    if (o.dFs <= 0.0 || std::fabs(o.dFs - static_cast<double>(uFs)) > 1e-9 || uFs > kMaxSampleRateHz) {
+// The chain's config supplies what both sides must agree on. Flags given
+// explicitly still win, so a rate can be probed without editing the file.
+bool applyConfigFile(Options& o)
+{
+    if (o.sConfigPath.empty())
+        return true;
+    PbrConfig oCfg;
+    if (!loadPbrConfig(o.sConfigPath.c_str(), oCfg))
+        return false;
+    if (!o.bFsGiven)      o.dFs      = static_cast<double>(oCfg.uSampleRateHz);
+    if (!o.bRefNameGiven) o.sRefName = oCfg.sReferenceName;
+    if (!o.bSurNameGiven) o.sSurName = oCfg.sSurveillanceName;
+    if (!o.bDestGiven)    o.uDestPort = oCfg.uUdpPort;
+    if (oCfg.dFullScale != 1.0)
+        std::fprintf(stderr,
+            "WARNING: %s has VITA49_FULLSCALE = %g; this driver sends raw ADC codes\n"
+            "         and declares full scale 1.0, so the chain will scale amplitudes\n"
+            "         by %g. Set it to 1.0 for USRP runs.\n",
+            o.sConfigPath.c_str(), oCfg.dFullScale, oCfg.dFullScale);
+    return true;
+}
+
+// Sanity on what the packets will say. uFsOut is the rate as a whole number.
+bool checkOptions(const Options& o, uint64_t& uFsOut)
+{
+    uFsOut = static_cast<uint64_t>(std::llround(o.dFs));
+    if (o.dFs <= 0.0 || std::fabs(o.dFs - static_cast<double>(uFsOut)) > 1e-9 ||
+        uFsOut > kMaxSampleRateHz) {
         std::fprintf(stderr, "sample rate must be a whole number of hertz, at most %llu\n",
                      static_cast<unsigned long long>(kMaxSampleRateHz));
-        return 1;
+        return false;
     }
     if (o.uSamples == 0 || o.uSamples > 512) {
         std::fprintf(stderr, "--samples must be 1..512\n");
-        return 1;
+        return false;
     }
     if (o.sRefName.empty() || o.sSurName.empty() || o.sRefName == o.sSurName) {
         std::fprintf(stderr, "receiver names must be non-empty and different\n");
-        return 1;
+        return false;
     }
+    return true;
+}
 
-    // ---- the source ---------------------------------------------------------
-    std::unique_ptr<SampleSource> pSource;
-    std::string sDevice;
-    std::string sDriverVersion = "none";
-
+// The synthetic source or the USRP. Returns the exit code to stop with, or 0.
+int openSource(const Options& o, uint64_t uFs, std::unique_ptr<SampleSource>& pSource,
+               std::string& sDeviceOut, std::string& sDriverVersionOut)
+{
+    sDriverVersionOut = "none";
     if (o.bSynth) {
         pSource.reset(new SynthSource(uFs, o.uSynthDelay, o.iSynthDoppler));
-        sDevice = "synth";
-    } else {
+        sDeviceOut = "synth";
+        return 0;
+    }
 #ifdef PBR_HAVE_UHD
-        UsrpSource* pUsrp = new UsrpSource();
-        pSource.reset(pUsrp);
-        if (!pUsrp->open(o.sArgs, o.dFs, o.dFc, o.dGain0, o.dGain1, o.bExtRef))
-            return 2;
-        sDevice        = "USRP " + pUsrp->mboardName() + " BasicRX";
-        sDriverVersion = uhd::get_version_string();
-#else
-        std::fprintf(stderr,
-            "this build has no UHD, so there is no USRP path. Build on the Jetson with\n"
-            "libuhd-dev installed, or run with --synth.\n");
-        return 1;
-#endif
-    }
-
-    // The source's actual rate is what the packets carry; it must be the
-    // integer the ingest is configured with.
-    const double dActualFs = pSource->sampleRateHz();
-    if (std::fabs(dActualFs - static_cast<double>(uFs)) > 1e-6) {
-        std::fprintf(stderr, "source delivers %.6f Hz, not the %llu Hz the packets would claim\n",
-                     dActualFs, static_cast<unsigned long long>(uFs));
+    UsrpSource* pUsrp = new UsrpSource();
+    pSource.reset(pUsrp);
+    if (!pUsrp->open(o.sArgs, o.dFs, o.dFc, o.dGain0, o.dGain1, o.bExtRef))
         return 2;
-    }
+    sDeviceOut        = "USRP " + pUsrp->mboardName() + " BasicRX";
+    sDriverVersionOut = uhd::get_version_string();
+    return 0;
+#else
+    std::fprintf(stderr,
+        "this build has no UHD, so there is no USRP path. Build on the Jetson with\n"
+        "libuhd-dev installed, or run with --synth.\n");
+    return 1;
+#endif
+}
 
-    // A session id that changes on every start, so the ingest can tell a
-    // driver restart, or a second driver on the same group, from a gap.
+// A session id that changes on every start, so the ingest can tell a driver
+// restart, or a second driver on the same group, from a gap.
+std::string makeSessionId()
+{
     char achSession[16];
     std::snprintf(achSession, sizeof(achSession), "%08x",
                   static_cast<unsigned>(
                       (static_cast<uint64_t>(hostNowSecondsCoarse()) * 2654435761ULL) ^
                       (static_cast<uint64_t>(getpid()) << 16)) & 0xFFFFFFFFu);
-    const std::string sSessionId = achSession;
+    return achSession;
+}
 
-    // ---- the two streams ----------------------------------------------------
-    StreamState aStreams[2];
+void describeStreams(const Options& o, double dActualFs, const std::string& sDevice,
+                     const std::string& sDriverVersion, const std::string& sSessionId,
+                     StreamState (&aStreams)[2])
+{
     for (unsigned u = 0; u < 2; ++u) {
         Vita49StreamInfo& oInfo = aStreams[u].oInfo;
         oInfo.uStreamId      = u + 1;
@@ -646,11 +658,11 @@ int main(int argc, char* argv[])
         oInfo.sDriverVersion = sDriverVersion;
         oInfo.sSessionId     = sSessionId;
     }
+}
 
-    UdpSender oSender;
-    if (!oSender.open(o.sDestHost.c_str(), o.uDestPort, o.sIface.c_str()))
-        return 1;
-
+void printSetup(const Options& o, uint64_t uFs, const std::string& sDevice,
+                const std::string& sSessionId)
+{
     std::printf("\nuhd_to_vita49\n");
     std::printf("  source        %s\n", sDevice.c_str());
     std::printf("  sample rate   %llu Hz\n", static_cast<unsigned long long>(uFs));
@@ -663,6 +675,69 @@ int main(int argc, char* argv[])
                 static_cast<unsigned long long>(kVita49DataOverheadBytes + 4 * o.uSamples),
                 1000.0 * static_cast<double>(o.uSamples) / static_cast<double>(uFs));
     std::printf("  run for       %s\n\n", o.dSeconds > 0.0 ? "--seconds" : "until Ctrl-C");
+}
+
+// What the loop counts, for the summary.
+struct Counts {
+    uint64_t uSamplesSent = 0;
+    uint64_t uOverflows   = 0;
+    uint64_t uReanchors   = 0;
+};
+
+void printSummary(double dElapsed, uint64_t uFs, const StreamState (&aStreams)[2],
+                  const Counts& oCounts, const UdpSender& oSender)
+{
+    std::printf("\n================ uhd_to_vita49 summary ================\n");
+    std::printf("elapsed            %.2f s\n", dElapsed);
+    std::printf("samples per stream %llu  (%.2f s of signal)\n",
+                static_cast<unsigned long long>(oCounts.uSamplesSent),
+                static_cast<double>(oCounts.uSamplesSent) / static_cast<double>(uFs));
+    for (unsigned u = 0; u < 2; ++u)
+        std::printf("stream %u           %llu data, %llu context packets\n", u + 1,
+                    static_cast<unsigned long long>(aStreams[u].uDataPackets),
+                    static_cast<unsigned long long>(aStreams[u].uContextPackets));
+    std::printf("overflows          %llu\n", static_cast<unsigned long long>(oCounts.uOverflows));
+    std::printf("re-anchors (gaps)  %llu\n", static_cast<unsigned long long>(oCounts.uReanchors));
+    std::printf("send failures      %llu\n", static_cast<unsigned long long>(oSender.sendFailures()));
+    std::printf("=======================================================\n");
+}
+
+} // namespace
+
+int main(int argc, char* argv[])
+{
+    Options o;
+    if (!parseArgs(argc, argv, o)) {
+        printUsage(argv[0]);
+        return 1;
+    }
+    uint64_t uFs = 0;
+    if (!applyConfigFile(o) || !checkOptions(o, uFs))
+        return 1;
+
+    std::unique_ptr<SampleSource> pSource;
+    std::string sDevice, sDriverVersion;
+    const int iOpenCode = openSource(o, uFs, pSource, sDevice, sDriverVersion);
+    if (iOpenCode != 0)
+        return iOpenCode;
+
+    // The source's actual rate is what the packets carry; it must be the
+    // integer the ingest is configured with.
+    const double dActualFs = pSource->sampleRateHz();
+    if (std::fabs(dActualFs - static_cast<double>(uFs)) > 1e-6) {
+        std::fprintf(stderr, "source delivers %.6f Hz, not the %llu Hz the packets would claim\n",
+                     dActualFs, static_cast<unsigned long long>(uFs));
+        return 2;
+    }
+
+    const std::string sSessionId = makeSessionId();
+    StreamState aStreams[2];
+    describeStreams(o, dActualFs, sDevice, sDriverVersion, sSessionId, aStreams);
+
+    UdpSender oSender;
+    if (!oSender.open(o.sDestHost.c_str(), o.uDestPort, o.sIface.c_str()))
+        return 1;
+    printSetup(o, uFs, sDevice, sSessionId);
 
     std::signal(SIGINT,  onSignal);
     std::signal(SIGTERM, onSignal);
@@ -671,6 +746,7 @@ int main(int argc, char* argv[])
     std::vector<int16_t> vRef(static_cast<size_t>(2 * o.uSamples));
     std::vector<int16_t> vSur(static_cast<size_t>(2 * o.uSamples));
     std::vector<uint8_t> vDatagram(kDatagramCapacity);
+    const int16_t* const apSamples[2] = { vRef.data(), vSur.data() };
 
     if (!pSource->start())
         return 2;
@@ -678,18 +754,14 @@ int main(int argc, char* argv[])
     const std::chrono::steady_clock::time_point oStart = std::chrono::steady_clock::now();
 
     // ---- the loop -----------------------------------------------------------
-    bool     bAnchored     = false;
-    bool     bOpened       = false;
-    bool     bLossPending  = false;   // next data packets carry the sample-loss bit
-    bool     bFatal        = false;
-    uint64_t uSampleIndex  = 0;       // absolute index of the next packet's first sample
-    uint64_t uSamplesSent  = 0;
-    uint64_t uOverflows    = 0;
-    uint64_t uReanchors    = 0;
+    Counts   oCounts;
+    bool     bAnchored    = false;
+    bool     bOpened      = false;
+    bool     bLossPending = false;   // next data packets carry the sample-loss bit
+    bool     bFatal       = false;
+    uint64_t uSampleIndex = 0;       // absolute index of the next packet's first sample
 
-    for (;;) {
-        if (g_iStop)
-            break;
+    while (!g_iStop) {
         if (o.dSeconds > 0.0 &&
             std::chrono::duration<double>(std::chrono::steady_clock::now() - oStart).count()
                 >= o.dSeconds)
@@ -703,7 +775,7 @@ int main(int argc, char* argv[])
             break;
         }
         if (bOverflow)
-            ++uOverflows;
+            ++oCounts.uOverflows;
         if (uGot == 0)
             continue;
 
@@ -724,91 +796,54 @@ int main(int argc, char* argv[])
                         static_cast<unsigned long long>(uSampleIndex),
                         oT.uSeconds, static_cast<unsigned long long>(oT.uPicoseconds));
         } else if (uSrcIndex != uSampleIndex) {
-            ++uReanchors;
+            ++oCounts.uReanchors;
             const long long llDelta = static_cast<long long>(uSrcIndex) -
                                       static_cast<long long>(uSampleIndex);
             std::fprintf(stderr, "gap: source is %lld samples from the counter; re-anchoring "
                                  "(%llu so far)\n",
-                         llDelta, static_cast<unsigned long long>(uReanchors));
+                         llDelta, static_cast<unsigned long long>(oCounts.uReanchors));
             uSampleIndex = uSrcIndex;
             bLossPending = true;
             aStreams[0].bContextLossPending = true;
             aStreams[1].bContextLossPending = true;
         }
 
-        const bool bLocked = pSource->referenceLocked();
-
         // A context packet must name each stream before its first data
         // packet, or the ingest drops the data as unresolved.
+        const bool bLocked = pSource->referenceLocked();
         if (!bOpened) {
-            for (unsigned u = 0; u < 2; ++u) {
-                if (!sendContext(aStreams[u], oSender, vDatagram.data(), vDatagram.size(),
-                                 uSampleIndex, uFs, bLocked, kVita49FlagStreamOpen)) {
-                    bFatal = true;
-                    break;
-                }
-            }
-            if (bFatal)
-                break;
-            bOpened = true;
-        }
-
-        // Reference first, then surveillance, from the same recv(). Heartbeat
-        // context once per second of samples, before that second's data.
-        for (unsigned u = 0; u < 2; ++u) {
-            StreamState& oStream = aStreams[u];
-            if (uSampleIndex - oStream.uLastContextIndex >= uFs) {
-                if (!sendContext(oStream, oSender, vDatagram.data(), vDatagram.size(),
-                                 uSampleIndex, uFs, bLocked, 0)) {
-                    bFatal = true;
-                    break;
-                }
-            }
-            if (!sendData(oStream, oSender, vDatagram.data(), vDatagram.size(),
-                          uSampleIndex, uFs, (u == 0) ? vRef.data() : vSur.data(), uGot,
-                          bLocked, bLossPending)) {
+            if (!sendContexts(aStreams, oSender, vDatagram, uSampleIndex, uFs, bLocked,
+                              kVita49FlagStreamOpen)) {
                 bFatal = true;
                 break;
             }
+            bOpened = true;
         }
-        if (bFatal)
+        if (!sendBlock(aStreams, oSender, vDatagram, uSampleIndex, uFs, apSamples, uGot,
+                       bLocked, bLossPending)) {
+            bFatal = true;
             break;
+        }
 
         bLossPending  = false;
         uSampleIndex += uGot;
-        uSamplesSent += uGot;
+        oCounts.uSamplesSent += uGot;
     }
 
-    // ---- close --------------------------------------------------------------
-    if (bOpened) {
-        for (unsigned u = 0; u < 2; ++u)
-            sendContext(aStreams[u], oSender, vDatagram.data(), vDatagram.size(),
-                        uSampleIndex, uFs, pSource->referenceLocked(), kVita49FlagStreamClose);
-    }
+    if (bOpened)
+        sendContexts(aStreams, oSender, vDatagram, uSampleIndex, uFs,
+                     pSource->referenceLocked(), kVita49FlagStreamClose);
     pSource->stop();
 
     const double dElapsed =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - oStart).count();
-
-    std::printf("\n================ uhd_to_vita49 summary ================\n");
-    std::printf("elapsed            %.2f s\n", dElapsed);
-    std::printf("samples per stream %llu  (%.2f s of signal)\n",
-                static_cast<unsigned long long>(uSamplesSent),
-                static_cast<double>(uSamplesSent) / static_cast<double>(uFs));
-    for (unsigned u = 0; u < 2; ++u)
-        std::printf("stream %u           %llu data, %llu context packets\n", u + 1,
-                    static_cast<unsigned long long>(aStreams[u].uDataPackets),
-                    static_cast<unsigned long long>(aStreams[u].uContextPackets));
-    std::printf("overflows          %llu\n", static_cast<unsigned long long>(uOverflows));
-    std::printf("re-anchors (gaps)  %llu\n", static_cast<unsigned long long>(uReanchors));
-    std::printf("send failures      %llu\n", static_cast<unsigned long long>(oSender.sendFailures()));
-    std::printf("=======================================================\n");
+    printSummary(dElapsed, uFs, aStreams, oCounts, oSender);
 
     if (bFatal) {
         std::printf("FAIL -- stopped on a fatal error, see above.\n");
         return 2;
     }
-    std::printf("%s\n", (uOverflows == 0 && uReanchors == 0)
+    std::printf("%s\n", (oCounts.uOverflows == 0 && oCounts.uReanchors == 0)
                         ? "OK -- continuous stream, no gaps."
                         : "OK with gaps -- the ingest zero-filled them; see counts above.");
     return 0;

@@ -142,9 +142,6 @@ struct ArdParams {
     // configs, giving one bin per 1/T_CPI Hz over +-fs/(2 * decimation).
     uint64_t   uDopplerBins       = 0;
 
-    // Doppler extent worth displaying. Does not change what is computed.
-    double     dDopplerHalfSpanHz = 0.0;
-
     // ---- CFAR ------------------------------------------------------------
     // Probability of false alarm. The threshold moves to whatever achieves
     // this, everywhere, rather than being fixed.

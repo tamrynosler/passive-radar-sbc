@@ -220,7 +220,7 @@ a red dot inside a green one is the picture this is for.
      hand calculation already agrees; this test pins the code to it. It
      needs the FERS scenario's Tx/Rx positions as the geometry, not the
      real station.
-2. Mac: `bin/ard_view --file data/ard/ard_00000.bin --config config/fers.conf`
+2. Mac: `bin/ard_view --file data/S0_clean/ard/ard_00000.bin --config config/fers.conf`
    with `dump1090` running: dots appear on the fixture frame, hover works.
    Also `--adsb-source` pointed at a small Python that serves a fixed
    `data.json`, so the page can be exercised with no dongle.

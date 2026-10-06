@@ -435,6 +435,27 @@ void testApplyLines()
     assert(oNew.uCpiSamples == uBefore);
 }
 
+// Keys that cannot change while running are named; restating one is fine.
+// The diff lists exactly the keys that moved.
+void testRestartKeysAndDiff()
+{
+    PbrConfig oCfg;
+    assert(loadPbrConfig(writeTemp(kValidConfig), oCfg));
+
+    assert(restartKeyChanged(oCfg, "CFAR_PFA = 1e-7\n").empty());
+    assert(restartKeyChanged(oCfg, "UDP_PORT = 4991   # unchanged\n").empty());
+    assert(restartKeyChanged(oCfg, "CFAR_PFA = 1e-7\n UDP_PORT\t= 5000\n") == "UDP_PORT");
+    assert(restartKeyChanged(oCfg, "no equals sign here\n").empty());
+
+    PbrConfig oNew;
+    std::string sWhy;
+    assert(pbrConfigDiff(oCfg, oCfg).empty());
+    assert(applyPbrConfigLines(oCfg, "CFAR_PFA = 1e-7\n", oNew, sWhy));
+    const std::string sDiff = pbrConfigDiff(oCfg, oNew);
+    assert(sDiff.find("CFAR_PFA: ") == 0 && sDiff.find(" -> 1e-07\n") != std::string::npos);
+    assert(sDiff.find('\n') == sDiff.size() - 1);   // one line
+}
+
 // A source at another rate: every window re-expressed at that rate, snapped
 // to what the validator allows, and the result validates.
 void testAdaptToSampleRate()
@@ -481,6 +502,7 @@ int main()
 {
     testTextRoundTrip();
     testApplyLines();
+    testRestartKeysAndDiff();
     testAdaptToSampleRate();
     testValidConfig();
     testShippedConfigLoads();

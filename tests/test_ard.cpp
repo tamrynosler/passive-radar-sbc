@@ -43,7 +43,6 @@ ArdParams smallParams(ArdBackend eBackend)
     o.uRangeBins         = 32;
     o.uDopplerDecimation = 128;
     o.uDopplerBins       = 64;       // 8192 / 128
-    o.dDopplerHalfSpanHz = 20.0;
     o.dCfarPfa           = 1e-4;
     o.uCfarGuardRange    = 1;
     o.uCfarGuardDoppler  = 1;

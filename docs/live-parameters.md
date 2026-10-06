@@ -9,8 +9,8 @@ code was built and verified the same day. Companion to
 1. **One live parameter set in memory; the file only seeds it.** `pbr_run`
    reads the config once into a `PbrConfig`. From then on that struct is
    the truth. The program never writes the config file. What ran stays
-   reproducible: the run directory keeps the starting config
-   (`prb.conf`, copied by `run_live.sh`) and a `changes.log` with every
+   reproducible: `pbr_run --save-config` copies the starting config into
+   the run directory as `config.conf`, beside a `changes.log` with every
    change and the CPI it took effect at.
 2. **Two ways the set changes, both at a CPI boundary.** The viewer's
    Apply button, arriving as KEY = VALUE lines on the chain's HTTP control
@@ -29,7 +29,8 @@ code was built and verified the same day. Companion to
    which rebuilds it because every buffered index depends on the rate.
 5. **Keys that cannot change live are refused by name**: sample rate,
    receiver names, UDP and control ports, full scale, buffer length, the
-   backend, the output flags. `pbr_run`'s `kRestartKeys`.
+   backend, the output flags. `kRestartKeys` in `Config.cpp`, checked by
+   `restartKeyChanged`.
 6. **No timeouts that end a program**, the author's rule. The control port
    is polled without blocking; a stalled client is dropped after 5 s and
    the loop goes on.

@@ -116,17 +116,15 @@ stop:
 ##         describes the USRP and would mis-index it). SCENARIO names the
 ##         directory under data/ (scenarios/README.md); the run lands in
 ##         /data/results/L2_performance/SCENARIO/ALG/STAMP with a copy of the
-##         config beside it. The quick manual path; scripts/run_experiment.sh
-##         is the controlled one with the full manifest.
+##         config beside it (--save-config).
 SCENARIO ?= S0_clean
 replay:
 	@ssh $(JETSON) 'cd $(REMOTE) && \
 	    A=$$(sed -n "s/^DSI_ALGORITHM *= *//p" config/fers.conf) && \
 	    OUT=/data/results/L2_performance/$(SCENARIO)/$${A}/$$(date +%Y%m%d_%H%M%S) && \
-	    mkdir -p $$OUT && cp config/fers.conf $$OUT/config.conf && \
-	    echo "output: $$OUT" && \
+	    mkdir -p $$OUT && echo "output: $$OUT" && \
 	    ./build/pbr_run --file data/$(SCENARIO)/capture.pbrcap --config config/fers.conf \
-	        --out $$OUT $(ARGS) \
+	        --out $$OUT --save-config $(ARGS) \
 	        | tee $$OUT/run.log'
 
 ## view: watch the running chain in a browser, live. Run this ON THE MAC, like

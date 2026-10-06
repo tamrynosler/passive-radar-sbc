@@ -172,6 +172,11 @@ fers-cli <scenario>.fersxml --out-dir=/tmp/out \
 `--capture` writes every datagram to a `.pbrcap` file for `--file` replay;
 `--dump-cpi` writes the first CPI's input, both channels, as the fixed input
 of `dsi_verify`, `dsi_bench` and `matlab/eca_golden.m`.
+`--out DIR --save-config` keeps a copy of the config beside the run's
+CSVs and `changes.log`. The Mac build has no GPU, so there set
+`DSI_BACKEND = CPU`; a live run on the CPU starts with a warning, and the
+summary's budget and lag checks say whether it kept up (on the MacBook,
+CPU range-Doppler takes about 1.25 s per 1 s CPI, so it does not).
 
 ## DSI cancellation
 

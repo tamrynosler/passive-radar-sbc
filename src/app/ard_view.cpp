@@ -32,12 +32,12 @@
 //
 // Runs on the board (make view) or on any machine on the switch that joins
 // the group (make host builds it without CUDA). Design:
-// docs/ard-stream-design.md. Replaces scripts/ard_viewer.py.
+// docs/ard-stream-design.md.
 //
 // Usage:
 //   ./ard_view                                   # 239.192.0.2:4992, http 8080
 //   ./ard_view --group 239.192.0.2 --iface <mac-ip> --http 8081
-//   ./ard_view --file data/ard/ard_00000.bin     # serve one recorded frame
+//   ./ard_view --file data/S0_clean/ard/ard_00000.bin   # serve one recorded frame
 
 #include "pbr/ArdFile.hpp"
 #include "pbr/ArdStream.hpp"
@@ -263,32 +263,23 @@ bool handleRequest(const std::string& sMethod, const std::string& sPath,
             std::chrono::system_clock::now().time_since_epoch()).count();
         std::string sJson;
         {
+            // Before the first frame there is no CPI and no chain to name.
             std::lock_guard<std::mutex> oLock(pShared->oMutex);
+            const bool bFrame = pShared->bHaveFrame;
+            const std::string sCpi = bFrame ? std::to_string(pShared->uCpi) : "null";
             char achHead[320];
-            if (pShared->bHaveFrame) {
-                std::snprintf(achHead, sizeof(achHead),
-                              "{\"latestCpi\":%u,\"framesCompleted\":%llu,"
-                              "\"framesDropped\":%llu,\"chunksReceived\":%llu,"
-                              "\"chainHost\":\"%s\",\"chainControlPort\":%u,"
-                              "\"serverTime\":%.3f,\"stream\":",
-                              pShared->uCpi,
-                              (unsigned long long)pShared->uFramesCompleted,
-                              (unsigned long long)pShared->uFramesDropped,
-                              (unsigned long long)pShared->uChunksReceived,
-                              pShared->sChainHost.c_str(),
-                              static_cast<unsigned>(pShared->uChainControlPort),
-                              dNow);
-            } else {
-                std::snprintf(achHead, sizeof(achHead),
-                              "{\"latestCpi\":null,\"framesCompleted\":%llu,"
-                              "\"framesDropped\":%llu,\"chunksReceived\":%llu,"
-                              "\"chainHost\":\"\",\"chainControlPort\":0,"
-                              "\"serverTime\":%.3f,\"stream\":",
-                              (unsigned long long)pShared->uFramesCompleted,
-                              (unsigned long long)pShared->uFramesDropped,
-                              (unsigned long long)pShared->uChunksReceived,
-                              dNow);
-            }
+            std::snprintf(achHead, sizeof(achHead),
+                          "{\"latestCpi\":%s,\"framesCompleted\":%llu,"
+                          "\"framesDropped\":%llu,\"chunksReceived\":%llu,"
+                          "\"chainHost\":\"%s\",\"chainControlPort\":%u,"
+                          "\"serverTime\":%.3f,\"stream\":",
+                          sCpi.c_str(),
+                          (unsigned long long)pShared->uFramesCompleted,
+                          (unsigned long long)pShared->uFramesDropped,
+                          (unsigned long long)pShared->uChunksReceived,
+                          bFrame ? pShared->sChainHost.c_str() : "",
+                          bFrame ? static_cast<unsigned>(pShared->uChainControlPort) : 0u,
+                          dNow);
             sJson  = achHead;
             sJson += pShared->sStatus.empty() ? "null" : pShared->sStatus;
             sJson += "}";
@@ -341,6 +332,52 @@ bool handleRequest(const std::string& sMethod, const std::string& sPath,
     return false;
 }
 
+// One recorded frame, for working on the page without a stream. No thread
+// runs, so oShared is filled without the lock.
+bool loadRecordedFrame(const std::string& sPath, Shared& oShared)
+{
+    std::vector<uint8_t> vFrame;
+    ArdFileHeader oHeader;
+    if (!readWholeFile(sPath, vFrame) ||
+        !parseArdFrameHeader(vFrame.data(), vFrame.size(), oHeader)) {
+        std::fprintf(stderr, "ard_view: cannot read %s as an ARD frame\n", sPath.c_str());
+        return false;
+    }
+    char achStatus[256];
+    std::snprintf(achStatus, sizeof(achStatus),
+                  "{\"runName\":\"file\",\"cpi\":0,\"status\":%llu,\"reason\":\"\","
+                  "\"detections\":%llu}",
+                  (unsigned long long)oHeader.uStatus,
+                  (unsigned long long)oHeader.uDetections);
+    oShared.bHaveFrame       = true;
+    oShared.uCpi             = 0;
+    oShared.vFrame           = vFrame;
+    oShared.sStatus          = achStatus;
+    oShared.uFramesCompleted = 1;
+    std::printf("ard_view: serving %s (%llu x %llu, status %llu)\n", sPath.c_str(),
+                (unsigned long long)oHeader.uRangeBins,
+                (unsigned long long)oHeader.uDopplerBins,
+                (unsigned long long)oHeader.uStatus);
+    return true;
+}
+
+// Listen for the ARD stream, joining the group if one is given.
+bool openStream(const Options& o, UdpReceiver& oReceiver)
+{
+    if (!oReceiver.open(o.uPort, kRcvBufBytes, true))
+        return false;
+    if (!o.sGroup.empty() && !oReceiver.joinMulticastGroup(o.sGroup.c_str(), o.sIface.c_str()))
+        return false;
+    std::printf("ard_view: ARD stream on UDP %u%s%s, receive buffer %d bytes\n",
+                static_cast<unsigned>(o.uPort),
+                o.sGroup.empty() ? "" : ", group ", o.sGroup.c_str(),
+                oReceiver.actualRcvBufBytes());
+    if (oReceiver.actualRcvBufBytes() < 2 * 1024 * 1024)
+        std::printf("  WARNING: under 2 MB of receive buffer; a 1.5 MB frame burst "
+                    "may drop. Raise net.core.rmem_max.\n");
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -358,43 +395,12 @@ int main(int argc, char* argv[])
 
     UdpReceiver oReceiver;
     std::thread oReceiveThread;
-
     if (!o.sFilePath.empty()) {
-        // One recorded frame, for working on the page without a stream.
-        std::vector<uint8_t> vFrame;
-        ArdFileHeader oHeader;
-        if (!readWholeFile(o.sFilePath, vFrame) ||
-            !parseArdFrameHeader(vFrame.data(), vFrame.size(), oHeader)) {
-            std::fprintf(stderr, "ard_view: cannot read %s as an ARD frame\n", o.sFilePath.c_str());
+        if (!loadRecordedFrame(o.sFilePath, oShared))
             return 1;
-        }
-        char achStatus[256];
-        std::snprintf(achStatus, sizeof(achStatus),
-                      "{\"runName\":\"file\",\"cpi\":0,\"status\":%llu,\"reason\":\"\","
-                      "\"detections\":%llu}",
-                      (unsigned long long)oHeader.uStatus,
-                      (unsigned long long)oHeader.uDetections);
-        oShared.bHaveFrame       = true;
-        oShared.uCpi             = 0;
-        oShared.vFrame           = vFrame;
-        oShared.sStatus          = achStatus;
-        oShared.uFramesCompleted = 1;
-        std::printf("ard_view: serving %s (%llu x %llu, status %llu)\n", o.sFilePath.c_str(),
-                    (unsigned long long)oHeader.uRangeBins,
-                    (unsigned long long)oHeader.uDopplerBins,
-                    (unsigned long long)oHeader.uStatus);
     } else {
-        if (!oReceiver.open(o.uPort, kRcvBufBytes, true))
+        if (!openStream(o, oReceiver))
             return 1;
-        if (!o.sGroup.empty() && !oReceiver.joinMulticastGroup(o.sGroup.c_str(), o.sIface.c_str()))
-            return 1;
-        std::printf("ard_view: ARD stream on UDP %u%s%s, receive buffer %d bytes\n",
-                    static_cast<unsigned>(o.uPort),
-                    o.sGroup.empty() ? "" : ", group ", o.sGroup.c_str(),
-                    oReceiver.actualRcvBufBytes());
-        if (oReceiver.actualRcvBufBytes() < 2 * 1024 * 1024)
-            std::printf("  WARNING: under 2 MB of receive buffer; a 1.5 MB frame burst "
-                        "may drop. Raise net.core.rmem_max.\n");
         oReceiveThread = std::thread(receiveLoop, &oReceiver, &oShared);
     }
 

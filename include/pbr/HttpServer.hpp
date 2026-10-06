@@ -46,9 +46,9 @@ public:
     // failed; a bad client returns true.
     bool serveOne(HttpHandler pHandler, void* pContext);
 
-    // The same, but returns at once with bServedOut = false when no client
-    // is waiting. For a loop that has other work (pbr_run's).
-    bool servePending(HttpHandler pHandler, void* pContext, bool& bServedOut);
+    // The same, but returns at once when no client is waiting. For a loop
+    // that has other work (pbr_run's).
+    bool servePending(HttpHandler pHandler, void* pContext);
 
 private:
     int miListen;
