@@ -39,7 +39,6 @@ using namespace pbr;
 
 namespace {
 
-const uint64_t    kMaxDetections     = 8192;
 
 struct Options {
     std::string sCleanedPath;      // (reference, cleaned) CPI
@@ -213,10 +212,10 @@ int main(int argc, char* argv[])
 
     const uint64_t uCells = oParams.uRangeBins * oParams.uDopplerBins;
     std::vector<ComplexF> vcGoldenMap(static_cast<size_t>(uCells));
-    std::vector<Detection> vGoldenDet(static_cast<size_t>(kMaxDetections));
+    std::vector<Detection> vGoldenDet(static_cast<size_t>(kMaxArdDetections));
     if (!readArdFile(oOptions.sGoldenPath.c_str(), oGoldenHeader,
                      vcGoldenMap.data(), uCells,
-                     vGoldenDet.data(), kMaxDetections))
+                     vGoldenDet.data(), kMaxArdDetections))
         return 1;
 
     // ---- run our side ------------------------------------------------------
@@ -225,7 +224,7 @@ int main(int argc, char* argv[])
         return 1;
 
     std::vector<ComplexF>  vcMap(static_cast<size_t>(uCells));
-    std::vector<Detection> vDet(static_cast<size_t>(kMaxDetections));
+    std::vector<Detection> vDet(static_cast<size_t>(kMaxArdDetections));
     ArdStats oStats;
 
     std::string sPathLabel = pArd->name();
@@ -277,14 +276,14 @@ int main(int argc, char* argv[])
         // --- path A: through the host -------------------------------------
         std::vector<ComplexF> vcCleaned(static_cast<size_t>(oCpiHeader.uSampleCount));
         std::vector<ComplexF> vcMapHost(static_cast<size_t>(uCells));
-        std::vector<Detection> vDetHost(static_cast<size_t>(kMaxDetections));
+        std::vector<Detection> vDetHost(static_cast<size_t>(kMaxArdDetections));
         ArdStats oStatsHost;
 
         pDsi->setHostOutputEnabled(true);
         if (!pDsi->cancel(vcRef.data(), vcSur.data(), vcCleaned.data(), oDsiStats))
             return 1;
         if (!pArd->process(vcRef.data(), vcCleaned.data(), vcMapHost.data(),
-                           vDetHost.data(), kMaxDetections, oStatsHost))
+                           vDetHost.data(), kMaxArdDetections, oStatsHost))
             return 1;
 
         // --- path B: device-coupled ---------------------------------------
@@ -293,7 +292,7 @@ int main(int argc, char* argv[])
             if (!pDsi->cancel(vcRef.data(), vcSur.data(), nullptr, oDsiStats))
                 return 1;
             if (!pArd->processDevice(pDsi->deviceReference(), pDsi->deviceOutput(),
-                                     vcMap.data(), vDet.data(), kMaxDetections,
+                                     vcMap.data(), vDet.data(), kMaxArdDetections,
                                      oStats))
                 return 1;
 
@@ -342,7 +341,7 @@ int main(int argc, char* argv[])
     } else if (oOptions.sStage == "cfar") {
         // Feed the detector MATLAB's own map, so nothing about map formation
         // can influence the result.
-        if (!pArd->detect(vcGoldenMap.data(), vDet.data(), kMaxDetections, oStats))
+        if (!pArd->detect(vcGoldenMap.data(), vDet.data(), kMaxArdDetections, oStats))
             return 1;
     } else {
         CpiFileHeader oCpiHeader;
@@ -364,7 +363,7 @@ int main(int argc, char* argv[])
             return 1;
 
         if (!pArd->process(vcRef.data(), vcCleaned.data(), vcMap.data(),
-                           vDet.data(), kMaxDetections, oStats))
+                           vDet.data(), kMaxArdDetections, oStats))
             return 1;
     }
 

@@ -18,7 +18,7 @@ namespace pbr {
 // A picture. Two axes:
 //
 //   range    how much further the echo travelled than the direct signal,
-//            measured as a delay. 1.46 km per bin at 204800 Hz.
+//            measured as a delay: c / fs per bin, 1.5 km at 200 kHz.
 //   Doppler  how much the echo's frequency shifted, which is how fast the
 //            thing that reflected it is moving. 1 Hz per bin over a 1 s CPI.
 //
@@ -125,8 +125,8 @@ struct ArdParams {
     ArdBackend   eBackend         = ArdBackend::Gpu;
     ArdAlgorithm eAlgorithm       = ArdAlgorithm::Direct;
 
-    uint64_t   uCpiSamples        = 0;   // 204800
-    uint64_t   uSampleRateHz      = 0;   // 204800
+    uint64_t   uCpiSamples        = 0;
+    uint64_t   uSampleRateHz      = 0;
 
     // Delay bins in the map. Need not equal the canceller's tap count,
     // though in the shipped config both are 120.
@@ -138,8 +138,8 @@ struct ArdParams {
     // factor. Must divide uCpiSamples exactly.
     uint64_t   uDopplerDecimation = 0;   // 128
 
-    // Derived: uCpiSamples / uDopplerDecimation. 1600 for the shipped config,
-    // giving 1 Hz per bin over +-800 Hz.
+    // Derived: uCpiSamples / uDopplerDecimation. 1600 for the shipped
+    // configs, giving one bin per 1/T_CPI Hz over +-fs/(2 * decimation).
     uint64_t   uDopplerBins       = 0;
 
     // Doppler extent worth displaying. Does not change what is computed.
@@ -162,6 +162,12 @@ struct ArdParams {
     uint64_t   uCfarTrainRange    = 0;
     uint64_t   uCfarTrainDoppler  = 0;
 };
+
+// The most detections either backend reports for one map; more are counted
+// in ArdStats::uDetectionsDropped. At Pfa 1e-5 over 192000 cells only about
+// two false alarms are expected per CPI, so anything near this cap means
+// something is wrong.
+const uint64_t kMaxArdDetections = 8192;
 
 // One cell that beat its local threshold.
 struct Detection {
@@ -199,8 +205,9 @@ public:
     //
     // pcRef and pcCleaned each hold uCpiSamples samples. pcMap, if not null,
     // receives uRangeBins * uDopplerBins complex cells in the layout above.
-    // Detections are written to the caller's array up to uMaxDetections;
-    // anything beyond that is counted in oStats.uDetectionsDropped.
+    // Detections are written to the caller's array up to uMaxDetections (and
+    // never more than kMaxArdDetections), in raster order: Doppler bin, then
+    // range bin. Anything beyond that is counted in oStats.uDetectionsDropped.
     virtual bool process(const ComplexF* pcRef, const ComplexF* pcCleaned,
                          ComplexF* pcMap,
                          Detection* pDetections, uint64_t uMaxDetections,
@@ -209,7 +216,7 @@ public:
     // Same, but the samples are already on the device -- fed straight from a
     // GPU canceller's deviceReference() and deviceOutput(), with no copies.
     // Returns false on a backend that has no device.
-    virtual bool processDevice(const void* pdRef, const void* pdCleaned,
+    virtual bool processDevice(const void* d_pRef, const void* d_pCleaned,
                                ComplexF* pcMap,
                                Detection* pDetections, uint64_t uMaxDetections,
                                ArdStats& oStats) = 0;

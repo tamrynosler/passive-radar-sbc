@@ -32,6 +32,31 @@ bool readDetection(std::FILE* pFile, Detection& oDet)
            std::fread(&oDet.dSnrDb,     sizeof(double), 1, pFile) == 1;
 }
 
+// Native byte order, like the fwrite-based writer this replaced: aarch64 and
+// x86 are both little-endian, which is what the format documents.
+void putU64(uint8_t* p, uint64_t uValue)   { std::memcpy(p, &uValue, sizeof(uValue)); }
+void putF64(uint8_t* p, double dValue)     { std::memcpy(p, &dValue, sizeof(dValue)); }
+uint64_t getU64(const uint8_t* p)          { uint64_t u; std::memcpy(&u, p, sizeof(u)); return u; }
+
+// The bounds every frame, from a file or off the wire, must pass. Each
+// dimension is bounded on its own before they are multiplied, so a corrupt
+// header cannot wrap the product round to something small.
+bool headerIsPlausible(const ArdFileHeader& oHeader, const char* pWhat)
+{
+    if (oHeader.uRangeBins == 0 || oHeader.uDopplerBins == 0 ||
+        oHeader.uRangeBins > kMaxCells || oHeader.uDopplerBins > kMaxCells ||
+        oHeader.uRangeBins * oHeader.uDopplerBins > kMaxCells ||
+        oHeader.uDetections > kMaxDetects) {
+        std::fprintf(stderr, "ard frame: %s declares implausible dimensions "
+                             "(%llu x %llu, %llu detections)\n", pWhat,
+                     (unsigned long long)oHeader.uRangeBins,
+                     (unsigned long long)oHeader.uDopplerBins,
+                     (unsigned long long)oHeader.uDetections);
+        return false;
+    }
+    return true;
+}
+
 std::FILE* openAndReadHeader(const char* pPath, ArdFileHeader& oHeader)
 {
     if (pPath == nullptr) {
@@ -66,44 +91,11 @@ std::FILE* openAndReadHeader(const char* pPath, ArdFileHeader& oHeader)
         return nullptr;
     }
 
-    const uint64_t uCells = oHeader.uRangeBins * oHeader.uDopplerBins;
-    if (oHeader.uRangeBins == 0 || oHeader.uDopplerBins == 0 ||
-        uCells > kMaxCells || oHeader.uDetections > kMaxDetects) {
-        std::fprintf(stderr, "ard file: %s declares implausible dimensions "
-                             "(%llu x %llu, %llu detections)\n", pPath,
-                     (unsigned long long)oHeader.uRangeBins,
-                     (unsigned long long)oHeader.uDopplerBins,
-                     (unsigned long long)oHeader.uDetections);
+    if (!headerIsPlausible(oHeader, pPath)) {
         std::fclose(pFile);
         return nullptr;
     }
-
     return pFile;
-}
-
-} // namespace
-
-namespace {
-
-// Native byte order, like the fwrite-based writer this replaced: aarch64 and
-// x86 are both little-endian, which is what the format documents.
-void putU64(uint8_t* p, uint64_t uValue)   { std::memcpy(p, &uValue, sizeof(uValue)); }
-void putF64(uint8_t* p, double dValue)     { std::memcpy(p, &dValue, sizeof(dValue)); }
-uint64_t getU64(const uint8_t* p)          { uint64_t u; std::memcpy(&u, p, sizeof(u)); return u; }
-
-bool headerIsPlausible(const ArdFileHeader& oHeader, const char* pWhat)
-{
-    const uint64_t uCells = oHeader.uRangeBins * oHeader.uDopplerBins;
-    if (oHeader.uRangeBins == 0 || oHeader.uDopplerBins == 0 ||
-        uCells > kMaxCells || oHeader.uDetections > kMaxDetects) {
-        std::fprintf(stderr, "ard frame: %s declares implausible dimensions "
-                             "(%llu x %llu, %llu detections)\n", pWhat,
-                     (unsigned long long)oHeader.uRangeBins,
-                     (unsigned long long)oHeader.uDopplerBins,
-                     (unsigned long long)oHeader.uDetections);
-        return false;
-    }
-    return true;
 }
 
 } // namespace
@@ -206,14 +198,15 @@ bool writeArdFile(const char* pPath, const ArdFileHeader& oHeader,
         std::fprintf(stderr, "ard file: null argument to writeArdFile\n");
         return false;
     }
+    // Checked before the buffer is sized from the header, which happens
+    // before serialiseArdFrame gets to check it.
     if (!headerIsPlausible(oHeader, pPath))
         return false;
-
-    std::vector<uint8_t> vFrame(ardFrameBytes(oHeader));
+    std::vector<uint8_t> vuFrame(ardFrameBytes(oHeader));
     size_t uLength = 0;
-    if (!serialiseArdFrame(oHeader, pcMap, pDetections, vFrame.data(), vFrame.size(), uLength))
+    if (!serialiseArdFrame(oHeader, pcMap, pDetections, vuFrame.data(), vuFrame.size(), uLength))
         return false;
-    return writeArdFrameBytes(pPath, vFrame.data(), uLength);
+    return writeArdFrameBytes(pPath, vuFrame.data(), uLength);
 }
 
 bool readArdFileHeader(const char* pPath, ArdFileHeader& oHeader)

@@ -72,23 +72,18 @@
 
 #include "pbr/ArdProcessor.hpp"
 #include "pbr/check.hpp"
+#include "../ArdInternal.hpp"
 
 #include <cmath>
-#include <complex>
 #include <cstdio>
-#include <cstring>
 #include <vector>
 
 namespace pbr {
 
 namespace {
 
-typedef std::complex<float> ComplexAcc;
-
 class ArdCpu : public ArdProcessor {
 public:
-    ArdCpu() { std::memset(machName, 0, sizeof(machName)); }
-
     bool init(const ArdParams& oParams) override;
 
     bool process(const ComplexF* pcRef, const ComplexF* pcCleaned,
@@ -96,7 +91,7 @@ public:
                  Detection* pDetections, uint64_t uMaxDetections,
                  ArdStats& oStats) override;
 
-    bool processDevice(const void* pdRef, const void* pdCleaned,
+    bool processDevice(const void* d_pRef, const void* d_pCleaned,
                        ComplexF* pcMap,
                        Detection* pDetections, uint64_t uMaxDetections,
                        ArdStats& oStats) override;
@@ -108,78 +103,45 @@ public:
     const char* name() const override { return machName; }
 
 private:
-    void buildMap(const ComplexF* pcRef, const ComplexF* pcCleaned);
+    // The map, in steps: the correlation matrix into mvcDecimated, then the
+    // Doppler transform into mvcMap.
+    void correlateDirect(const ComplexF* pcRef, const ComplexF* pcCleaned);
+    void dopplerDft();
+
+    // CFAR over mvfPower.
     bool runCfar(Detection* pDetections, uint64_t uMaxDetections,
                  ArdStats& oStats);
+    float peakPower() const;
+    float trainingSum(uint64_t uDoppler, uint64_t uRange) const;
 
     ArdParams               moParams;
     uint64_t                muCells       = 0;   // range * Doppler
-    uint64_t                muTrainCount  = 0;   // cells feeding the estimate
     // Computed once in double, then narrowed, exactly as the GPU passes it
     // into the kernel. Never recomputed per cell.
     float                   mfAlphaOverTrain = 0.0f;
 
-    std::vector<ComplexAcc> mvcDecimated;  // [range][block], pre-transform
-    std::vector<ComplexAcc> mvcMap;        // [doppler][range], display layout
+    std::vector<ComplexF>   mvcDecimated;  // [range][block], pre-transform
+    std::vector<ComplexF>   mvcMap;        // [doppler][range], display layout
     std::vector<float>      mvfPower;      // |map|^2, same layout
 
     // Only constructed when eAlgorithm is Batches.
     BatchesArdCpu           moBatches;
 
-    char                    machName[48];
+    char                    machName[48] = {};
     bool                    mbReady       = false;
 };
 
 bool ArdCpu::init(const ArdParams& oParams)
 {
     CHECK(!mbReady, "ArdCpu::init called twice");
-    CHECK(oParams.uCpiSamples > 0, "CPI length must be non-zero");
-    CHECK(oParams.uSampleRateHz > 0, "sample rate must be non-zero");
-    CHECK(oParams.uRangeBins > 0, "range bin count must be non-zero");
-    CHECK(oParams.uDopplerDecimation > 0, "Doppler decimation must be non-zero");
-    CHECK(oParams.uCpiSamples % oParams.uDopplerDecimation == 0,
-          "the decimation factor must divide the CPI exactly, or the last "
-          "block is short and the Doppler axis ends up subtly wrong");
-    CHECK(oParams.uDopplerBins ==
-              oParams.uCpiSamples / oParams.uDopplerDecimation,
-          "uDopplerBins must equal uCpiSamples / uDopplerDecimation");
-    CHECK(oParams.uDopplerBins % 2 == 0,
-          "an odd Doppler bin count has no exact centre to put zero Doppler at");
-    CHECK(oParams.uRangeBins <= oParams.uCpiSamples,
-          "more range bins than samples in a CPI");
-    CHECK(oParams.dCfarPfa > 0.0 && oParams.dCfarPfa < 1.0,
-          "CFAR Pfa must be strictly between 0 and 1");
-
-    // The CFAR window must fit inside the map, or every cell is a border cell
-    // and the background estimate means nothing.
-    const uint64_t uHalfRange   = oParams.uCfarGuardRange + oParams.uCfarTrainRange;
-    const uint64_t uHalfDoppler = oParams.uCfarGuardDoppler + oParams.uCfarTrainDoppler;
-    CHECK(2 * uHalfRange + 1 <= oParams.uRangeBins,
-          "the CFAR window is wider than the map in range");
-    CHECK(2 * uHalfDoppler + 1 <= oParams.uDopplerBins,
-          "the CFAR window is taller than the map in Doppler");
+    if (!checkArdParams(oParams, mfAlphaOverTrain))
+        return false;
 
     moParams = oParams;
     muCells  = oParams.uRangeBins * oParams.uDopplerBins;
 
-    // Training cells: the whole window minus the guard block (which includes
-    // the cell under test).
-    const uint64_t uWindow = (2 * uHalfRange + 1) * (2 * uHalfDoppler + 1);
-    const uint64_t uGuard  = (2 * oParams.uCfarGuardRange + 1) *
-                             (2 * oParams.uCfarGuardDoppler + 1);
-    muTrainCount = uWindow - uGuard;
-    CHECK(muTrainCount > 0, "the CFAR window has no training cells");
-
-    // The scale factor that turns "average of N training cells" into a
-    // threshold achieving the requested false alarm rate, for exponentially
-    // distributed noise power. Computed once, not per cell.
-    const double dN = static_cast<double>(muTrainCount);
-    const double dAlpha = dN * (std::pow(oParams.dCfarPfa, -1.0 / dN) - 1.0);
-    mfAlphaOverTrain = static_cast<float>(dAlpha / dN);
-
-    mvcDecimated.assign(static_cast<size_t>(oParams.uRangeBins * oParams.uDopplerBins),
-                        ComplexAcc());
-    mvcMap.assign(static_cast<size_t>(muCells), ComplexAcc());
+    mvcDecimated.assign(static_cast<size_t>(muCells), ComplexF());
+    mvcMap.assign(static_cast<size_t>(muCells), ComplexF());
     mvfPower.assign(static_cast<size_t>(muCells), 0.0f);
 
     if (oParams.eAlgorithm == ArdAlgorithm::Batches) {
@@ -196,152 +158,165 @@ bool ArdCpu::init(const ArdParams& oParams)
     return true;
 }
 
-void ArdCpu::buildMap(const ComplexF* pcRef, const ComplexF* pcCleaned)
+// Steps 1 and 2 by the Direct route: for each delay, the lag products summed
+// over each block of uDopplerDecimation samples.
+void ArdCpu::correlateDirect(const ComplexF* pcRef, const ComplexF* pcCleaned)
 {
     const uint64_t uRanges = moParams.uRangeBins;
     const uint64_t uBlocks = moParams.uDopplerBins;
     const uint64_t uDec    = moParams.uDopplerDecimation;
 
-    // ---- steps 1 and 2: the correlation matrix -----------------------------
-    // Two routes to the same numbers; see ArdAlgorithm in ArdProcessor.hpp.
-    if (moParams.eAlgorithm == ArdAlgorithm::Batches) {
-        moBatches.correlate(pcRef, pcCleaned, &mvcDecimated[0]);
-    } else {
-        for (uint64_t r = 0; r < uRanges; ++r) {
-            for (uint64_t b = 0; b < uBlocks; ++b) {
-                float fRe = 0.0f;
-                float fIm = 0.0f;
+    for (uint64_t r = 0; r < uRanges; ++r) {
+        for (uint64_t uBlock = 0; uBlock < uBlocks; ++uBlock) {
+            float fRe = 0.0f;
+            float fIm = 0.0f;
 
-                const uint64_t uFirst = b * uDec;
-                for (uint64_t i = 0; i < uDec; ++i) {
-                    const uint64_t n = uFirst + i;
-                    // The reference is zero before the start of the CPI, so a
-                    // delay that reaches back past it contributes nothing.
-                    if (n < r)
-                        continue;
+            const uint64_t uFirst = uBlock * uDec;
+            for (uint64_t i = 0; i < uDec; ++i) {
+                const uint64_t n = uFirst + i;
+                // The reference is zero before the start of the CPI, so a
+                // delay that reaches back past it contributes nothing.
+                if (n < r)
+                    continue;
 
-                    const ComplexF& cS = pcCleaned[n];
-                    const ComplexF& cR = pcRef[n - r];
-                    // cleaned * conj(delayed reference)
-                    const float fSr = cS.real(), fSi = cS.imag();
-                    const float fRr = cR.real(), fRi = cR.imag();
-                    fRe += fSr * fRr + fSi * fRi;
-                    fIm += fSi * fRr - fSr * fRi;
-                }
-
-                mvcDecimated[static_cast<size_t>(r * uBlocks + b)] = ComplexAcc(fRe, fIm);
+                const ComplexF& cS = pcCleaned[n];
+                const ComplexF& cR = pcRef[n - r];
+                // cleaned * conj(delayed reference)
+                const float fSr = cS.real(), fSi = cS.imag();
+                const float fRr = cR.real(), fRi = cR.imag();
+                fRe += fSr * fRr + fSi * fRi;
+                fIm += fSi * fRr - fSr * fRi;
             }
+
+            mvcDecimated[static_cast<size_t>(r * uBlocks + uBlock)] = ComplexF(fRe, fIm);
         }
     }
+}
 
-    // ---- step 3: transform across blocks, per range bin -------------------
-    // Direct DFT, and the fftshift and the transpose into display layout are
-    // folded in by writing straight to the destination index.
-    //
-    // The angle is formed in double because k*n reaches 1600*1600 and a float
-    // product would lose the low bits of the phase outright; the transform
-    // itself accumulates in float like everything else.
-    const double dTwoPiOverN = -2.0 * kPi / static_cast<double>(uBlocks);
+// Step 3: transform across blocks, per range bin. Direct DFT, and the
+// fftshift and the transpose into display layout are folded in by writing
+// straight to the destination index.
+//
+// The angle is formed in double because k*n reaches 1600*1600 and a float
+// product would lose the low bits of the phase outright; the transform
+// itself accumulates in float like everything else.
+void ArdCpu::dopplerDft()
+{
+    const uint64_t uRanges = moParams.uRangeBins;
+    const uint64_t uBlocks = moParams.uDopplerBins;
+    const double dMinusTwoPiOverN = -2.0 * kPi / static_cast<double>(uBlocks);
     const uint64_t uHalf = uBlocks / 2;
 
     for (uint64_t r = 0; r < uRanges; ++r) {
-        const ComplexAcc* pcRow = &mvcDecimated[static_cast<size_t>(r * uBlocks)];
+        const ComplexF* pcRow = &mvcDecimated[static_cast<size_t>(r * uBlocks)];
 
         for (uint64_t k = 0; k < uBlocks; ++k) {
             float fRe = 0.0f;
             float fIm = 0.0f;
             for (uint64_t n = 0; n < uBlocks; ++n) {
-                const double dAngle = dTwoPiOverN * static_cast<double>(k) *
+                const double dAngle = dMinusTwoPiOverN * static_cast<double>(k) *
                                       static_cast<double>(n);
                 const float fCos = static_cast<float>(std::cos(dAngle));
                 const float fSin = static_cast<float>(std::sin(dAngle));
-                const ComplexAcc& c = pcRow[static_cast<size_t>(n)];
-                fRe += c.real() * fCos - c.imag() * fSin;
-                fIm += c.real() * fSin + c.imag() * fCos;
+                const ComplexF& cIn = pcRow[static_cast<size_t>(n)];
+                fRe += cIn.real() * fCos - cIn.imag() * fSin;
+                fIm += cIn.real() * fSin + cIn.imag() * fCos;
             }
 
             // fftshift: transform bin k belongs at display row
             // (k + N/2) mod N, so that zero Doppler lands in the middle.
-            const uint64_t d = (k + uHalf) % uBlocks;
-            mvcMap[static_cast<size_t>(d * uRanges + r)] = ComplexAcc(fRe, fIm);
+            const uint64_t uRow = (k + uHalf) % uBlocks;
+            mvcMap[static_cast<size_t>(uRow * uRanges + r)] = ComplexF(fRe, fIm);
         }
     }
 }
 
-bool ArdCpu::runCfar(Detection* pDetections, uint64_t uMaxDetections,
-                     ArdStats& oStats)
+float ArdCpu::peakPower() const
 {
-    const uint64_t uRanges  = moParams.uRangeBins;
-    const uint64_t uDoppler = moParams.uDopplerBins;
-
-    const int64_t iGuardR = static_cast<int64_t>(moParams.uCfarGuardRange);
-    const int64_t iGuardD = static_cast<int64_t>(moParams.uCfarGuardDoppler);
-    const int64_t iHalfR  = iGuardR + static_cast<int64_t>(moParams.uCfarTrainRange);
-    const int64_t iHalfD  = iGuardD + static_cast<int64_t>(moParams.uCfarTrainDoppler);
-
-    // Peak, for the dB scale the map is reported on.
     float fPeakPower = 0.0f;
     for (uint64_t u = 0; u < muCells; ++u) {
         if (mvfPower[static_cast<size_t>(u)] > fPeakPower)
             fPeakPower = mvfPower[static_cast<size_t>(u)];
     }
+    return fPeakPower;
+}
+
+// The sum of the training cells around (uDoppler, uRange). Anything off the
+// map counts as zero and the divisor stays the full training count -- see the
+// note at the top of this file.
+float ArdCpu::trainingSum(uint64_t uDoppler, uint64_t uRange) const
+{
+    const int64_t iRanges   = static_cast<int64_t>(moParams.uRangeBins);
+    const int64_t iDopplers = static_cast<int64_t>(moParams.uDopplerBins);
+    const int64_t iGuardR   = static_cast<int64_t>(moParams.uCfarGuardRange);
+    const int64_t iGuardD   = static_cast<int64_t>(moParams.uCfarGuardDoppler);
+    const int64_t iHalfR    = iGuardR + static_cast<int64_t>(moParams.uCfarTrainRange);
+    const int64_t iHalfD    = iGuardD + static_cast<int64_t>(moParams.uCfarTrainDoppler);
+
+    float fSum = 0.0f;
+    for (int64_t iOffD = -iHalfD; iOffD <= iHalfD; ++iOffD) {
+        const int64_t iD = static_cast<int64_t>(uDoppler) + iOffD;
+        if (iD < 0 || iD >= iDopplers)
+            continue;
+
+        const bool bGuardD = (iOffD >= -iGuardD && iOffD <= iGuardD);
+
+        for (int64_t iOffR = -iHalfR; iOffR <= iHalfR; ++iOffR) {
+            if (bGuardD && iOffR >= -iGuardR && iOffR <= iGuardR)
+                continue;   // guard block, including the cell itself
+
+            const int64_t iR = static_cast<int64_t>(uRange) + iOffR;
+            if (iR < 0 || iR >= iRanges)
+                continue;
+
+            fSum += mvfPower[static_cast<size_t>(
+                static_cast<uint64_t>(iD) * moParams.uRangeBins +
+                static_cast<uint64_t>(iR))];
+        }
+    }
+    return fSum;
+}
+
+bool ArdCpu::runCfar(Detection* pDetections, uint64_t uMaxDetections,
+                     ArdStats& oStats)
+{
+    const uint64_t uRanges   = moParams.uRangeBins;
+    const uint64_t uDopplers = moParams.uDopplerBins;
+    const uint64_t uHalfR    = moParams.uCfarGuardRange + moParams.uCfarTrainRange;
+    const uint64_t uHalfD    = moParams.uCfarGuardDoppler + moParams.uCfarTrainDoppler;
+    const uint64_t uCapacity = (uMaxDetections < kMaxArdDetections) ? uMaxDetections
+                                                                    : kMaxArdDetections;
+
+    // Peak, for the dB scale the map is reported on.
+    const float fPeakPower = peakPower();
     oStats.dPeakDb = (fPeakPower > 0.0f)
                    ? 10.0 * std::log10(static_cast<double>(fPeakPower)) : 0.0;
 
-    for (uint64_t d = 0; d < uDoppler; ++d) {
-        for (uint64_t r = 0; r < uRanges; ++r) {
-            const float fCell = mvfPower[static_cast<size_t>(d * uRanges + r)];
-
-            // Sum the training cells. Anything off the map counts as zero and
-            // the divisor stays the full training count -- see the note at the
-            // top of this file.
-            float fSum = 0.0f;
-            for (int64_t dd = -iHalfD; dd <= iHalfD; ++dd) {
-                const int64_t iD = static_cast<int64_t>(d) + dd;
-                if (iD < 0 || iD >= static_cast<int64_t>(uDoppler))
-                    continue;
-
-                const bool bGuardD = (dd >= -iGuardD && dd <= iGuardD);
-
-                for (int64_t dr = -iHalfR; dr <= iHalfR; ++dr) {
-                    if (bGuardD && dr >= -iGuardR && dr <= iGuardR)
-                        continue;   // guard block, including the cell itself
-
-                    const int64_t iR = static_cast<int64_t>(r) + dr;
-                    if (iR < 0 || iR >= static_cast<int64_t>(uRanges))
-                        continue;
-
-                    fSum += mvfPower[static_cast<size_t>(
-                        static_cast<uint64_t>(iD) * uRanges +
-                        static_cast<uint64_t>(iR))];
-                }
-            }
-
-            const float fThreshold = mfAlphaOverTrain * fSum;
+    for (uint64_t uDoppler = 0; uDoppler < uDopplers; ++uDoppler) {
+        for (uint64_t uRange = 0; uRange < uRanges; ++uRange) {
+            const float fCell      = mvfPower[static_cast<size_t>(uDoppler * uRanges + uRange)];
+            const float fThreshold = mfAlphaOverTrain * trainingSum(uDoppler, uRange);
             if (!(fCell > fThreshold))
                 continue;
 
-            if (oStats.uDetections >= uMaxDetections) {
+            if (oStats.uDetections >= uCapacity) {
                 ++oStats.uDetectionsDropped;
                 continue;
             }
 
             Detection& oDet = pDetections[static_cast<size_t>(oStats.uDetections)];
-            oDet.uRangeBin   = r;
-            oDet.uDopplerBin = d;
-            oDet.dRangeKm    = ardRangeKm(r, moParams.uSampleRateHz);
-            oDet.dDopplerHz  = ardDopplerHz(d, moParams);
+            oDet.uRangeBin   = uRange;
+            oDet.uDopplerBin = uDoppler;
+            oDet.dRangeKm    = ardRangeKm(uRange, moParams.uSampleRateHz);
+            oDet.dDopplerHz  = ardDopplerHz(uDoppler, moParams);
             oDet.dPowerDb    = (fPeakPower > 0.0f)
                              ? 10.0 * std::log10(double(fCell) / double(fPeakPower)) : 0.0;
             oDet.dSnrDb      = (fThreshold > 0.0f)
                              ? 10.0 * std::log10(double(fCell) / double(fThreshold)) : 0.0;
             ++oStats.uDetections;
 
-            const bool bBorder =
-                (static_cast<int64_t>(r) < iHalfR) ||
-                (static_cast<int64_t>(r) >= static_cast<int64_t>(uRanges) - iHalfR) ||
-                (static_cast<int64_t>(d) < iHalfD) ||
-                (static_cast<int64_t>(d) >= static_cast<int64_t>(uDoppler) - iHalfD);
+            const bool bBorder = uRange < uHalfR || uRange >= uRanges - uHalfR ||
+                                 uDoppler < uHalfD || uDoppler >= uDopplers - uHalfD;
             if (bBorder)
                 ++oStats.uDetectionsInBorder;
         }
@@ -363,19 +338,25 @@ bool ArdCpu::process(const ComplexF* pcRef, const ComplexF* pcCleaned,
 
     oStats = ArdStats();
 
-    buildMap(pcRef, pcCleaned);
+    // Two routes to the same correlation matrix; see ArdAlgorithm in
+    // ArdProcessor.hpp. Everything after it is shared.
+    if (moParams.eAlgorithm == ArdAlgorithm::Batches)
+        moBatches.correlate(pcRef, pcCleaned, mvcDecimated.data());
+    else
+        correlateDirect(pcRef, pcCleaned);
+    dopplerDft();
 
     for (uint64_t u = 0; u < muCells; ++u) {
-        const ComplexAcc& c = mvcMap[static_cast<size_t>(u)];
-        mvfPower[static_cast<size_t>(u)] = c.real() * c.real() + c.imag() * c.imag();
+        const ComplexF& cCell = mvcMap[static_cast<size_t>(u)];
+        mvfPower[static_cast<size_t>(u)] = cCell.real() * cCell.real() + cCell.imag() * cCell.imag();
         if (pcMap != nullptr)
-            pcMap[static_cast<size_t>(u)] = ComplexF(c.real(), c.imag());
+            pcMap[static_cast<size_t>(u)] = cCell;
     }
 
     return runCfar(pDetections, uMaxDetections, oStats);
 }
 
-bool ArdCpu::processDevice(const void* /*pdRef*/, const void* /*pdCleaned*/,
+bool ArdCpu::processDevice(const void* /*d_pRef*/, const void* /*d_pCleaned*/,
                            ComplexF* /*pcMap*/,
                            Detection* /*pDetections*/, uint64_t /*uMaxDetections*/,
                            ArdStats& /*oStats*/)
@@ -398,9 +379,9 @@ bool ArdCpu::detect(const ComplexF* pcMap,
     oStats = ArdStats();
 
     for (uint64_t u = 0; u < muCells; ++u) {
-        const ComplexF& c = pcMap[static_cast<size_t>(u)];
+        const ComplexF& cCell = pcMap[static_cast<size_t>(u)];
         mvfPower[static_cast<size_t>(u)] =
-            c.real() * c.real() + c.imag() * c.imag();
+            cCell.real() * cCell.real() + cCell.imag() * cCell.imag();
     }
 
     return runCfar(pDetections, uMaxDetections, oStats);

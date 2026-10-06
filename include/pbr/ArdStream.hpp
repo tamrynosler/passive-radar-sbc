@@ -113,7 +113,7 @@ public:
 
     // Valid after the first FrameComplete.
     bool haveFrame() const { return mbHaveComplete; }
-    const std::vector<uint8_t>& frame() const { return mvComplete; }
+    const std::vector<uint8_t>& frame() const { return mvuComplete; }
     uint32_t frameSequence() const { return muCompleteSequence; }
 
     // The status JSON for frame(), or empty if none has arrived for it.
@@ -132,6 +132,7 @@ private:
     ArdFeedResult feedChunk(const uint8_t* pDatagram, size_t uLength);
     ArdFeedResult feedStatus(const uint8_t* pDatagram, size_t uLength);
     ArdFeedResult feedSpectrum(const uint8_t* pDatagram, size_t uLength);
+    ArdFeedResult publishFrame();   // the working frame is complete
     void dropWorking();
 
     // The frame being assembled.
@@ -140,13 +141,13 @@ private:
     uint32_t             muChunkCount;
     uint32_t             muChunksGot;
     uint32_t             muFrameBytes;
-    std::vector<uint8_t> mvWorking;
-    std::vector<uint8_t> mvChunkSeen;     // one flag per chunk index
+    std::vector<uint8_t> mvuWorking;
+    std::vector<uint8_t> mvuChunkSeen;    // one flag per chunk index
 
     // The newest complete frame and its status.
     bool                 mbHaveComplete;
     uint32_t             muCompleteSequence;
-    std::vector<uint8_t> mvComplete;
+    std::vector<uint8_t> mvuComplete;
     std::string          msStatus;
 
     // A status that arrived before its frame completed.
@@ -155,10 +156,10 @@ private:
     std::string msPendingStatus;
 
     // The spectra for the complete frame, and any that arrived early.
-    std::vector<uint8_t> mavSpectrum[kArdSpectrumChannels];
-    std::vector<uint8_t> mavPendingSpectrum[kArdSpectrumChannels];
+    std::vector<uint8_t> mavuSpectrum[kArdSpectrumChannels];
+    std::vector<uint8_t> mavuPendingSpectrum[kArdSpectrumChannels];
     uint32_t             mauPendingSpectrumSequence[kArdSpectrumChannels];
-    std::vector<uint8_t> mvNoSpectrum;   // what spectrum() returns when there is none
+    std::vector<uint8_t> mvuNoSpectrum;  // what spectrum() returns when there is none
 
     uint64_t muChunksReceived;
     uint64_t muChunksRejected;

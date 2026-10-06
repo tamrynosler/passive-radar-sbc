@@ -29,11 +29,11 @@ public:
     bool init(uint64_t uBins);
     uint64_t bins() const { return muBins; }
 
-    // pDbOut must hold bins() floats. uSamples must be at least bins(); a
+    // pfDbOut must hold bins() floats. uSamples must be at least bins(); a
     // trailing partial segment is ignored. Values are relative: the mean
     // over segments of |X|^2 / bins(), so a level is comparable between
     // CPIs and between the two channels, not to an absolute reference.
-    bool compute(const ComplexF* pSamples, uint64_t uSamples, float* pDbOut);
+    bool compute(const ComplexF* pcSamples, uint64_t uSamples, float* pfDbOut);
 
 private:
     uint64_t              muBins = 0;

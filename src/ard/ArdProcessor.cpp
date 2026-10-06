@@ -4,21 +4,17 @@
 // ArdParams. The implementations know neither.
 
 #include "pbr/ArdProcessor.hpp"
+#include "pbr/check.hpp"
+#include "ArdInternal.hpp"
 
+#include <climits>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
 namespace pbr {
 
-std::unique_ptr<ArdProcessor> makeArdProcessorCpu();
-
-#if defined(PBR_WITH_CUDA)
-std::unique_ptr<ArdProcessor> makeArdProcessorGpu();
-#endif
-
 namespace {
-
-const double kSpeedOfLight = 299792458.0;
 
 const struct { ArdBackend eValue; const char* pName; } kBackends[] = {
     { ArdBackend::Cpu, "CPU" },
@@ -126,6 +122,9 @@ bool ardParamsFromConfig(const PbrConfig& oConfig, ArdParams& oParams)
 {
     oParams = ArdParams();
 
+    // The map former runs on the same backend as the canceller: a GPU
+    // canceller hands its output to a GPU map former on the device, with no
+    // copy (DSICanceller::deviceOutput()), and a CPU chain stays on the host.
     if (!ardBackendFromString(oConfig.sDsiBackend.c_str(), oParams.eBackend))
         return false;
     if (!ardAlgorithmFromString(oConfig.sArdAlgorithm.c_str(), oParams.eAlgorithm))
@@ -144,6 +143,56 @@ bool ardParamsFromConfig(const PbrConfig& oConfig, ArdParams& oParams)
     oParams.uCfarTrainRange   = oConfig.uCfarTrainRange;
     oParams.uCfarTrainDoppler = oConfig.uCfarTrainDoppler;
 
+    return true;
+}
+
+bool checkArdParams(const ArdParams& oParams, float& fAlphaOverTrainOut)
+{
+    CHECK(oParams.uCpiSamples > 0, "CPI length must be non-zero");
+    CHECK(oParams.uSampleRateHz > 0, "sample rate must be non-zero");
+    CHECK(oParams.uRangeBins > 0, "range bin count must be non-zero");
+    CHECK(oParams.uDopplerDecimation > 0, "Doppler decimation must be non-zero");
+    CHECK(oParams.uCpiSamples % oParams.uDopplerDecimation == 0,
+          "the decimation factor must divide the CPI exactly, or the last "
+          "block is short and the Doppler axis ends up subtly wrong");
+    CHECK(oParams.uDopplerBins == oParams.uCpiSamples / oParams.uDopplerDecimation,
+          "uDopplerBins must equal uCpiSamples / uDopplerDecimation");
+    CHECK(oParams.uDopplerBins % 2 == 0,
+          "an odd Doppler bin count has no exact centre to put zero Doppler at");
+    CHECK(oParams.uRangeBins <= oParams.uCpiSamples,
+          "more range bins than samples in a CPI");
+    // cuFFT and cuBLAS take int, and the GPU kernels index every sample and
+    // every cell with uint32_t. Both factors are at most uCpiSamples, so the
+    // product cannot overflow uint64_t.
+    CHECK(oParams.uCpiSamples <= INT_MAX &&
+          oParams.uRangeBins * oParams.uDopplerBins <= INT_MAX,
+          "the CPI or the map is larger than cuFFT, cuBLAS and the kernels can index");
+    CHECK(oParams.dCfarPfa > 0.0 && oParams.dCfarPfa < 1.0,
+          "CFAR Pfa must be strictly between 0 and 1");
+
+    // The CFAR window must fit inside the map, or every cell is a border cell
+    // and the background estimate means nothing.
+    const uint64_t uHalfRange   = oParams.uCfarGuardRange + oParams.uCfarTrainRange;
+    const uint64_t uHalfDoppler = oParams.uCfarGuardDoppler + oParams.uCfarTrainDoppler;
+    CHECK(2 * uHalfRange + 1 <= oParams.uRangeBins,
+          "the CFAR window is wider than the map in range");
+    CHECK(2 * uHalfDoppler + 1 <= oParams.uDopplerBins,
+          "the CFAR window is taller than the map in Doppler");
+
+    // Training cells: the whole window minus the guard block (which includes
+    // the cell under test).
+    const uint64_t uWindow = (2 * uHalfRange + 1) * (2 * uHalfDoppler + 1);
+    const uint64_t uGuard  = (2 * oParams.uCfarGuardRange + 1) *
+                             (2 * oParams.uCfarGuardDoppler + 1);
+    const uint64_t uTrainCount = uWindow - uGuard;
+    CHECK(uTrainCount > 0, "the CFAR window has no training cells");
+
+    // The scale factor that turns "average of N training cells" into a
+    // threshold achieving the requested false alarm rate, for exponentially
+    // distributed noise power.
+    const double dN     = static_cast<double>(uTrainCount);
+    const double dAlpha = dN * (std::pow(oParams.dCfarPfa, -1.0 / dN) - 1.0);
+    fAlphaOverTrainOut  = static_cast<float>(dAlpha / dN);
     return true;
 }
 

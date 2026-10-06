@@ -89,7 +89,6 @@ using namespace pbr;
 namespace {
 
 const size_t   kDatagramCapacity = 2048;
-const uint64_t kMaxDetections    = 8192;
 
 // Bins in the before-processing spectrum streamed with each frame: 512
 // int16 values fit one 1400-byte datagram, and 400 Hz per bin at 204800 Hz
@@ -306,12 +305,12 @@ bool buildChain(const PbrConfig& oCfg, Chain& oChain, double& dMsOut)
     oChain.vcCleaned.assign(oChain.bDeviceCoupled ? 0 : static_cast<size_t>(oCfg.uCpiSamples),
                             ComplexF(0.0f, 0.0f));
     oChain.vcMap.assign(static_cast<size_t>(uCells), ComplexF(0.0f, 0.0f));
-    oChain.vDet.assign(static_cast<size_t>(kMaxDetections), Detection());
+    oChain.vDet.assign(static_cast<size_t>(kMaxArdDetections), Detection());
 
     ArdFileHeader oFrameSizing;
     oFrameSizing.uRangeBins   = oChain.oArdParams.uRangeBins;
     oFrameSizing.uDopplerBins = oChain.oArdParams.uDopplerBins;
-    oFrameSizing.uDetections  = kMaxDetections;
+    oFrameSizing.uDetections  = kMaxArdDetections;
     oChain.vFrame.assign(ardFrameBytes(oFrameSizing), 0);
 
     // Warm up. The first CUDA call pays for context creation, and cuFFT
@@ -344,10 +343,10 @@ bool buildChain(const PbrConfig& oCfg, Chain& oChain, double& dMsOut)
               ? oChain.pArd->processDevice(oChain.pDsi->deviceReference(),
                                            oChain.pDsi->deviceOutput(),
                                            oChain.vcMap.data(), oChain.vDet.data(),
-                                           kMaxDetections, oWarmArd)
+                                           kMaxArdDetections, oWarmArd)
               : oChain.pArd->process(oChain.vcRef.data(), oChain.vcCleaned.data(),
                                      oChain.vcMap.data(), oChain.vDet.data(),
-                                     kMaxDetections, oWarmArd);
+                                     kMaxArdDetections, oWarmArd);
     }
     if (!bWarm) {
         std::fprintf(stderr, "pbr_run: the warm-up pass failed\n");
@@ -980,9 +979,9 @@ int main(int argc, char* argv[])
                 const bool bArdOk = oChain.bDeviceCoupled
                     ? oChain.pArd->processDevice(oChain.pDsi->deviceReference(),
                                                  oChain.pDsi->deviceOutput(),
-                                                 pMap, oChain.vDet.data(), kMaxDetections, oArdStats)
+                                                 pMap, oChain.vDet.data(), kMaxArdDetections, oArdStats)
                     : oChain.pArd->process(oChain.vcRef.data(), oChain.vcCleaned.data(), pMap,
-                                           oChain.vDet.data(), kMaxDetections, oArdStats);
+                                           oChain.vDet.data(), kMaxArdDetections, oArdStats);
                 if (!bArdOk) {
                     uStatus = kArdStatusFailed;
                     pReason = "map formation or CFAR returned an error";

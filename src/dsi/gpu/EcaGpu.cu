@@ -34,7 +34,7 @@
 //   right-hand side                      cuBLAS cgemv
 //   share partial Grams between windows  custom kernel (below, ECA-S only)
 //   solve all windows at once            cuSOLVER Cpotrf/CpotrsBatched
-//   subtract the clutter                 convolveKernel (GpuCommon.cuh)
+//   subtract the clutter                 convolveKernel (DsiGpu.cuh)
 //   suppression figure                   cuBLAS scnrm2
 //
 // Everything heavy is a library call: less to get wrong, and less to review.
@@ -94,7 +94,7 @@
 
 #include "pbr/DSICanceller.hpp"
 #include "../DsiInternal.hpp"
-#include "GpuCommon.cuh"
+#include "DsiGpu.cuh"
 
 #include <climits>
 #include <cstdio>

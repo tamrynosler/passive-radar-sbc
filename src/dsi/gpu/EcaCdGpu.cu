@@ -31,7 +31,7 @@
 
 #include "pbr/DSICanceller.hpp"
 #include "../DsiInternal.hpp"
-#include "GpuCommon.cuh"
+#include "DsiGpu.cuh"
 
 #include <climits>
 #include <vector>

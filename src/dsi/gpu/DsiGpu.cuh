@@ -1,7 +1,8 @@
-#ifndef PBR_DSI_GPU_COMMON_CUH
-#define PBR_DSI_GPU_COMMON_CUH
+#ifndef PBR_DSI_GPU_DSI_GPU_CUH
+#define PBR_DSI_GPU_DSI_GPU_CUH
 
-// Device code shared by the GPU cancellers in src/dsi/gpu/.
+// Device code shared by the GPU cancellers in src/dsi/gpu/. The helpers every
+// GPU stage uses (kBlock, blocksFor, blockSum) are in src/gpu/GpuCommon.cuh.
 //
 // Samples on the device are cufftComplex. cuComplex, which cuBLAS and
 // cuSOLVER take, is the same type (cufft.h typedefs one to the other), so a
@@ -10,35 +11,9 @@
 #include <cmath>
 #include <cstdint>
 
-#include "pbr/check.hpp"   // CUDA_CHECK, and the CUDA library headers
+#include "../../gpu/GpuCommon.cuh"
 
 namespace pbr {
-
-// Threads per block for every kernel here. blockSum needs a power of two;
-// CGLS's adjoint kernel gives one thread to each tap, which caps K at this.
-const uint32_t kBlock = 256;
-
-inline uint32_t blocksFor(uint64_t uThreads, uint32_t uBlockSize)
-{
-    return static_cast<uint32_t>((uThreads + uBlockSize - 1) / uBlockSize);
-}
-
-// Sum fValue over the block. Every thread gets the total. pfShared must hold
-// kBlock floats; it is free again on return. The block must be launched with
-// kBlock threads.
-inline __device__ float blockSum(float fValue, float* pfShared)
-{
-    pfShared[threadIdx.x] = fValue;
-    __syncthreads();
-    for (uint32_t uStride = kBlock / 2; uStride > 0; uStride >>= 1) {
-        if (threadIdx.x < uStride)
-            pfShared[threadIdx.x] += pfShared[threadIdx.x + uStride];
-        __syncthreads();
-    }
-    const float fTotal = pfShared[0];
-    __syncthreads();
-    return fTotal;
-}
 
 // out[n] = base[n] - sum over k of w[k] r[n-k], or just the sum when d_cBase
 // is null. With the surveillance as base it is the clutter subtraction (ECA's
@@ -117,4 +92,4 @@ inline bool gpuSuppressionDb(cublasHandle_t hCublas, const cufftComplex* d_cSur,
 
 } // namespace pbr
 
-#endif // PBR_DSI_GPU_COMMON_CUH
+#endif // PBR_DSI_GPU_DSI_GPU_CUH

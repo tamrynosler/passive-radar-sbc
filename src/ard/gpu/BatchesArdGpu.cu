@@ -9,7 +9,7 @@
 //
 //   1. packKernel        build X and Y for every block at once
 //   2. cuFFT (x2)        forward, uBatches transforms of length L
-//   3. multiplyConjKern  X = X * conj(Y), pointwise
+//   3. multiplyConjKernel  X = X * conj(Y), pointwise
 //   4. cuFFT             inverse, same plan
 //   5. extractKernel     take lags 0..K-1, apply 1/L, transpose into
 //                        [range][block] for the Doppler transform that follows
@@ -20,23 +20,16 @@
 #include "BatchesArdGpu.cuh"
 
 #include "pbr/ArdProcessor.hpp"
-#include "pbr/check.hpp"
+#include "../../gpu/GpuCommon.cuh"
 
-#include <cstdio>
+#include <climits>
 
 namespace pbr {
 
 namespace {
 
-const uint32_t kBlock = 256;
-
-uint32_t blocksFor(uint64_t uThreads, uint32_t uBlockSize)
-{
-    return static_cast<uint32_t>((uThreads + uBlockSize - 1) / uBlockSize);
-}
-
 // ---------------------------------------------------------------------------
-// Kernel 1: pack one block of each channel into transform-length arrays.
+// Pack one block of each channel into transform-length arrays.
 //
 // One thread per (block, position). X holds the block's uStride surveillance
 // samples and then zeros -- so only uStride samples contribute and the
@@ -47,9 +40,9 @@ uint32_t blocksFor(uint64_t uThreads, uint32_t uBlockSize)
 // Before the start of the CPI the reference is zero, the same convention the
 // direct kernel uses when it skips n < r.
 // ---------------------------------------------------------------------------
-__global__ void packKernel(const cufftComplex* pcRef,
-                           const cufftComplex* pcCleaned,
-                           cufftComplex* pcX, cufftComplex* pcY,
+__global__ void packKernel(const cufftComplex* d_cRef,
+                           const cufftComplex* d_cCleaned,
+                           cufftComplex* d_cX, cufftComplex* d_cY,
                            uint32_t uStride, uint32_t uL, uint32_t uBatches,
                            uint32_t uWrapFirst)
 {
@@ -57,48 +50,48 @@ __global__ void packKernel(const cufftComplex* pcRef,
     if (uIdx >= uL * uBatches)
         return;
 
-    const uint32_t j  = uIdx % uL;          // position within the transform
-    const uint32_t b  = uIdx / uL;          // which block
-    const uint32_t n0 = b * uStride;
+    const uint32_t j           = uIdx % uL;   // position within the transform
+    const uint32_t uBatch      = uIdx / uL;   // which block
+    const uint32_t uBlockStart = uBatch * uStride;
 
     const cufftComplex cZero = make_cuFloatComplex(0.0f, 0.0f);
 
-    pcX[uIdx] = (j < uStride) ? pcCleaned[n0 + j] : cZero;
+    d_cX[uIdx] = (j < uStride) ? d_cCleaned[uBlockStart + j] : cZero;
 
     if (j < uStride) {
-        pcY[uIdx] = pcRef[n0 + j];
+        d_cY[uIdx] = d_cRef[uBlockStart + j];
     } else if (j >= uWrapFirst) {
         // j - L is negative: this is uBack samples before the block.
         const uint32_t uBack = uL - j;
-        pcY[uIdx] = (n0 >= uBack) ? pcRef[n0 - uBack] : cZero;
+        d_cY[uIdx] = (uBlockStart >= uBack) ? d_cRef[uBlockStart - uBack] : cZero;
     } else {
-        pcY[uIdx] = cZero;
+        d_cY[uIdx] = cZero;
     }
 }
 
 // ---------------------------------------------------------------------------
-// Kernel 2: X = X * conj(Y), in place.
+// X = X * conj(Y), in place.
 //
 // Correlation in time is a pointwise product with a conjugate in frequency,
 // which is the whole reason for the two transforms either side of it.
 // ---------------------------------------------------------------------------
-__global__ void multiplyConjKernel(cufftComplex* pcX, const cufftComplex* pcY,
+__global__ void multiplyConjKernel(cufftComplex* d_cX, const cufftComplex* d_cY,
                                    uint32_t uCount)
 {
     const uint32_t u = blockIdx.x * blockDim.x + threadIdx.x;
     if (u >= uCount)
         return;
 
-    const cufftComplex cX = pcX[u];
-    const cufftComplex cY = pcY[u];
+    const cufftComplex cX = d_cX[u];
+    const cufftComplex cY = d_cY[u];
     cufftComplex cOut;
     cOut.x = cX.x * cY.x + cX.y * cY.y;
     cOut.y = cX.y * cY.x - cX.x * cY.y;
-    pcX[u] = cOut;
+    d_cX[u] = cOut;
 }
 
 // ---------------------------------------------------------------------------
-// Kernel 3: take the lags the map covers and transpose.
+// Take the lags the map covers and transpose.
 //
 // The transform holds L lags per block; the map wants the first uRangeBins of
 // them, laid out [range][block] so each Doppler transform that follows is
@@ -108,8 +101,8 @@ __global__ void multiplyConjKernel(cufftComplex* pcX, const cufftComplex* pcY,
 // Range is the slow index and block the fast one, so neighbouring threads
 // write neighbouring cells of the output.
 // ---------------------------------------------------------------------------
-__global__ void extractKernel(const cufftComplex* pcX,
-                              cufftComplex* pcDecimated,
+__global__ void extractKernel(const cufftComplex* d_cX,
+                              cufftComplex* d_cDecimated,
                               uint32_t uL, uint32_t uBatches,
                               uint32_t uRangeBins, float fInvL)
 {
@@ -117,30 +110,28 @@ __global__ void extractKernel(const cufftComplex* pcX,
     if (uIdx >= uRangeBins * uBatches)
         return;
 
-    const uint32_t b = uIdx % uBatches;
-    const uint32_t r = uIdx / uBatches;
+    const uint32_t uBatch = uIdx % uBatches;
+    const uint32_t r      = uIdx / uBatches;
 
-    const cufftComplex c = pcX[b * uL + r];
+    const cufftComplex cLag = d_cX[uBatch * uL + r];
     cufftComplex cOut;
-    cOut.x = c.x * fInvL;
-    cOut.y = c.y * fInvL;
-    pcDecimated[uIdx] = cOut;
+    cOut.x = cLag.x * fInvL;
+    cOut.y = cLag.y * fInvL;
+    d_cDecimated[uIdx] = cOut;
 }
 
 } // namespace
 
 // ---------------------------------------------------------------------------
 
-BatchesArdGpu::~BatchesArdGpu()
-{
-    release();
-}
-
 void BatchesArdGpu::release()
 {
-    if (md_cX)       cudaFree(md_cX);
-    if (md_cY)       cudaFree(md_cY);
-    if (mbPlanValid) cufftDestroy(mhPlan);
+    // Deliberately unchecked: nothing can be done about a failed free.
+    // cudaFree(nullptr) is a no-op.
+    cudaFree(md_cX);
+    cudaFree(md_cY);
+    if (mbPlanValid)
+        cufftDestroy(mhPlan);
 
     md_cX       = nullptr;
     md_cY       = nullptr;
@@ -148,30 +139,28 @@ void BatchesArdGpu::release()
     mbReady     = false;
 }
 
-bool BatchesArdGpu::init(uint64_t uCpiSamples, uint64_t uStride,
-                         uint64_t uRangeBins)
+bool BatchesArdGpu::init(uint64_t uCpiSamples, uint64_t uStride, uint64_t uRangeBins)
 {
     CHECK(!mbReady, "BatchesArdGpu::init called twice");
-    CHECK(uCpiSamples > 0, "CPI length must be non-zero");
-    CHECK(uStride > 0, "the block stride must be non-zero");
-    CHECK(uRangeBins > 0, "range bin count must be non-zero");
-    CHECK(uCpiSamples % uStride == 0,
-          "the block stride must divide the CPI exactly");
+    if (setUp(uCpiSamples, uStride, uRangeBins))
+        return true;
+    release();   // whatever was allocated before the failure
+    return false;
+}
 
+bool BatchesArdGpu::setUp(uint64_t uCpiSamples, uint64_t uStride, uint64_t uRangeBins)
+{
     const uint64_t uL = ardBatchTransformLength(uStride, uRangeBins);
     CHECK(uL > 0, "no usable transform length for this stride and range count");
 
-    muCpiSamples = uCpiSamples;
     muStride     = uStride;
     muRangeBins  = uRangeBins;
     muL          = uL;
     muBatches    = uCpiSamples / uStride;
 
+    // cuFFT takes int, and the kernels index the scratch with uint32_t.
     const uint64_t uScratch = muBatches * uL;
-    CHECK(uScratch <= 2147483647ULL,
-          "the batches scratch exceeds what cuFFT accepts as int");
-    CHECK(uL <= 2147483647ULL,
-          "the batches transform length exceeds what cuFFT accepts as int");
+    CHECK(uScratch <= INT_MAX, "the batches scratch is larger than cuFFT and the kernels can index");
 
     int iL = static_cast<int>(uL);
     CUDA_CHECK(cufftPlanMany(&mhPlan, 1, &iL,
@@ -189,12 +178,12 @@ bool BatchesArdGpu::init(uint64_t uCpiSamples, uint64_t uStride,
     return true;
 }
 
-bool BatchesArdGpu::correlate(const cufftComplex* pdRef,
-                              const cufftComplex* pdCleaned,
-                              cufftComplex* pdDecimated)
+bool BatchesArdGpu::correlate(const cufftComplex* d_cRef,
+                              const cufftComplex* d_cCleaned,
+                              cufftComplex* d_cDecimated)
 {
     CHECK(mbReady, "BatchesArdGpu::correlate before a successful init");
-    CHECK(pdRef != nullptr && pdCleaned != nullptr && pdDecimated != nullptr,
+    CHECK(d_cRef != nullptr && d_cCleaned != nullptr && d_cDecimated != nullptr,
           "null device pointer passed to BatchesArdGpu::correlate");
 
     const uint32_t uL       = static_cast<uint32_t>(muL);
@@ -208,7 +197,7 @@ bool BatchesArdGpu::correlate(const cufftComplex* pdRef,
     const uint32_t uWrapFirst = uL - uRanges + 1;
 
     packKernel<<<blocksFor(uScratch, kBlock), kBlock>>>(
-        pdRef, pdCleaned, md_cX, md_cY, uStride, uL, uBatches, uWrapFirst);
+        d_cRef, d_cCleaned, md_cX, md_cY, uStride, uL, uBatches, uWrapFirst);
     CUDA_CHECK(cudaGetLastError());
 
     CUDA_CHECK(cufftExecC2C(mhPlan, md_cX, md_cX, CUFFT_FORWARD));
@@ -221,7 +210,7 @@ bool BatchesArdGpu::correlate(const cufftComplex* pdRef,
     CUDA_CHECK(cufftExecC2C(mhPlan, md_cX, md_cX, CUFFT_INVERSE));
 
     extractKernel<<<blocksFor(muRangeBins * muBatches, kBlock), kBlock>>>(
-        md_cX, pdDecimated, uL, uBatches, uRanges,
+        md_cX, d_cDecimated, uL, uBatches, uRanges,
         1.0f / static_cast<float>(muL));
     CUDA_CHECK(cudaGetLastError());
 

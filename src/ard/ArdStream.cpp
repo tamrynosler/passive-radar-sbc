@@ -3,6 +3,7 @@
 #include "pbr/ArdFile.hpp"
 #include "pbr/check.hpp"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 
@@ -90,10 +91,14 @@ bool ArdStreamSender::sendSpectrum(const float* pDb, uint32_t uBins, uint32_t uC
     putU32(mauDatagram + 20, uSampleRateHz);
     uint8_t* pOut = mauDatagram + kArdSpectrumHeaderBytes;
     for (uint32_t u = 0; u < uBins; ++u) {
-        // Hundredths of a dB, saturated: +-327 dB covers any real level.
+        // Hundredths of a dB, saturated: +-327 dB covers any real level. The
+        // first test also catches NaN, whose conversion to int16 would be
+        // undefined; it goes out as the floor, "no power".
         float fScaled = pDb[u] * 100.0f;
-        if (fScaled > 32767.0f)  fScaled = 32767.0f;
-        if (fScaled < -32768.0f) fScaled = -32768.0f;
+        if (!(fScaled > static_cast<float>(INT16_MIN)))
+            fScaled = static_cast<float>(INT16_MIN);
+        else if (fScaled > static_cast<float>(INT16_MAX))
+            fScaled = static_cast<float>(INT16_MAX);
         const int16_t iValue = static_cast<int16_t>(fScaled);
         std::memcpy(pOut + 2 * u, &iValue, sizeof(iValue));
     }
@@ -120,20 +125,21 @@ ArdFrameAssembler::ArdFrameAssembler()
       muFramesCompleted(0),
       muFramesDropped(0)
 {
-    for (uint32_t c = 0; c < kArdSpectrumChannels; ++c)
-        mauPendingSpectrumSequence[c] = 0;
+    for (uint32_t uChannel = 0; uChannel < kArdSpectrumChannels; ++uChannel)
+        mauPendingSpectrumSequence[uChannel] = 0;
 }
 
 const std::vector<uint8_t>& ArdFrameAssembler::spectrum(uint32_t uChannel) const
 {
     if (uChannel >= kArdSpectrumChannels || !mbHaveComplete)
-        return mvNoSpectrum;
-    return mavSpectrum[uChannel];
+        return mvuNoSpectrum;
+    return mavuSpectrum[uChannel];
 }
 
 ArdFeedResult ArdFrameAssembler::feed(const uint8_t* pDatagram, size_t uLength)
 {
-    if (pDatagram == nullptr || uLength < 16)
+    // The status header is the shortest of the three.
+    if (pDatagram == nullptr || uLength < kArdStatusHeaderBytes)
         return ArdFeedResult::Ignored;
     if (std::memcmp(pDatagram, kChunkMagic, 8) == 0)
         return feedChunk(pDatagram, uLength);
@@ -184,58 +190,69 @@ ArdFeedResult ArdFrameAssembler::feedChunk(const uint8_t* pDatagram, size_t uLen
     }
     ++muChunksReceived;
 
-    // A different sequence starts a new frame; whatever was incomplete is
-    // lost, which at one frame a second a viewer tolerates.
+    // A late or repeated chunk of the frame already delivered. Starting a new
+    // assembly on it would later count that delivered frame as dropped.
+    if (mbHaveComplete && uSequence == muCompleteSequence)
+        return ArdFeedResult::Ignored;
+
+    // A different frame, or the same sequence with a different shape, starts
+    // a new assembly; whatever was incomplete is lost and counted, which at
+    // one frame a second a viewer tolerates.
     if (!mbAssembling || uSequence != muSequence ||
         uCount != muChunkCount || uFrameBytes != muFrameBytes) {
-        if (mbAssembling && uSequence != muSequence)
-            dropWorking();
+        dropWorking();
         mbAssembling = true;
         muSequence   = uSequence;
         muChunkCount = uCount;
         muFrameBytes = uFrameBytes;
         muChunksGot  = 0;
-        if (mvWorking.size() != uFrameBytes)
-            mvWorking.assign(uFrameBytes, 0);
-        mvChunkSeen.assign(uCount, 0);
+        if (mvuWorking.size() != uFrameBytes)
+            mvuWorking.assign(uFrameBytes, 0);
+        mvuChunkSeen.assign(uCount, 0);
     }
 
-    if (mvChunkSeen[uIndex])
+    if (mvuChunkSeen[uIndex])
         return ArdFeedResult::ChunkStored;   // duplicate
 
-    std::memcpy(mvWorking.data() + static_cast<size_t>(uIndex) * kArdChunkPayloadBytes,
+    std::memcpy(mvuWorking.data() + static_cast<size_t>(uIndex) * kArdChunkPayloadBytes,
                 pDatagram + kArdChunkHeaderBytes, uPayload);
-    mvChunkSeen[uIndex] = 1;
+    mvuChunkSeen[uIndex] = 1;
     ++muChunksGot;
 
     if (muChunksGot < muChunkCount)
         return ArdFeedResult::ChunkStored;
+    return publishFrame();
+}
 
-    // Complete. The same test the file reader applies, on the bytes.
+ArdFeedResult ArdFrameAssembler::publishFrame()
+{
+    // The same test the file reader applies, on the bytes.
     mbAssembling = false;
     ArdFileHeader oHeader;
-    if (!parseArdFrameHeader(mvWorking.data(), mvWorking.size(), oHeader)) {
+    if (!parseArdFrameHeader(mvuWorking.data(), mvuWorking.size(), oHeader)) {
         ++muFramesDropped;
         return ArdFeedResult::Ignored;
     }
 
     // Publish by swapping buffers: no allocation, and the old complete
     // buffer becomes the next working buffer.
-    mvComplete.swap(mvWorking);
+    mvuComplete.swap(mvuWorking);
     mbHaveComplete     = true;
     muCompleteSequence = muSequence;
     ++muFramesCompleted;
 
+    // Status and spectra that arrived before the frame finished go with it.
     msStatus.clear();
     if (mbHavePendingStatus && muPendingSequence == muSequence) {
         msStatus.swap(msPendingStatus);
         mbHavePendingStatus = false;
     }
-    for (uint32_t c = 0; c < kArdSpectrumChannels; ++c) {
-        mavSpectrum[c].clear();
-        if (!mavPendingSpectrum[c].empty() && mauPendingSpectrumSequence[c] == muSequence)
-            mavSpectrum[c].swap(mavPendingSpectrum[c]);
-        mavPendingSpectrum[c].clear();
+    for (uint32_t uChannel = 0; uChannel < kArdSpectrumChannels; ++uChannel) {
+        mavuSpectrum[uChannel].clear();
+        if (!mavuPendingSpectrum[uChannel].empty() &&
+            mauPendingSpectrumSequence[uChannel] == muSequence)
+            mavuSpectrum[uChannel].swap(mavuPendingSpectrum[uChannel]);
+        mavuPendingSpectrum[uChannel].clear();
     }
     return ArdFeedResult::FrameComplete;
 }
@@ -276,11 +293,11 @@ ArdFeedResult ArdFrameAssembler::feedSpectrum(const uint8_t* pDatagram, size_t u
         return ArdFeedResult::Ignored;
 
     if (mbHaveComplete && uSequence == muCompleteSequence) {
-        mavSpectrum[uChannel].assign(pDatagram, pDatagram + uLength);
+        mavuSpectrum[uChannel].assign(pDatagram, pDatagram + uLength);
         return ArdFeedResult::SpectrumAttached;
     }
     if (mbAssembling && uSequence == muSequence) {
-        mavPendingSpectrum[uChannel].assign(pDatagram, pDatagram + uLength);
+        mavuPendingSpectrum[uChannel].assign(pDatagram, pDatagram + uLength);
         mauPendingSpectrumSequence[uChannel] = uSequence;
         return ArdFeedResult::ChunkStored;
     }

@@ -12,7 +12,9 @@ namespace pbr {
 // anywhere else.
 using ComplexF = std::complex<float>;   // host
 
-const double kPi = 3.14159265358979323846;
+// constexpr, so CUDA device code may read them too.
+constexpr double kPi           = 3.14159265358979323846;
+constexpr double kSpeedOfLight = 299792458.0;   // m/s
 
 } // namespace pbr
 

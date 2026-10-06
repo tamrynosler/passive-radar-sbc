@@ -26,28 +26,30 @@ namespace pbr {
 class BatchesArdGpu {
 public:
     BatchesArdGpu() {}
-    ~BatchesArdGpu();
+    ~BatchesArdGpu() { release(); }
 
-    // uStride is ArdParams::uDopplerDecimation and must divide uCpiSamples.
-    // Allocates two uBatches * L scratch buffers and one cuFFT plan, all
-    // reused, so correlate() allocates nothing.
+    // Not copyable: it owns device allocations and a cuFFT plan.
+    BatchesArdGpu(const BatchesArdGpu&) = delete;
+    BatchesArdGpu& operator=(const BatchesArdGpu&) = delete;
+
+    // uStride is ArdParams::uDopplerDecimation. The caller (ArdGpu) has
+    // already checked the parameters. Allocates two uBatches * L scratch
+    // buffers and one cuFFT plan, all reused, so correlate() allocates
+    // nothing; a failure part-way frees whatever was allocated.
     bool init(uint64_t uCpiSamples, uint64_t uStride, uint64_t uRangeBins);
 
-    // Fill pdDecimated[r * uBatches + b] for r in [0, uRangeBins), matching
+    // Fill d_cDecimated[r * uBatches + b] for r in [0, uRangeBins), matching
     // the direct lag-product-and-sum. All three pointers are device memory.
-    bool correlate(const cufftComplex* pdRef, const cufftComplex* pdCleaned,
-                   cufftComplex* pdDecimated);
+    bool correlate(const cufftComplex* d_cRef, const cufftComplex* d_cCleaned,
+                   cufftComplex* d_cDecimated);
 
     uint64_t transformLength() const { return muL; }
 
 private:
+    bool setUp(uint64_t uCpiSamples, uint64_t uStride, uint64_t uRangeBins);
     void release();
 
-    // Not copyable: it owns device allocations and a cuFFT plan.
-    BatchesArdGpu(const BatchesArdGpu&);
-    BatchesArdGpu& operator=(const BatchesArdGpu&);
 
-    uint64_t      muCpiSamples = 0;
     uint64_t      muStride     = 0;   // S
     uint64_t      muRangeBins  = 0;   // K
     uint64_t      muL          = 0;   // transform length
@@ -56,6 +58,7 @@ private:
     cufftHandle   mhPlan       = 0;
     bool          mbPlanValid  = false;
 
+    // Allocated in setUp(), freed in release().
     cufftComplex* md_cX        = nullptr;   // [batch][L], surveillance
     cufftComplex* md_cY        = nullptr;   // [batch][L], reference
 

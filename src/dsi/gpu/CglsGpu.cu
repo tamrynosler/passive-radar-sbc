@@ -21,7 +21,7 @@
 //   adjointKernel    s = R^H r; beta; p = s + beta p    one block per window
 //
 // plus a second convolveKernel every kCglsResidualRefresh iterations to
-// recompute r = b - R x. convolveKernel is shared with ECA (GpuCommon.cuh).
+// recompute r = b - R x. convolveKernel is shared with ECA (DsiGpu.cuh).
 // The products with R are written directly rather than through cuBLAS, so the
 // delayed-reference matrix is never built: the reference is read in place,
 // which is what makes the memory footprint a few vectors.
@@ -46,7 +46,7 @@
 
 #include "pbr/DSICanceller.hpp"
 #include "../DsiInternal.hpp"
-#include "GpuCommon.cuh"
+#include "DsiGpu.cuh"
 
 #include <climits>
 #include <vector>
