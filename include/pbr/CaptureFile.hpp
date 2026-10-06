@@ -39,7 +39,10 @@ public:
     CaptureWriter& operator=(const CaptureWriter&) = delete;
 
     bool open(const char* pPath);
-    void close();
+
+    // Close the file, flushing what is buffered. False, logged, if that final
+    // write failed: the capture on disk is then incomplete.
+    bool close();
     bool isOpen() const { return mpFile != nullptr; }
 
     // Append one datagram.

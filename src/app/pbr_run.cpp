@@ -1222,10 +1222,13 @@ int main(int argc, char* argv[])
                 (unsigned long long)oStats.uReanchors);
     std::printf("live changes applied    %llu\n", (unsigned long long)uLiveChanges);
     std::printf("sample rate adaptions   %llu\n", (unsigned long long)uRateAdaptions);
-    if (oCapture.isOpen())
+    bool bCaptureClosed = true;
+    if (oCapture.isOpen()) {
         std::printf("captured                %llu datagrams, %.1f MB to %s\n",
                     (unsigned long long)oCapture.recordCount(), oCapture.byteCount() / 1e6,
                     oOptions.sSaveCapturePath.c_str());
+        bCaptureClosed = oCapture.close();
+    }
     if (bStreamFrames)
         std::printf("ARD stream send fails   %llu\n",
                     (unsigned long long)oArdSender.sendFailures());
@@ -1253,7 +1256,7 @@ int main(int argc, char* argv[])
     // Blank frames for null input are the chain doing its job on a dead
     // input and do not fail the run; a stage failure does. A file replay
     // runs as fast as it can, so lag is meaningless there.
-    bool bPass = !bReadError && !bProcessError &&
+    bool bPass = !bReadError && !bProcessError && bCaptureClosed &&
                  uParseFailures == 0 &&
                  oStats.uRejectedWrites == 0 &&
                  oStats.uCpisOvertaken == 0 &&

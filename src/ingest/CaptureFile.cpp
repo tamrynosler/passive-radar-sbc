@@ -72,12 +72,15 @@ bool CaptureWriter::open(const char* pPath)
     return true;
 }
 
-void CaptureWriter::close()
+bool CaptureWriter::close()
 {
-    if (mpFile != nullptr) {
-        std::fclose(mpFile);
-        mpFile = nullptr;
-    }
+    if (mpFile == nullptr)
+        return true;
+    const bool bOk = (std::fclose(mpFile) == 0);
+    mpFile = nullptr;
+    if (!bOk)
+        std::fprintf(stderr, "CaptureWriter: closing the capture failed; it is incomplete\n");
+    return bOk;
 }
 
 bool CaptureWriter::write(const uint8_t* pBytes, size_t uLength)

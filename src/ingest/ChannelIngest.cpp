@@ -260,7 +260,6 @@ uint64_t ChannelIngest::absoluteIndex(uint64_t uSeconds, uint64_t uPicoseconds) 
     // the checkpoint catches it if they do not: consecutive packets from one
     // stream must be exactly uSampleCount apart, and truncation drift would
     // show up as an occasional off-by-one in that spacing.
-    constexpr uint64_t kPicosecondsPerSecond = 1000000000000ULL;
 
     // Guaranteed by parseVita49Packet; restated here because the overflow
     // headroom above depends on it.
@@ -416,62 +415,72 @@ bool ChannelIngest::handleData(const Vita49Packet& oPacket)
         return true;
 
     const bool bIsSurveillance = (oStream.eRole == ChannelRole::Surveillance);
+    CircularBuffer& oBuffer = bIsSurveillance ? mSurBuffer : mRefBuffer;
 
-    // Convert big-endian int16 pairs to physical units as they go.
-    //
-    // Nothing else happens in this loop on purpose. ADC code-range tracking
-    // used to live here, but a running min/max is per-sample work in the
-    // production ingest path and would show up in the latency benchmarks.
     ComplexF acStaging[kMaxSamplesPerPacket];
-
-    for (uint64_t u = 0; u < oPacket.uSampleCount; ++u) {
-        const uint8_t* pPair = oPacket.pPayload + u * 4;
-        const int32_t iI = readBe16Signed(pPair);
-        const int32_t iQ = readBe16Signed(pPair + 2);
-
-        acStaging[u] = ComplexF(static_cast<float>(iI * mdCodeToVolts),
-                                static_cast<float>(iQ * mdCodeToVolts));
-    }
+    decodeSamples(oPacket, acStaging);
 
     const uint64_t uAbsIndex =
         absoluteIndex(oPacket.uTimestampSec, oPacket.uTimestampPs);
-
-    CircularBuffer& oBuffer = bIsSurveillance ? mSurBuffer : mRefBuffer;
-
-    // A packet more than a whole buffer behind the write end is not a late
-    // packet, it is a source whose timeline went backwards: a driver
-    // restarted from another clock, or the clock was corrected. Waiting for
-    // wall time to catch up could take days, so forget the old timeline and
-    // start again here. Late packets within a buffer length are still
-    // rejected by the buffer as before.
-    if (oBuffer.writeEnd() > oBuffer.capacity() &&
-        uAbsIndex + oPacket.uSampleCount + oBuffer.capacity() < oBuffer.writeEnd()) {
-        ++mStats.uReanchors;
-        std::fprintf(stderr,
-                     "ChannelIngest: WARNING the source timeline jumped back by %.1f s "
-                     "(index %llu, write end %llu); re-anchoring, buffers cleared\n",
-                     double(oBuffer.writeEnd() - uAbsIndex) / double(mConfig.uSampleRateHz),
-                     (unsigned long long)uAbsIndex,
-                     (unsigned long long)oBuffer.writeEnd());
-        resetTimeline();
-    }
+    reanchorIfJumpedBack(oBuffer, uAbsIndex, oPacket.uSampleCount);
 
     if (!oBuffer.write(uAbsIndex, acStaging, oPacket.uSampleCount)) {
         ++mStats.uRejectedWrites;
         return true;   // already logged by the buffer; not a fault here
     }
 
-    // Remember the lowest index seen on this channel, for the CPI anchor.
-    // Minimum rather than first-written, since packets can arrive reordered.
-    bool&     bSeen  = bIsSurveillance ? mbSurSeen        : mbRefSeen;
-    uint64_t& uFirst = bIsSurveillance ? muSurFirstIndex  : muRefFirstIndex;
+    noteFirstIndex(bIsSurveillance, uAbsIndex);
+    mStats.uSamplesWritten += oPacket.uSampleCount;
+    return true;
+}
+
+// Big-endian int16 I/Q pairs to physical units. Nothing else happens in this
+// loop on purpose: ADC code-range tracking used to live here, but per-sample
+// work in the production ingest path shows up in the latency benchmarks.
+void ChannelIngest::decodeSamples(const Vita49Packet& oPacket, ComplexF* pcOut) const
+{
+    for (uint64_t u = 0; u < oPacket.uSampleCount; ++u) {
+        const uint8_t* pPair = oPacket.pPayload + u * 4;
+        const int32_t iI = readBe16Signed(pPair);
+        const int32_t iQ = readBe16Signed(pPair + 2);
+
+        pcOut[u] = ComplexF(static_cast<float>(iI * mdCodeToVolts),
+                            static_cast<float>(iQ * mdCodeToVolts));
+    }
+}
+
+// A packet more than a whole buffer behind the write end is not a late
+// packet, it is a source whose timeline went backwards: a driver restarted
+// from another clock, or the clock was corrected. Waiting for wall time to
+// catch up could take days, so forget the old timeline and start again here.
+// Late packets within a buffer length are still rejected by the buffer.
+void ChannelIngest::reanchorIfJumpedBack(const CircularBuffer& oBuffer, uint64_t uAbsIndex,
+                                         uint64_t uCount)
+{
+    if (oBuffer.writeEnd() <= oBuffer.capacity() ||
+        uAbsIndex + uCount + oBuffer.capacity() >= oBuffer.writeEnd())
+        return;
+
+    ++mStats.uReanchors;
+    std::fprintf(stderr,
+                 "ChannelIngest: WARNING the source timeline jumped back by %.1f s "
+                 "(index %llu, write end %llu); re-anchoring, buffers cleared\n",
+                 double(oBuffer.writeEnd() - uAbsIndex) / double(mConfig.uSampleRateHz),
+                 (unsigned long long)uAbsIndex,
+                 (unsigned long long)oBuffer.writeEnd());
+    resetTimeline();
+}
+
+// Remember the lowest index seen on a channel, for the CPI anchor. Minimum
+// rather than first-written, since packets can arrive reordered.
+void ChannelIngest::noteFirstIndex(bool bSurveillance, uint64_t uAbsIndex)
+{
+    bool&     bSeen  = bSurveillance ? mbSurSeen       : mbRefSeen;
+    uint64_t& uFirst = bSurveillance ? muSurFirstIndex : muRefFirstIndex;
     if (!bSeen || uAbsIndex < uFirst) {
         bSeen  = true;
         uFirst = uAbsIndex;
     }
-
-    mStats.uSamplesWritten += oPacket.uSampleCount;
-    return true;
 }
 
 CpiStatus ChannelIngest::tryExtractCpi(ComplexF* pcRef, ComplexF* pcSur,

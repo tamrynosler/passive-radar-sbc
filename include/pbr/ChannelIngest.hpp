@@ -127,6 +127,12 @@ private:
     bool handleContext(const Vita49Packet& oPacket);
     bool handleData(const Vita49Packet& oPacket);
 
+    // The three steps of handleData, in order.
+    void decodeSamples(const Vita49Packet& oPacket, ComplexF* pcOut) const;
+    void reanchorIfJumpedBack(const CircularBuffer& oBuffer, uint64_t uAbsIndex,
+                              uint64_t uCount);
+    void noteFirstIndex(bool bSurveillance, uint64_t uAbsIndex);
+
     // Absolute sample index of a packet's first sample, from its VRT
     // timestamp. See docs/design_decisions.md.
     uint64_t absoluteIndex(uint64_t uSeconds, uint64_t uPicoseconds) const;

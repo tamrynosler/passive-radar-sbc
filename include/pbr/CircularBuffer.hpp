@@ -10,7 +10,7 @@ namespace pbr {
 // Fixed-capacity sliding window over an absolute sample timeline.
 //
 // Samples are addressed by ABSOLUTE sample index, derived from a packet's
-// VITA 49 timestamp (index = round(packetTime_s * fs)), never by arrival
+// VITA 49 timestamp (index = floor(packetTime_s * fs)), never by arrival
 // order. Two consequences that matter:
 //
 //   * Out-of-order packets land in the right place, because each write
