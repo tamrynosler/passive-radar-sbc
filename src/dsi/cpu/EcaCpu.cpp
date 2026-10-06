@@ -39,8 +39,8 @@
 // Two implementation choices worth knowing about
 // ---------------------------------------------------------------------------
 //
-// The matrix R whose columns are the delayed copies is NEVER FORMED. At
-// 204800 samples and 120 taps it would be 197 MB, which is most of the
+// The matrix R whose columns are the delayed copies is NEVER FORMED. For a
+// one-second CPI and 120 taps it would be about 197 MB, which is most of the
 // Jetson's shared memory for something we only ever need as a 120x120
 // summary. Each Gram entry is computed directly as a dot product of two
 // shifted slices of the reference. The MATLAB reference builds R explicitly;
@@ -49,8 +49,8 @@
 // Accumulation is in DOUBLE, even though the samples are float. A Gram entry
 // sums 204800 products; accumulating that in float loses roughly four decimal
 // digits, which alone would breach the 1e-4 agreement the golden-file check
-// demands. The GPU version will have to face this question properly, since
-// cuBLAS accumulates in the precision it is given.
+// demands. EcaGpu.cu explains why the GPU, which has no fast double, gets
+// away with float.
 //
 // ---------------------------------------------------------------------------
 // Cost
@@ -58,7 +58,7 @@
 //
 // The Gram dominates everything: K(K+1)/2 entries, each summing over the
 // window, which is about 1.2e10 floating-point operations per CPI at K=120
-// and 204800 samples. Splitting into batches does not change that total --
+// and a one-second CPI. Splitting into batches does not change that total --
 // batching buys adaptivity, bounded memory and parallelism, not fewer
 // operations. Expect seconds per CPI. This is the correctness reference, not
 // a real-time implementation; that is what the GPU backend is for.
@@ -75,11 +75,11 @@
 
 #include "pbr/DSICanceller.hpp"
 #include "pbr/check.hpp"
+#include "../DsiInternal.hpp"
 
 #include <cmath>
 #include <complex>
 #include <cstdio>
-#include <cstring>
 #include <vector>
 
 namespace pbr {
@@ -92,8 +92,6 @@ typedef std::complex<double> ComplexAcc;
 
 class EcaCpu : public DSICanceller {
 public:
-    EcaCpu() { std::memset(machName, 0, sizeof(machName)); }
-
     bool init(const DSIParams& oParams) override;
     bool cancel(const ComplexF* pcRef, const ComplexF* pcSur,
                 ComplexF* pcOut, DSIStats& oStats) override;
@@ -106,6 +104,9 @@ private:
     template <typename Acc>
     void buildNormalEquationsT(const ComplexF* pcRef, const ComplexF* pcSur,
                                uint64_t uStart, uint64_t uEnd);
+
+    // The diagonal loading for the Gram in mvcGram.
+    double loadingLambda() const;
 
     // Add the diagonal loading, then solve G w = v into mvcWeights.
     bool solveWeights(uint64_t uWindowIndex);
@@ -123,7 +124,7 @@ private:
     std::vector<ComplexAcc> mvcChol;         // K x K, lower triangle of G = L L^H
     std::vector<ComplexAcc> mvcWeights;      // K
 
-    char                    machName[32];
+    char                    machName[32] = {};
     bool                    mbReady   = false;
 };
 
@@ -131,49 +132,8 @@ bool EcaCpu::init(const DSIParams& oParams)
 {
     CHECK(!mbReady, "EcaCpu::init called twice");
 
-    CHECK(oParams.eAlgorithm == DSIAlgorithm::EcaM ||
-          oParams.eAlgorithm == DSIAlgorithm::EcaB ||
-          oParams.eAlgorithm == DSIAlgorithm::EcaS,
-          "EcaCpu handles ECA-m, ECA-B and ECA-S only");
-    CHECK(oParams.uCpiSamples > 0, "CPI length must be non-zero");
-    CHECK(oParams.uClutterTaps > 0, "clutter taps must be non-zero");
-    CHECK(oParams.uEstimateSamples > 0 && oParams.uUpdateSamples > 0,
-          "estimation and update windows must be non-zero");
-
-    // A non-zero Doppler tap count is a real algorithm, not a tuning knob.
-    // Refuse it rather than silently cancelling only stationary clutter while
-    // the config file claims otherwise.
-    CHECK(oParams.uDopplerTaps == 0,
-          "ECA_DOPPLER_TAPS > 0 is not implemented; the clutter subspace is "
-          "delay-only for now");
-
-    // The window rule is what separates the names. ECA-m and ECA-B estimate
-    // from the window they apply to; ECA-S estimates from a longer one.
-    // Neither is allowed to masquerade as the other, or a benchmark row would
-    // carry the wrong label.
-    if (oParams.eAlgorithm == DSIAlgorithm::EcaS) {
-        CHECK(oParams.uEstimateSamples > oParams.uUpdateSamples,
-              "ECA-S needs an estimation window longer than the update window; "
-              "equal windows are ECA-B");
-    } else {
-        CHECK(oParams.uEstimateSamples == oParams.uUpdateSamples,
-              "an estimation window longer than the update window is ECA-S, "
-              "not ECA-B");
-    }
-    CHECK(oParams.uEstimateSamples <= oParams.uCpiSamples,
-          "the estimation window cannot be longer than the CPI");
-
-    CHECK(oParams.uCpiSamples % oParams.uUpdateSamples == 0,
-          "the update window must divide the CPI exactly");
-    // Keeps every estimation window on an update-window boundary, which is
-    // what lets the GPU share partial Grams; enforced here too so the two
-    // backends place their windows identically.
-    CHECK(oParams.uEstimateSamples % oParams.uUpdateSamples == 0,
-          "the update window must divide the estimation window exactly");
-    CHECK(oParams.uEstimateSamples > oParams.uClutterTaps,
-          "the estimation window must hold more samples than there are taps "
-          "to solve for");
-    CHECK(oParams.dDiagonalLoading >= 0.0, "diagonal loading must not be negative");
+    if (!ecaParamsOk(oParams))
+        return false;
 
     moParams  = oParams;
     muTaps    = oParams.uClutterTaps;
@@ -228,8 +188,8 @@ void EcaCpu::buildNormalEquationsT(const ComplexF* pcRef, const ComplexF* pcSur,
             // zero-padding of each column amounts to.
             const uint64_t uFirst = (uStart > j) ? uStart : j;
 
-            Acc aRe = Acc(0);
-            Acc aIm = Acc(0);
+            Acc tRe = Acc(0);
+            Acc tIm = Acc(0);
 
             // conj(a) * b, written out. Doing the complex multiply by hand
             // keeps the compiler from routing it through the library's
@@ -237,14 +197,14 @@ void EcaCpu::buildNormalEquationsT(const ComplexF* pcRef, const ComplexF* pcSur,
             for (uint64_t n = uFirst; n < uEnd; ++n) {
                 const ComplexF& cA = pcRef[n - i];
                 const ComplexF& cB = pcRef[n - j];
-                const Acc aAr = Acc(cA.real()), aAi = Acc(cA.imag());
-                const Acc aBr = Acc(cB.real()), aBi = Acc(cB.imag());
-                aRe += aAr * aBr + aAi * aBi;
-                aIm += aAr * aBi - aAi * aBr;
+                const Acc tAr = Acc(cA.real()), tAi = Acc(cA.imag());
+                const Acc tBr = Acc(cB.real()), tBi = Acc(cB.imag());
+                tRe += tAr * tBr + tAi * tBi;
+                tIm += tAr * tBi - tAi * tBr;
             }
 
-            const double dRe = static_cast<double>(aRe);
-            const double dIm = static_cast<double>(aIm);
+            const double dRe = static_cast<double>(tRe);
+            const double dIm = static_cast<double>(tIm);
             mvcGram[static_cast<size_t>(i * uK + j)] = ComplexAcc(dRe, dIm);
             if (j != i)
                 mvcGram[static_cast<size_t>(j * uK + i)] = ComplexAcc(dRe, -dIm);
@@ -256,52 +216,57 @@ void EcaCpu::buildNormalEquationsT(const ComplexF* pcRef, const ComplexF* pcSur,
     for (uint64_t i = 0; i < uK; ++i) {
         const uint64_t uFirst = (uStart > i) ? uStart : i;
 
-        Acc aRe = Acc(0);
-        Acc aIm = Acc(0);
+        Acc tRe = Acc(0);
+        Acc tIm = Acc(0);
         for (uint64_t n = uFirst; n < uEnd; ++n) {
             const ComplexF& cA = pcRef[n - i];
             const ComplexF& cB = pcSur[n];
-            const Acc aAr = Acc(cA.real()), aAi = Acc(cA.imag());
-            const Acc aBr = Acc(cB.real()), aBi = Acc(cB.imag());
-            aRe += aAr * aBr + aAi * aBi;
-            aIm += aAr * aBi - aAi * aBr;
+            const Acc tAr = Acc(cA.real()), tAi = Acc(cA.imag());
+            const Acc tBr = Acc(cB.real()), tBi = Acc(cB.imag());
+            tRe += tAr * tBr + tAi * tBi;
+            tIm += tAr * tBi - tAi * tBr;
         }
-        mvcRhs[static_cast<size_t>(i)] = ComplexAcc(static_cast<double>(aRe),
-                                                    static_cast<double>(aIm));
+        mvcRhs[static_cast<size_t>(i)] = ComplexAcc(static_cast<double>(tRe),
+                                                    static_cast<double>(tIm));
     }
+}
+
+double EcaCpu::loadingLambda() const
+{
+    const uint64_t uK = muTaps;
+
+    // G's diagonal entries are the energy of the reference under each delay,
+    // so their mean is the natural scale of the matrix. Adding a fixed
+    // fraction of it keeps the solve well conditioned and means the same
+    // thing whatever amplitude the samples arrived at.
+    //
+    // ECA-m instead adds the MATLAB reference's absolute 1e-3, because
+    // reproducing that chain bit for bit is its entire job.
+    if (moParams.bAbsoluteLoading)
+        return moParams.dDiagonalLoading;
+    if (!(moParams.dDiagonalLoading > 0.0))
+        return 0.0;
+
+    // Summed in the working precision, so the FP32 mode computes the same
+    // lambda the GPU kernel does. A lambda that differed would show up as
+    // a disagreement that had nothing to do with the code being compared.
+    if (moParams.bFloat32Math) {
+        float fTrace = 0.0f;
+        for (uint64_t i = 0; i < uK; ++i)
+            fTrace += static_cast<float>(mvcGram[static_cast<size_t>(i * uK + i)].real());
+        return moParams.dDiagonalLoading *
+               (static_cast<double>(fTrace) / static_cast<double>(uK));
+    }
+    double dTrace = 0.0;
+    for (uint64_t i = 0; i < uK; ++i)
+        dTrace += mvcGram[static_cast<size_t>(i * uK + i)].real();
+    return moParams.dDiagonalLoading * (dTrace / static_cast<double>(uK));
 }
 
 bool EcaCpu::solveWeights(uint64_t uWindowIndex)
 {
-    const uint64_t uK = muTaps;
-
-    // Diagonal loading. G's diagonal entries are the energy of the reference
-    // under each delay, so their mean is the natural scale of the matrix.
-    // Adding a fixed fraction of it keeps the solve well conditioned and means
-    // the same thing whatever amplitude the samples arrived at.
-    //
-    // ECA-m instead adds the MATLAB reference's absolute 1e-3, because
-    // reproducing that chain bit for bit is its entire job.
-    double dLambda = 0.0;
-    if (moParams.bAbsoluteLoading) {
-        dLambda = moParams.dDiagonalLoading;
-    } else if (moParams.dDiagonalLoading > 0.0) {
-        // Summed in the working precision, so the FP32 mode computes the same
-        // lambda the GPU kernel does. A lambda that differed would show up as
-        // a disagreement that had nothing to do with the code being compared.
-        if (moParams.bFloat32Math) {
-            float fTrace = 0.0f;
-            for (uint64_t i = 0; i < uK; ++i)
-                fTrace += static_cast<float>(mvcGram[static_cast<size_t>(i * uK + i)].real());
-            dLambda = moParams.dDiagonalLoading *
-                      (static_cast<double>(fTrace) / static_cast<double>(uK));
-        } else {
-            double dTrace = 0.0;
-            for (uint64_t i = 0; i < uK; ++i)
-                dTrace += mvcGram[static_cast<size_t>(i * uK + i)].real();
-            dLambda = moParams.dDiagonalLoading * (dTrace / static_cast<double>(uK));
-        }
-    }
+    const uint64_t uK      = muTaps;
+    const double   dLambda = loadingLambda();
 
     // Cholesky, G = L L^H. G is Hermitian and, with the loading, positive
     // definite, so this is both the cheapest and the most numerically stable
@@ -428,22 +393,7 @@ bool EcaCpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
         applyWeights(pcRef, pcSur, pcOut, uStart, uEnd);
     }
 
-    // Suppression: how much total power the cancellation removed. A headline
-    // number, and on its own a misleading one -- an algorithm scores well here
-    // whether it removed clutter or the targets. Target attenuation has to be
-    // measured from the range-Doppler map.
-    double dInput  = 0.0;
-    double dOutput = 0.0;
-    for (uint64_t n = 0; n < moParams.uCpiSamples; ++n) {
-        const double dSr = pcSur[n].real(), dSi = pcSur[n].imag();
-        const double dOr = pcOut[n].real(), dOi = pcOut[n].imag();
-        dInput  += dSr * dSr + dSi * dSi;
-        dOutput += dOr * dOr + dOi * dOi;
-    }
-
-    oStats.dSuppressionDb = (dInput > 0.0 && dOutput > 0.0)
-                          ? 10.0 * std::log10(dInput / dOutput)
-                          : 0.0;
+    oStats.dSuppressionDb = hostSuppressionDb(pcSur, pcOut, moParams.uCpiSamples);
     oStats.uIterations = 0;   // direct solve, not iterative
 
     return true;
@@ -451,27 +401,9 @@ bool EcaCpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
 
 } // namespace
 
-// The other CPU algorithms live in their own files; this is the one place
-// that knows all of them.
-std::unique_ptr<DSICanceller> makeCglsCancellerCpu();
-std::unique_ptr<DSICanceller> makeEcaCdCancellerCpu();
-
-std::unique_ptr<DSICanceller> makeDSICancellerCpu(DSIAlgorithm eAlgorithm)
+std::unique_ptr<DSICanceller> makeEcaCancellerCpu()
 {
-    switch (eAlgorithm) {
-    case DSIAlgorithm::EcaM:
-    case DSIAlgorithm::EcaB:
-    case DSIAlgorithm::EcaS:
-        return std::unique_ptr<DSICanceller>(new EcaCpu());
-    case DSIAlgorithm::EcaCd:
-        return makeEcaCdCancellerCpu();
-    case DSIAlgorithm::Cgls:
-        return makeCglsCancellerCpu();
-    }
-
-    std::fprintf(stderr, "dsi: unknown algorithm %d on the CPU backend\n",
-                 static_cast<int>(eAlgorithm));
-    return std::unique_ptr<DSICanceller>();
+    return std::unique_ptr<DSICanceller>(new EcaCpu());
 }
 
 } // namespace pbr

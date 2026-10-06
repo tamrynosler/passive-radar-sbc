@@ -12,6 +12,8 @@ namespace pbr {
 // anywhere else.
 using ComplexF = std::complex<float>;   // host
 
+const double kPi = 3.14159265358979323846;
+
 } // namespace pbr
 
 #endif // PBR_TYPES_HPP

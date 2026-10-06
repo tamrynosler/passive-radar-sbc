@@ -85,8 +85,6 @@ namespace {
 
 typedef std::complex<float> ComplexAcc;
 
-const double kPi = 3.14159265358979323846;
-
 class ArdCpu : public ArdProcessor {
 public:
     ArdCpu() { std::memset(machName, 0, sizeof(machName)); }

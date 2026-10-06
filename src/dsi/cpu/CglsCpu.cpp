@@ -68,7 +68,7 @@
 // from a converged point on purpose. One extra K-length dot product.
 //
 // The cheap update r -= alpha q is exact algebra but accumulates rounding, and
-// after enough steps r drifts from the true b - R x. Every kResidualRefresh
+// after enough steps r drifts from the true b - R x. Every kCglsResidualRefresh
 // iterations it is recomputed from scratch, and the output is always computed
 // fresh as b - R x rather than taken from r.
 //
@@ -89,10 +89,9 @@
 
 #include "pbr/DSICanceller.hpp"
 #include "pbr/check.hpp"
+#include "../DsiInternal.hpp"
 
-#include <cmath>
 #include <complex>
-#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -102,10 +101,6 @@ namespace {
 
 // Storage type: double, so a float value is held exactly (see EcaCpu.cpp).
 typedef std::complex<double> ComplexAcc;
-
-// Recompute r = b - R x from scratch this often. Ten is a guess that the FP64
-// versus FP32 comparison in tests/test_cgls.cpp is there to check.
-const uint64_t kResidualRefresh = 10;
 
 // out[n] = base[n] - sum over k of w[k] r[n-k], for n in [uStart, uEnd), or
 // just the sum when pcBase is null. The first form is the residual b - R x
@@ -121,21 +116,21 @@ void forwardT(const ComplexF* pcRef, const ComplexAcc* pcW, uint64_t uK,
     for (uint64_t n = uStart; n < uEnd; ++n) {
         const uint64_t uTaps = (n + 1 < uK) ? (n + 1) : uK;
 
-        Acc aRe = Acc(0);
-        Acc aIm = Acc(0);
+        Acc tRe = Acc(0);
+        Acc tIm = Acc(0);
         for (uint64_t k = 0; k < uTaps; ++k) {
-            const Acc aWr = Acc(pcW[k].real()), aWi = Acc(pcW[k].imag());
-            const Acc aRr = Acc(pcRef[n - k].real()), aRi = Acc(pcRef[n - k].imag());
-            aRe += aWr * aRr - aWi * aRi;
-            aIm += aWr * aRi + aWi * aRr;
+            const Acc tWr = Acc(pcW[k].real()), tWi = Acc(pcW[k].imag());
+            const Acc tRr = Acc(pcRef[n - k].real()), tRi = Acc(pcRef[n - k].imag());
+            tRe += tWr * tRr - tWi * tRi;
+            tIm += tWr * tRi + tWi * tRr;
         }
 
         if (pcBase != nullptr) {
-            aRe = Acc(pcBase[n].real()) - aRe;
-            aIm = Acc(pcBase[n].imag()) - aIm;
+            tRe = Acc(pcBase[n].real()) - tRe;
+            tIm = Acc(pcBase[n].imag()) - tIm;
         }
-        pcOut[n - uStart] = ComplexAcc(static_cast<double>(aRe),
-                                       static_cast<double>(aIm));
+        pcOut[n - uStart] = ComplexAcc(static_cast<double>(tRe),
+                                       static_cast<double>(tIm));
     }
 }
 
@@ -147,73 +142,79 @@ void adjointT(const ComplexF* pcRef, const ComplexAcc* pcV, uint64_t uK,
     for (uint64_t k = 0; k < uK; ++k) {
         const uint64_t uFirst = (uStart > k) ? uStart : k;
 
-        Acc aRe = Acc(0);
-        Acc aIm = Acc(0);
+        Acc tRe = Acc(0);
+        Acc tIm = Acc(0);
         for (uint64_t n = uFirst; n < uEnd; ++n) {
-            const Acc aAr = Acc(pcRef[n - k].real()), aAi = Acc(pcRef[n - k].imag());
-            const Acc aBr = Acc(pcV[n - uStart].real()), aBi = Acc(pcV[n - uStart].imag());
-            aRe += aAr * aBr + aAi * aBi;
-            aIm += aAr * aBi - aAi * aBr;
+            const Acc tAr = Acc(pcRef[n - k].real()), tAi = Acc(pcRef[n - k].imag());
+            const Acc tBr = Acc(pcV[n - uStart].real()), tBi = Acc(pcV[n - uStart].imag());
+            tRe += tAr * tBr + tAi * tBi;
+            tIm += tAr * tBi - tAi * tBr;
         }
-        pcS[k] = ComplexAcc(static_cast<double>(aRe), static_cast<double>(aIm));
+        pcS[k] = ComplexAcc(static_cast<double>(tRe), static_cast<double>(tIm));
     }
 }
 
 template <typename Acc>
 Acc normSqT(const ComplexAcc* pc, uint64_t uCount)
 {
-    Acc a = Acc(0);
+    Acc tSum = Acc(0);
     for (uint64_t u = 0; u < uCount; ++u) {
-        const Acc aRe = Acc(pc[u].real()), aIm = Acc(pc[u].imag());
-        a += aRe * aRe + aIm * aIm;
+        const Acc tRe = Acc(pc[u].real()), tIm = Acc(pc[u].imag());
+        tSum += tRe * tRe + tIm * tIm;
     }
-    return a;
+    return tSum;
 }
 
 // Re(a^H b)
 template <typename Acc>
 Acc dotRealT(const ComplexAcc* pcA, const ComplexAcc* pcB, uint64_t uCount)
 {
-    Acc a = Acc(0);
+    Acc tSum = Acc(0);
     for (uint64_t u = 0; u < uCount; ++u)
-        a += Acc(pcA[u].real()) * Acc(pcB[u].real()) +
-             Acc(pcA[u].imag()) * Acc(pcB[u].imag());
-    return a;
+        tSum += Acc(pcA[u].real()) * Acc(pcB[u].real()) +
+                Acc(pcA[u].imag()) * Acc(pcB[u].imag());
+    return tSum;
 }
 
 // y += a x, with a real.
 template <typename Acc>
-void axpyT(Acc a, const ComplexAcc* pcX, ComplexAcc* pcY, uint64_t uCount)
+void axpyT(Acc tScale, const ComplexAcc* pcX, ComplexAcc* pcY, uint64_t uCount)
 {
     for (uint64_t u = 0; u < uCount; ++u) {
-        pcY[u] = ComplexAcc(static_cast<double>(Acc(pcY[u].real()) + a * Acc(pcX[u].real())),
-                            static_cast<double>(Acc(pcY[u].imag()) + a * Acc(pcX[u].imag())));
+        pcY[u] = ComplexAcc(static_cast<double>(Acc(pcY[u].real()) + tScale * Acc(pcX[u].real())),
+                            static_cast<double>(Acc(pcY[u].imag()) + tScale * Acc(pcX[u].imag())));
     }
 }
 
 // p = s + beta p, with beta real.
 template <typename Acc>
-void newDirectionT(Acc aBeta, const ComplexAcc* pcS, ComplexAcc* pcP, uint64_t uCount)
+void newDirectionT(Acc tBeta, const ComplexAcc* pcS, ComplexAcc* pcP, uint64_t uCount)
 {
     for (uint64_t u = 0; u < uCount; ++u) {
-        pcP[u] = ComplexAcc(static_cast<double>(Acc(pcS[u].real()) + aBeta * Acc(pcP[u].real())),
-                            static_cast<double>(Acc(pcS[u].imag()) + aBeta * Acc(pcP[u].imag())));
+        pcP[u] = ComplexAcc(static_cast<double>(Acc(pcS[u].real()) + tBeta * Acc(pcP[u].real())),
+                            static_cast<double>(Acc(pcS[u].imag()) + tBeta * Acc(pcP[u].imag())));
     }
 }
 
 class CglsCpu : public DSICanceller {
 public:
-    CglsCpu() { std::memset(machName, 0, sizeof(machName)); }
-
     bool init(const DSIParams& oParams) override;
     bool cancel(const ComplexF* pcRef, const ComplexF* pcSur,
                 ComplexF* pcOut, DSIStats& oStats) override;
-    const char* name() const override { return machName; }
+    const char* name() const override
+    {
+        return moParams.bFloat32Math ? "CGLS (CPU FP32)" : "CGLS (CPU)";
+    }
 
 private:
     template <typename Acc>
     void cancelT(const ComplexF* pcRef, const ComplexF* pcSur, ComplexF* pcOut,
                  uint64_t& uIterations);
+
+    // Iterate window uWindow from its start in mvcX, leaving the weights
+    // there. Returns the number of iterations run.
+    template <typename Acc>
+    uint64_t solveWindowT(const ComplexF* pcRef, const ComplexF* pcSur, uint64_t uWindow);
 
     DSIParams               moParams;
     uint64_t                muTaps          = 0;   // K
@@ -227,27 +228,14 @@ private:
     std::vector<ComplexAcc> mvcQ;       // one window, R p
 
     bool                    mbHaveWeights = false;   // mvcX holds a previous CPI
-    char                    machName[32];
     bool                    mbReady       = false;
 };
 
 bool CglsCpu::init(const DSIParams& oParams)
 {
     CHECK(!mbReady, "CglsCpu::init called twice");
-    CHECK(oParams.eAlgorithm == DSIAlgorithm::Cgls, "CglsCpu handles CGLS only");
-    CHECK(oParams.uCpiSamples > 0, "CPI length must be non-zero");
-    CHECK(oParams.uClutterTaps > 0, "clutter taps must be non-zero");
-    CHECK(oParams.uCglsBatchSamples > 0, "the CGLS batch must be non-zero");
-    CHECK(oParams.uMaxIterations > 0, "CGLS needs at least one iteration");
-    CHECK(oParams.uDopplerTaps == 0,
-          "ECA_DOPPLER_TAPS > 0 is not implemented; the clutter subspace is "
-          "delay-only for now");
-    // CGLS is batched like ECA-B: the weights are estimated from the window
-    // they are applied to, on its own window length.
-    CHECK(oParams.uCpiSamples % oParams.uCglsBatchSamples == 0,
-          "the CGLS batch must divide the CPI exactly");
-    CHECK(oParams.uCglsBatchSamples > oParams.uClutterTaps,
-          "the CGLS batch must hold more samples than there are taps to solve for");
+    if (!cglsParamsOk(oParams))
+        return false;
 
     moParams        = oParams;
     muTaps          = oParams.uClutterTaps;
@@ -261,11 +249,59 @@ bool CglsCpu::init(const DSIParams& oParams)
     mvcR.assign(static_cast<size_t>(muWindowSamples), ComplexAcc());
     mvcQ.assign(static_cast<size_t>(muWindowSamples), ComplexAcc());
 
-    std::snprintf(machName, sizeof(machName), "CGLS (CPU%s)",
-                  oParams.bFloat32Math ? " FP32" : "");
-
     mbReady = true;
     return true;
+}
+
+template <typename Acc>
+uint64_t CglsCpu::solveWindowT(const ComplexF* pcRef, const ComplexF* pcSur, uint64_t uWindow)
+{
+    const uint64_t uK     = muTaps;
+    const uint64_t uW     = muWindowSamples;
+    const uint64_t uStart = uWindow * uW;
+    const uint64_t uEnd   = uStart + uW;
+    ComplexAcc* pcX = &mvcX[static_cast<size_t>(uWindow * uK)];
+
+    // r = b - R x;  s = R^H r;  p = s;  gamma = |s|^2
+    forwardT<Acc>(pcRef, pcX, uK, uStart, uEnd, pcSur, mvcR.data());
+    adjointT<Acc>(pcRef, mvcR.data(), uK, uStart, uEnd, mvcS.data());
+    Acc tGamma = normSqT<Acc>(mvcS.data(), uK);
+    mvcP = mvcS;
+
+    uint64_t uCount = 0;
+    for (uint64_t uIt = 1; uIt <= moParams.uMaxIterations; ++uIt) {
+        // q = R p;  alpha = Re(p^H s) / |q|^2  -- the line minimiser along
+        // p, which equals gamma / |q|^2 only while p and s are conjugate.
+        // See the file header for why the difference matters.
+        forwardT<Acc>(pcRef, mvcP.data(), uK, uStart, uEnd, nullptr, mvcQ.data());
+        const Acc tDelta = normSqT<Acc>(mvcQ.data(), uW);
+
+        // A zero here means p is zero: the residual is already orthogonal
+        // to every column and there is nothing left to fit. Only happens
+        // on degenerate input such as an all-zero window.
+        if (!(tDelta > Acc(0)))
+            break;
+        const Acc tAlpha = dotRealT<Acc>(mvcP.data(), mvcS.data(), uK) / tDelta;
+
+        // x += alpha p
+        axpyT<Acc>(tAlpha, mvcP.data(), pcX, uK);
+
+        // r -= alpha q, or every so often the honest version.
+        if (uIt % kCglsResidualRefresh == 0)
+            forwardT<Acc>(pcRef, pcX, uK, uStart, uEnd, pcSur, mvcR.data());
+        else
+            axpyT<Acc>(-tAlpha, mvcQ.data(), mvcR.data(), uW);
+
+        // s = R^H r;  beta = |s|^2 / gamma;  p = s + beta p
+        adjointT<Acc>(pcRef, mvcR.data(), uK, uStart, uEnd, mvcS.data());
+        const Acc tGammaNew = normSqT<Acc>(mvcS.data(), uK);
+        const Acc tBeta     = tGammaNew / tGamma;
+        tGamma = tGammaNew;
+        newDirectionT<Acc>(tBeta, mvcS.data(), mvcP.data(), uK);
+
+        ++uCount;
+    }
+    return uCount;
 }
 
 template <typename Acc>
@@ -285,54 +321,16 @@ void CglsCpu::cancelT(const ComplexF* pcRef, const ComplexF* pcSur, ComplexF* pc
         if (!moParams.bCglsPrime || !mbHaveWeights)
             std::memset(pcX, 0, static_cast<size_t>(uK) * sizeof(ComplexAcc));
 
-        // r = b - R x;  s = R^H r;  p = s;  gamma = |s|^2
-        forwardT<Acc>(pcRef, pcX, uK, uStart, uEnd, pcSur, mvcR.data());
-        adjointT<Acc>(pcRef, mvcR.data(), uK, uStart, uEnd, mvcS.data());
-        Acc aGamma = normSqT<Acc>(mvcS.data(), uK);
-        mvcP = mvcS;
-
-        uint64_t uCount = 0;
-        for (uint64_t it = 1; it <= moParams.uMaxIterations; ++it) {
-            // q = R p;  alpha = Re(p^H s) / |q|^2  -- the line minimiser along
-            // p, which equals gamma / |q|^2 only while p and s are conjugate.
-            // See the file header for why the difference matters.
-            forwardT<Acc>(pcRef, mvcP.data(), uK, uStart, uEnd, nullptr, mvcQ.data());
-            const Acc aDelta = normSqT<Acc>(mvcQ.data(), uW);
-
-            // A zero here means p is zero: the residual is already orthogonal
-            // to every column and there is nothing left to fit. Only happens
-            // on degenerate input such as an all-zero window.
-            if (!(aDelta > Acc(0)))
-                break;
-            const Acc aAlpha = dotRealT<Acc>(mvcP.data(), mvcS.data(), uK) / aDelta;
-
-            // x += alpha p
-            axpyT<Acc>(aAlpha, mvcP.data(), pcX, uK);
-
-            // r -= alpha q, or every so often the honest version.
-            if (it % kResidualRefresh == 0)
-                forwardT<Acc>(pcRef, pcX, uK, uStart, uEnd, pcSur, mvcR.data());
-            else
-                axpyT<Acc>(-aAlpha, mvcQ.data(), mvcR.data(), uW);
-
-            // s = R^H r;  beta = |s|^2 / gamma;  p = s + beta p
-            adjointT<Acc>(pcRef, mvcR.data(), uK, uStart, uEnd, mvcS.data());
-            const Acc aGammaNew = normSqT<Acc>(mvcS.data(), uK);
-            const Acc aBeta     = aGammaNew / aGamma;
-            aGamma = aGammaNew;
-            newDirectionT<Acc>(aBeta, mvcS.data(), mvcP.data(), uK);
-
-            ++uCount;
-        }
+        const uint64_t uCount = solveWindowT<Acc>(pcRef, pcSur, w);
         if (uCount > uIterations)
             uIterations = uCount;
 
         // The output is b - R x computed fresh, not the drifted residual.
         forwardT<Acc>(pcRef, pcX, uK, uStart, uEnd, pcSur, mvcR.data());
         for (uint64_t n = uStart; n < uEnd; ++n) {
-            const ComplexAcc& c = mvcR[static_cast<size_t>(n - uStart)];
-            pcOut[n] = ComplexF(static_cast<float>(c.real()),
-                                static_cast<float>(c.imag()));
+            const ComplexAcc& cResidual = mvcR[static_cast<size_t>(n - uStart)];
+            pcOut[n] = ComplexF(static_cast<float>(cResidual.real()),
+                                static_cast<float>(cResidual.imag()));
         }
     }
 
@@ -356,21 +354,8 @@ bool CglsCpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
     else
         cancelT<double>(pcRef, pcSur, pcOut, uIterations);
 
-    // Suppression, as in EcaCpu: a headline number that cannot tell clutter
-    // removed from targets removed.
-    double dInput  = 0.0;
-    double dOutput = 0.0;
-    for (uint64_t n = 0; n < moParams.uCpiSamples; ++n) {
-        const double dSr = pcSur[n].real(), dSi = pcSur[n].imag();
-        const double dOr = pcOut[n].real(), dOi = pcOut[n].imag();
-        dInput  += dSr * dSr + dSi * dSi;
-        dOutput += dOr * dOr + dOi * dOi;
-    }
-    oStats.dSuppressionDb = (dInput > 0.0 && dOutput > 0.0)
-                          ? 10.0 * std::log10(dInput / dOutput)
-                          : 0.0;
-    oStats.uIterations = uIterations;
-
+    oStats.dSuppressionDb = hostSuppressionDb(pcSur, pcOut, moParams.uCpiSamples);
+    oStats.uIterations    = uIterations;
     return true;
 }
 

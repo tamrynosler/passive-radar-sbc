@@ -1,5 +1,7 @@
 #include "pbr/Config.hpp"
 
+#include "pbr/DSICanceller.hpp"   // kMaxCdDopplerTaps
+
 #include <cerrno>
 #include <cstdarg>
 #include <cmath>
@@ -303,9 +305,10 @@ bool checkValues(const PbrConfig& oConfig)
         bOk = false;
     }
     // The ECA-CD projection solves a (2P+1)-square system per carrier inside
-    // one GPU thread, sized for P <= 3 at compile time.
-    if (oConfig.uCdDopplerTaps > 3) {
-        configMessage("config: ECA_CD_DOPPLER_TAPS must be at most 3\n");
+    // one GPU thread, sized at compile time.
+    if (oConfig.uCdDopplerTaps > kMaxCdDopplerTaps) {
+        configMessage("config: ECA_CD_DOPPLER_TAPS must be at most %llu\n",
+                      static_cast<unsigned long long>(kMaxCdDopplerTaps));
         bOk = false;
     }
     return bOk;

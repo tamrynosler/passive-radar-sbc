@@ -56,18 +56,17 @@
 //
 // The FFT is a plain iterative radix-2, written here because the CPU build has
 // no FFT library and correctness matters more than speed. It needs L to be a
-// power of two; the config loader enforces that. Q^H Q is Toeplitz Hermitian
+// power of two; init() and the config loader both check that. Q^H Q is Toeplitz Hermitian
 // (entry (a, b) depends only on b - a), so only 2P+1 sums are accumulated for
 // it. Precision follows bFloat32Math as in EcaCpu: computed in Acc, stored
 // exactly in double.
 
 #include "pbr/DSICanceller.hpp"
 #include "pbr/check.hpp"
+#include "../DsiInternal.hpp"
 
 #include <cmath>
 #include <complex>
-#include <cstdio>
-#include <cstring>
 #include <vector>
 
 namespace pbr {
@@ -76,9 +75,7 @@ namespace {
 
 typedef std::complex<double> ComplexAcc;
 
-// The per-carrier solve is sized for this at compile time. 2P+1 <= 7.
-const uint64_t kMaxDopplerTaps = 3;
-const uint64_t kMaxCols        = 2 * kMaxDopplerTaps + 1;
+const uint64_t kMaxCols = 2 * kMaxCdDopplerTaps + 1;
 
 // Index into an M-point table of exp(+j 2 pi i / M) for exp(j 2 pi n / M),
 // with n possibly negative.
@@ -89,16 +86,63 @@ uint64_t twiddleIndex(int64_t iN, uint64_t uM)
     return static_cast<uint64_t>(iR);
 }
 
+// Solve acSystem x = acSolution in place by Gaussian elimination with partial
+// pivoting; on return acSolution holds x. Tiny -- at most 7 x 7 -- so clarity
+// wins over cleverness. False on a zero pivot, which means the reference has
+// no energy at this carrier (an all-zero window, say): nothing to cancel.
+template <typename Acc>
+bool solveSmallSystemT(std::complex<Acc> acSystem[kMaxCols][kMaxCols],
+                       std::complex<Acc> acSolution[kMaxCols], uint64_t uCols)
+{
+    typedef std::complex<Acc> C;
+
+    for (uint64_t uCol = 0; uCol < uCols; ++uCol) {
+        uint64_t uPivot = uCol;
+        for (uint64_t uRow = uCol + 1; uRow < uCols; ++uRow)
+            if (std::abs(acSystem[uRow][uCol]) > std::abs(acSystem[uPivot][uCol]))
+                uPivot = uRow;
+        if (!(std::abs(acSystem[uPivot][uCol]) > Acc(0)))
+            return false;
+        if (uPivot != uCol) {
+            for (uint64_t u = 0; u < uCols; ++u) {
+                const C tSwap = acSystem[uCol][u];
+                acSystem[uCol][u] = acSystem[uPivot][u];
+                acSystem[uPivot][u] = tSwap;
+            }
+            const C tSwap = acSolution[uCol];
+            acSolution[uCol] = acSolution[uPivot];
+            acSolution[uPivot] = tSwap;
+        }
+        for (uint64_t uRow = uCol + 1; uRow < uCols; ++uRow) {
+            const C tFactor = acSystem[uRow][uCol] / acSystem[uCol][uCol];
+            for (uint64_t u = uCol; u < uCols; ++u)
+                acSystem[uRow][u] -= tFactor * acSystem[uCol][u];
+            acSolution[uRow] -= tFactor * acSolution[uCol];
+        }
+    }
+    for (uint64_t uCol = uCols; uCol-- > 0; ) {
+        C tSum = acSolution[uCol];
+        for (uint64_t u = uCol + 1; u < uCols; ++u)
+            tSum -= acSystem[uCol][u] * acSolution[u];
+        acSolution[uCol] = tSum / acSystem[uCol][uCol];
+    }
+    return true;
+}
+
 class EcaCdCpu : public DSICanceller {
 public:
-    EcaCdCpu() { std::memset(machName, 0, sizeof(machName)); }
-
     bool init(const DSIParams& oParams) override;
     bool cancel(const ComplexF* pcRef, const ComplexF* pcSur,
                 ComplexF* pcOut, DSIStats& oStats) override;
-    const char* name() const override { return machName; }
+    const char* name() const override
+    {
+        return moParams.bFloat32Math ? "ECA-CD (CPU FP32)" : "ECA-CD (CPU)";
+    }
 
 private:
+    // The twiddle and bit-reversal tables of the length-L radix-2 FFT.
+    void buildFftTables();
+
     // In-place FFT of one batch of muBatch samples. No 1/L on the inverse;
     // the caller folds it into the projection.
     template <typename Acc>
@@ -122,39 +166,41 @@ private:
     std::vector<uint32_t>   mvuBitReverse;    // L
     std::vector<ComplexAcc> mvcBatchTwiddle;  // M:   exp(+j 2 pi i / M)
 
-    char                    machName[32];
     bool                    mbReady = false;
 };
 
 bool EcaCdCpu::init(const DSIParams& oParams)
 {
     CHECK(!mbReady, "EcaCdCpu::init called twice");
-    CHECK(oParams.eAlgorithm == DSIAlgorithm::EcaCd, "EcaCdCpu handles ECA-CD only");
-    CHECK(oParams.uCpiSamples > 0, "CPI length must be non-zero");
-    CHECK(oParams.uCdBatchSamples > 0, "the ECA-CD batch must be non-zero");
-    CHECK((oParams.uCdBatchSamples & (oParams.uCdBatchSamples - 1)) == 0,
-          "the ECA-CD batch length must be a power of two (radix-2 FFT)");
-    CHECK(oParams.uCpiSamples % oParams.uCdBatchSamples == 0,
-          "the ECA-CD batch must divide the CPI exactly");
-    CHECK(oParams.uCdDopplerTaps <= kMaxDopplerTaps,
-          "ECA_CD_DOPPLER_TAPS is at most 3");
+    if (!ecaCdParamsOk(oParams))
+        return false;
 
     moParams  = oParams;
     muBatch   = oParams.uCdBatchSamples;
     muBatches = oParams.uCpiSamples / oParams.uCdBatchSamples;
     muCols    = 2 * oParams.uCdDopplerTaps + 1;
 
-    // The Doppler columns are resolved across the batches, so there have to
-    // be more batches than columns for the projection to mean anything.
-    CHECK(muBatches > muCols,
-          "too few ECA-CD batches for the Doppler columns; shorten the batch "
-          "or reduce ECA_CD_DOPPLER_TAPS");
-
-    const double kPi = 3.14159265358979323846;
-
     mvcRefSpec.assign(static_cast<size_t>(oParams.uCpiSamples), ComplexAcc());
     mvcSurSpec.assign(static_cast<size_t>(oParams.uCpiSamples), ComplexAcc());
+    buildFftTables();
 
+    // Rounded to float when bFloat32Math is set, so the FP32 mode uses the
+    // same table the GPU does.
+    mvcBatchTwiddle = batchTwiddles(muBatches);
+    if (oParams.bFloat32Math) {
+        for (size_t u = 0; u < mvcBatchTwiddle.size(); ++u) {
+            const ComplexAcc cExact = mvcBatchTwiddle[u];
+            mvcBatchTwiddle[u] = ComplexAcc(static_cast<float>(cExact.real()),
+                                            static_cast<float>(cExact.imag()));
+        }
+    }
+
+    mbReady = true;
+    return true;
+}
+
+void EcaCdCpu::buildFftTables()
+{
     mvcFftTwiddle.resize(static_cast<size_t>(muBatch / 2));
     for (uint64_t i = 0; i < muBatch / 2; ++i) {
         const double dAngle = -2.0 * kPi * static_cast<double>(i) / static_cast<double>(muBatch);
@@ -168,30 +214,11 @@ bool EcaCdCpu::init(const DSIParams& oParams)
     mvuBitReverse.resize(static_cast<size_t>(muBatch));
     for (uint64_t i = 0; i < muBatch; ++i) {
         uint32_t uRev = 0;
-        for (uint32_t b = 0; b < uBits; ++b)
-            if (i & (1ULL << b))
-                uRev |= 1u << (uBits - 1 - b);
+        for (uint32_t uBit = 0; uBit < uBits; ++uBit)
+            if (i & (1ULL << uBit))
+                uRev |= 1u << (uBits - 1 - uBit);
         mvuBitReverse[static_cast<size_t>(i)] = uRev;
     }
-
-    // Rounded to float when bFloat32Math is set, so the FP32 mode uses the
-    // same table the GPU does.
-    mvcBatchTwiddle.resize(static_cast<size_t>(muBatches));
-    for (uint64_t i = 0; i < muBatches; ++i) {
-        const double dAngle = 2.0 * kPi * static_cast<double>(i) / static_cast<double>(muBatches);
-        double dRe = std::cos(dAngle), dIm = std::sin(dAngle);
-        if (oParams.bFloat32Math) {
-            dRe = static_cast<float>(dRe);
-            dIm = static_cast<float>(dIm);
-        }
-        mvcBatchTwiddle[static_cast<size_t>(i)] = ComplexAcc(dRe, dIm);
-    }
-
-    std::snprintf(machName, sizeof(machName), "ECA-CD (CPU%s)",
-                  oParams.bFloat32Math ? " FP32" : "");
-
-    mbReady = true;
-    return true;
 }
 
 template <typename Acc>
@@ -202,9 +229,9 @@ void EcaCdCpu::fftT(ComplexAcc* pc, bool bInverse) const
     for (uint64_t i = 0; i < uL; ++i) {
         const uint64_t j = mvuBitReverse[static_cast<size_t>(i)];
         if (j > i) {
-            const ComplexAcc c = pc[i];
+            const ComplexAcc cSwap = pc[i];
             pc[i] = pc[j];
-            pc[j] = c;
+            pc[j] = cSwap;
         }
     }
 
@@ -217,18 +244,18 @@ void EcaCdCpu::fftT(ComplexAcc* pc, bool bInverse) const
         for (uint64_t uBlock = 0; uBlock < uL; uBlock += uLen) {
             for (uint64_t i = 0; i < uHalf; ++i) {
                 const ComplexAcc& cTw = mvcFftTwiddle[static_cast<size_t>(i * uStep)];
-                const Acc aTr = Acc(cTw.real());
-                const Acc aTi = bInverse ? -Acc(cTw.imag()) : Acc(cTw.imag());
+                const Acc tTr = Acc(cTw.real());
+                const Acc tTi = bInverse ? -Acc(cTw.imag()) : Acc(cTw.imag());
 
                 ComplexAcc& cA = pc[uBlock + i];
                 ComplexAcc& cB = pc[uBlock + i + uHalf];
-                const Acc aBr = Acc(cB.real()), aBi = Acc(cB.imag());
-                const Acc aPr = aBr * aTr - aBi * aTi;   // b * twiddle
-                const Acc aPi = aBr * aTi + aBi * aTr;
-                const Acc aAr = Acc(cA.real()), aAi = Acc(cA.imag());
+                const Acc tBr = Acc(cB.real()), tBi = Acc(cB.imag());
+                const Acc tPr = tBr * tTr - tBi * tTi;   // b * twiddle
+                const Acc tPi = tBr * tTi + tBi * tTr;
+                const Acc tAr = Acc(cA.real()), tAi = Acc(cA.imag());
 
-                cA = ComplexAcc(static_cast<double>(aAr + aPr), static_cast<double>(aAi + aPi));
-                cB = ComplexAcc(static_cast<double>(aAr - aPr), static_cast<double>(aAi - aPi));
+                cA = ComplexAcc(static_cast<double>(tAr + tPr), static_cast<double>(tAi + tPi));
+                cB = ComplexAcc(static_cast<double>(tAr - tPr), static_cast<double>(tAi - tPi));
             }
         }
     }
@@ -243,7 +270,7 @@ void EcaCdCpu::projectCarrierT(uint64_t k)
     const uint64_t uM = muBatches;
     const int64_t  iP = static_cast<int64_t>(moParams.uCdDopplerTaps);
     const uint64_t uCols = muCols;
-    const Acc      aInvL = Acc(1) / Acc(uL);
+    const Acc      tInvL = Acc(1) / Acc(uL);
 
     // g[d] = sum over m of |R_m|^2 e^{+j 2 pi d m / M},  d = 0..2P
     //        (Q^H Q)(a, b) = g[b - a], with g[-d] = conj(g[d])
@@ -259,89 +286,53 @@ void EcaCdCpu::projectCarrierT(uint64_t k)
     for (uint64_t m = 0; m < uM; ++m) {
         const ComplexAcc& cR = mvcRefSpec[static_cast<size_t>(m * uL + k)];
         const ComplexAcc& cS = mvcSurSpec[static_cast<size_t>(m * uL + k)];
-        const C aR(Acc(cR.real()), Acc(cR.imag()));
-        const C aS(Acc(cS.real()), Acc(cS.imag()));
-        const Acc aPower = aR.real() * aR.real() + aR.imag() * aR.imag();
-        const C aRS = std::conj(aR) * aS;
+        const C tR(Acc(cR.real()), Acc(cR.imag()));
+        const C tS(Acc(cS.real()), Acc(cS.imag()));
+        const Acc tPower = tR.real() * tR.real() + tR.imag() * tR.imag();
+        const C tRS = std::conj(tR) * tS;
 
-        for (uint64_t d = 0; d < uCols; ++d) {
+        for (uint64_t uD = 0; uD < uCols; ++uD) {
             const ComplexAcc& cTw = mvcBatchTwiddle[static_cast<size_t>(
-                twiddleIndex(static_cast<int64_t>(d * m), uM))];
-            acG[d] += aPower * C(Acc(cTw.real()), Acc(cTw.imag()));
+                twiddleIndex(static_cast<int64_t>(uD * m), uM))];
+            acG[uD] += tPower * C(Acc(cTw.real()), Acc(cTw.imag()));
         }
-        for (int64_t p = -iP; p <= iP; ++p) {
+        for (int64_t iDoppler = -iP; iDoppler <= iP; ++iDoppler) {
             const ComplexAcc& cTw = mvcBatchTwiddle[static_cast<size_t>(
-                twiddleIndex(-p * static_cast<int64_t>(m), uM))];
-            acV[static_cast<size_t>(p + iP)] += aRS * C(Acc(cTw.real()), Acc(cTw.imag()));
+                twiddleIndex(-iDoppler * static_cast<int64_t>(m), uM))];
+            acV[static_cast<size_t>(iDoppler + iP)] += tRS * C(Acc(cTw.real()), Acc(cTw.imag()));
         }
     }
 
-    // Solve (Q^H Q) a = v by Gaussian elimination with partial pivoting.
-    // Tiny -- at most 7 x 7 -- so clarity wins over cleverness.
-    C acA[kMaxCols][kMaxCols];
-    for (uint64_t a = 0; a < uCols; ++a) {
-        for (uint64_t b = 0; b < uCols; ++b) {
-            acA[a][b] = (b >= a) ? acG[b - a] : std::conj(acG[a - b]);
-        }
+    // (Q^H Q) a = v, with Q^H Q Toeplitz Hermitian.
+    C acSystem[kMaxCols][kMaxCols];
+    C acWeights[kMaxCols];
+    for (uint64_t uRow = 0; uRow < uCols; ++uRow) {
+        for (uint64_t uCol = 0; uCol < uCols; ++uCol)
+            acSystem[uRow][uCol] = (uCol >= uRow) ? acG[uCol - uRow] : std::conj(acG[uRow - uCol]);
+        acWeights[uRow] = acV[uRow];
     }
+    const bool bSolved = solveSmallSystemT<Acc>(acSystem, acWeights, uCols);
 
-    C acX[kMaxCols];
-    for (uint64_t u = 0; u < uCols; ++u)
-        acX[u] = acV[u];
-
-    bool bSingular = false;
-    for (uint64_t c = 0; c < uCols && !bSingular; ++c) {
-        uint64_t uPivot = c;
-        for (uint64_t r = c + 1; r < uCols; ++r)
-            if (std::abs(acA[r][c]) > std::abs(acA[uPivot][c]))
-                uPivot = r;
-        // A zero pivot means the reference has no energy at this carrier (an
-        // all-zero window, say). Nothing to cancel; leave the carrier alone.
-        if (!(std::abs(acA[uPivot][c]) > Acc(0))) {
-            bSingular = true;
-            break;
-        }
-        if (uPivot != c) {
-            for (uint64_t b = 0; b < uCols; ++b) {
-                const C t = acA[c][b]; acA[c][b] = acA[uPivot][b]; acA[uPivot][b] = t;
-            }
-            const C t = acX[c]; acX[c] = acX[uPivot]; acX[uPivot] = t;
-        }
-        for (uint64_t r = c + 1; r < uCols; ++r) {
-            const C aF = acA[r][c] / acA[c][c];
-            for (uint64_t b = c; b < uCols; ++b)
-                acA[r][b] -= aF * acA[c][b];
-            acX[r] -= aF * acX[c];
-        }
-    }
-    if (!bSingular) {
-        for (uint64_t c = uCols; c-- > 0; ) {
-            C aSum = acX[c];
-            for (uint64_t b = c + 1; b < uCols; ++b)
-                aSum -= acA[c][b] * acX[b];
-            acX[c] = aSum / acA[c][c];
-        }
-    }
-
-    // y -= Q a, and the 1/L the inverse FFT will not apply.
+    // y -= Q a, and the 1/L the inverse FFT will not apply. A carrier with
+    // no reference energy is left alone.
     for (uint64_t m = 0; m < uM; ++m) {
         const ComplexAcc& cR = mvcRefSpec[static_cast<size_t>(m * uL + k)];
         ComplexAcc&       cS = mvcSurSpec[static_cast<size_t>(m * uL + k)];
-        C aS(Acc(cS.real()), Acc(cS.imag()));
+        C tS(Acc(cS.real()), Acc(cS.imag()));
 
-        if (!bSingular) {
-            const C aR(Acc(cR.real()), Acc(cR.imag()));
-            C aClutter(0, 0);
-            for (int64_t p = -iP; p <= iP; ++p) {
+        if (bSolved) {
+            const C tR(Acc(cR.real()), Acc(cR.imag()));
+            C tClutter(0, 0);
+            for (int64_t iDoppler = -iP; iDoppler <= iP; ++iDoppler) {
                 const ComplexAcc& cTw = mvcBatchTwiddle[static_cast<size_t>(
-                    twiddleIndex(p * static_cast<int64_t>(m), uM))];
-                aClutter += acX[static_cast<size_t>(p + iP)] * aR *
+                    twiddleIndex(iDoppler * static_cast<int64_t>(m), uM))];
+                tClutter += acWeights[static_cast<size_t>(iDoppler + iP)] * tR *
                             C(Acc(cTw.real()), Acc(cTw.imag()));
             }
-            aS -= aClutter;
+            tS -= tClutter;
         }
-        cS = ComplexAcc(static_cast<double>(aS.real() * aInvL),
-                        static_cast<double>(aS.imag() * aInvL));
+        cS = ComplexAcc(static_cast<double>(tS.real() * tInvL),
+                        static_cast<double>(tS.imag() * tInvL));
     }
 }
 
@@ -371,8 +362,8 @@ void EcaCdCpu::cancelT(const ComplexF* pcRef, const ComplexF* pcSur, ComplexF* p
         fftT<Acc>(&mvcSurSpec[static_cast<size_t>(m * uL)], true);
 
     for (uint64_t n = 0; n < uN; ++n) {
-        const ComplexAcc& c = mvcSurSpec[static_cast<size_t>(n)];
-        pcOut[n] = ComplexF(static_cast<float>(c.real()), static_cast<float>(c.imag()));
+        const ComplexAcc& cOut = mvcSurSpec[static_cast<size_t>(n)];
+        pcOut[n] = ComplexF(static_cast<float>(cOut.real()), static_cast<float>(cOut.imag()));
     }
 }
 
@@ -392,19 +383,8 @@ bool EcaCdCpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
     else
         cancelT<double>(pcRef, pcSur, pcOut);
 
-    double dInput  = 0.0;
-    double dOutput = 0.0;
-    for (uint64_t n = 0; n < moParams.uCpiSamples; ++n) {
-        const double dSr = pcSur[n].real(), dSi = pcSur[n].imag();
-        const double dOr = pcOut[n].real(), dOi = pcOut[n].imag();
-        dInput  += dSr * dSr + dSi * dSi;
-        dOutput += dOr * dOr + dOi * dOi;
-    }
-    oStats.dSuppressionDb = (dInput > 0.0 && dOutput > 0.0)
-                          ? 10.0 * std::log10(dInput / dOutput)
-                          : 0.0;
-    oStats.uIterations = 0;   // direct
-
+    oStats.dSuppressionDb = hostSuppressionDb(pcSur, pcOut, moParams.uCpiSamples);
+    oStats.uIterations    = 0;   // direct
     return true;
 }
 

@@ -1,24 +1,24 @@
-// Factory and config plumbing for the DSI cancellers.
+// Factory and config plumbing for the DSI cancellers, and what the
+// implementations share.
 //
 // This file knows which implementations exist and how a config file maps onto
 // DSIParams. The algorithms themselves know neither.
 
 #include "pbr/DSICanceller.hpp"
+#include "pbr/check.hpp"
+#include "DsiInternal.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
 namespace pbr {
 
-// Each backend's factory lives with its implementations. Declared here rather
-// than in a header because nothing outside this file calls them.
-std::unique_ptr<DSICanceller> makeDSICancellerCpu(DSIAlgorithm eAlgorithm);
-
-#if defined(PBR_WITH_CUDA)
-std::unique_ptr<DSICanceller> makeDSICancellerGpu(DSIAlgorithm eAlgorithm);
-#endif
-
 namespace {
+
+// ECA-m reproduces the MATLAB reference chain, which adds this ABSOLUTE
+// value to the Gram diagonal.
+const double kMatlabAbsoluteLoading = 1e-3;
 
 // One table drives naming in both directions, so a name can never parse to
 // one thing and print as another.
@@ -91,11 +91,19 @@ const char* dsiBackendName(DSIBackend eBackend)
 std::unique_ptr<DSICanceller> makeDSICanceller(DSIAlgorithm eAlgorithm,
                                                DSIBackend   eBackend)
 {
-    if (eBackend == DSIBackend::Cpu)
-        return makeDSICancellerCpu(eAlgorithm);
+    const bool bEca = (eAlgorithm == DSIAlgorithm::EcaM ||
+                       eAlgorithm == DSIAlgorithm::EcaB ||
+                       eAlgorithm == DSIAlgorithm::EcaS);
 
+    if (eBackend == DSIBackend::Cpu) {
+        if (bEca)                              return makeEcaCancellerCpu();
+        if (eAlgorithm == DSIAlgorithm::EcaCd) return makeEcaCdCancellerCpu();
+        if (eAlgorithm == DSIAlgorithm::Cgls)  return makeCglsCancellerCpu();
+    } else {
 #if defined(PBR_WITH_CUDA)
-    return makeDSICancellerGpu(eAlgorithm);
+        if (bEca)                              return makeEcaCancellerGpu();
+        if (eAlgorithm == DSIAlgorithm::EcaCd) return makeEcaCdCancellerGpu();
+        if (eAlgorithm == DSIAlgorithm::Cgls)  return makeCglsCancellerGpu();
 #else
     // Never silently fall back to the CPU. A benchmark row labelled GPU that
     // was actually measured on the CPU is worse than no row at all, and
@@ -104,8 +112,12 @@ std::unique_ptr<DSICanceller> makeDSICanceller(DSIAlgorithm eAlgorithm,
                  "dsi: the GPU backend is not available -- this build has no "
                  "CUDA (PBR_WITH_CUDA is not defined). Build on the Jetson via "
                  "CMake, or select DSI_BACKEND = CPU.\n");
-    return std::unique_ptr<DSICanceller>();
+        return std::unique_ptr<DSICanceller>();
 #endif
+    }
+
+    std::fprintf(stderr, "dsi: unknown algorithm %d\n", static_cast<int>(eAlgorithm));
+    return std::unique_ptr<DSICanceller>();
 }
 
 bool dsiParamsFromConfig(const PbrConfig& oConfig, DSIParams& oParams)
@@ -117,8 +129,8 @@ bool dsiParamsFromConfig(const PbrConfig& oConfig, DSIParams& oParams)
     if (!dsiBackendFromString(oConfig.sDsiBackend.c_str(), oParams.eBackend))
         return false;
 
-    // The GPU has no double-precision option worth using, so it overrides
-    // this in init(). On the CPU it is a real choice.
+    // The GPU has no double-precision option worth using, so it ignores
+    // this. On the CPU it is a real choice.
     oParams.bFloat32Math     = (oConfig.sDsiMathPrecision == "FP32");
 
     oParams.uCpiSamples      = oConfig.uCpiSamples;
@@ -140,12 +152,11 @@ bool dsiParamsFromConfig(const PbrConfig& oConfig, DSIParams& oParams)
         // loading instead.
         oParams.uEstimateSamples = oConfig.uCpiSamples;
         oParams.uUpdateSamples   = oConfig.uCpiSamples;
-        oParams.dDiagonalLoading = 1e-3;
+        oParams.dDiagonalLoading = kMatlabAbsoluteLoading;
         oParams.bAbsoluteLoading = true;
     } else {
         oParams.uEstimateSamples = oConfig.uEcaEstimateSamples;
         oParams.uUpdateSamples   = oConfig.uEcaUpdateSamples;
-        oParams.bAbsoluteLoading = false;
     }
 
     return true;
@@ -157,19 +168,131 @@ uint64_t dsiEstimationStart(uint64_t uUpdateStart, uint64_t uUpdateSamples,
     // Everything in units of the update window, which is also the chunk the
     // GPU shares its partial Grams at. Working in chunks rather than samples
     // is what makes the result land on a chunk boundary by construction.
-    const uint64_t w = uUpdateStart / uUpdateSamples;      // this update window
-    const uint64_t M = uEstimateSamples / uUpdateSamples;  // chunks per estimate
-    const uint64_t C = uCpiSamples / uUpdateSamples;       // chunks per CPI
+    const uint64_t uWindow = uUpdateStart / uUpdateSamples;     // this update window
+    const uint64_t uSpan   = uEstimateSamples / uUpdateSamples; // M, chunks per estimate
+    const uint64_t uChunks = uCpiSamples / uUpdateSamples;      // chunks per CPI
 
     // Step back half the estimation window, rounding towards the start so an
     // even M leans early rather than late. Unsigned, so the subtraction is
     // guarded rather than allowed to wrap.
-    const uint64_t uBack = (M - 1) / 2;
-    uint64_t a = (w > uBack) ? (w - uBack) : 0;
-    if (a + M > C)
-        a = C - M;
+    const uint64_t uBack = (uSpan - 1) / 2;
+    uint64_t uFirstChunk = (uWindow > uBack) ? (uWindow - uBack) : 0;
+    if (uFirstChunk + uSpan > uChunks)
+        uFirstChunk = uChunks - uSpan;
 
-    return a * uUpdateSamples;
+    return uFirstChunk * uUpdateSamples;
+}
+
+bool ecaParamsOk(const DSIParams& oParams)
+{
+    CHECK(oParams.eAlgorithm == DSIAlgorithm::EcaM ||
+          oParams.eAlgorithm == DSIAlgorithm::EcaB ||
+          oParams.eAlgorithm == DSIAlgorithm::EcaS,
+          "the ECA canceller handles ECA-m, ECA-B and ECA-S only");
+    CHECK(oParams.uCpiSamples > 0, "CPI length must be non-zero");
+    CHECK(oParams.uClutterTaps > 0, "clutter taps must be non-zero");
+    CHECK(oParams.uEstimateSamples > 0 && oParams.uUpdateSamples > 0,
+          "estimation and update windows must be non-zero");
+
+    // A non-zero Doppler tap count is a real algorithm, not a tuning knob.
+    // Refuse it rather than silently cancelling only stationary clutter while
+    // the config file claims otherwise.
+    CHECK(oParams.uDopplerTaps == 0,
+          "ECA_DOPPLER_TAPS > 0 is not implemented; the clutter subspace is "
+          "delay-only for now");
+
+    // The window rule is what separates the names. ECA-m and ECA-B estimate
+    // from the window they apply to; ECA-S estimates from a longer one.
+    // Neither is allowed to masquerade as the other, or a benchmark row would
+    // carry the wrong label.
+    if (oParams.eAlgorithm == DSIAlgorithm::EcaS) {
+        CHECK(oParams.uEstimateSamples > oParams.uUpdateSamples,
+              "ECA-S needs an estimation window longer than the update window; "
+              "equal windows are ECA-B");
+    } else {
+        CHECK(oParams.uEstimateSamples == oParams.uUpdateSamples,
+              "an estimation window longer than the update window is ECA-S, "
+              "not ECA-B");
+    }
+    CHECK(oParams.uEstimateSamples <= oParams.uCpiSamples,
+          "the estimation window cannot be longer than the CPI");
+    CHECK(oParams.uCpiSamples % oParams.uUpdateSamples == 0,
+          "the update window must divide the CPI exactly");
+    // Keeps every estimation window on an update-window boundary, which is
+    // what lets the GPU share partial Grams; enforced on both backends so
+    // they place their windows identically.
+    CHECK(oParams.uEstimateSamples % oParams.uUpdateSamples == 0,
+          "the update window must divide the estimation window exactly");
+    CHECK(oParams.uEstimateSamples > oParams.uClutterTaps,
+          "the estimation window must hold more samples than there are taps "
+          "to solve for");
+    CHECK(oParams.dDiagonalLoading >= 0.0, "diagonal loading must not be negative");
+    return true;
+}
+
+bool cglsParamsOk(const DSIParams& oParams)
+{
+    CHECK(oParams.eAlgorithm == DSIAlgorithm::Cgls, "the CGLS canceller handles CGLS only");
+    CHECK(oParams.uCpiSamples > 0, "CPI length must be non-zero");
+    CHECK(oParams.uClutterTaps > 0, "clutter taps must be non-zero");
+    CHECK(oParams.uCglsBatchSamples > 0, "the CGLS batch must be non-zero");
+    CHECK(oParams.uMaxIterations > 0, "CGLS needs at least one iteration");
+    CHECK(oParams.uDopplerTaps == 0,
+          "ECA_DOPPLER_TAPS > 0 is not implemented; the clutter subspace is "
+          "delay-only for now");
+    // CGLS is batched like ECA-B: the weights are estimated from the window
+    // they are applied to, on its own window length.
+    CHECK(oParams.uCpiSamples % oParams.uCglsBatchSamples == 0,
+          "the CGLS batch must divide the CPI exactly");
+    CHECK(oParams.uCglsBatchSamples > oParams.uClutterTaps,
+          "the CGLS batch must hold more samples than there are taps to solve for");
+    return true;
+}
+
+bool ecaCdParamsOk(const DSIParams& oParams)
+{
+    CHECK(oParams.eAlgorithm == DSIAlgorithm::EcaCd, "the ECA-CD canceller handles ECA-CD only");
+    CHECK(oParams.uCpiSamples > 0, "CPI length must be non-zero");
+    CHECK(oParams.uCdBatchSamples > 0, "the ECA-CD batch must be non-zero");
+    CHECK((oParams.uCdBatchSamples & (oParams.uCdBatchSamples - 1)) == 0,
+          "the ECA-CD batch length must be a power of two (radix-2 FFT)");
+    CHECK(oParams.uCpiSamples % oParams.uCdBatchSamples == 0,
+          "the ECA-CD batch must divide the CPI exactly");
+    CHECK(oParams.uCdDopplerTaps <= kMaxCdDopplerTaps,
+          "ECA_CD_DOPPLER_TAPS is over kMaxCdDopplerTaps");
+    // The Doppler columns are resolved across the batches, so there have to
+    // be more batches than columns for the projection to mean anything.
+    CHECK(oParams.uCpiSamples / oParams.uCdBatchSamples > 2 * oParams.uCdDopplerTaps + 1,
+          "too few ECA-CD batches for the Doppler columns; shorten the batch "
+          "or reduce ECA_CD_DOPPLER_TAPS");
+    return true;
+}
+
+std::vector<std::complex<double>> batchTwiddles(uint64_t uBatches)
+{
+    std::vector<std::complex<double>> vcTable(static_cast<size_t>(uBatches));
+    for (uint64_t i = 0; i < uBatches; ++i) {
+        const double dAngle = 2.0 * kPi * static_cast<double>(i) / static_cast<double>(uBatches);
+        vcTable[static_cast<size_t>(i)] = std::complex<double>(std::cos(dAngle), std::sin(dAngle));
+    }
+    return vcTable;
+}
+
+double hostSuppressionDb(const ComplexF* pcSur, const ComplexF* pcOut, uint64_t uSamples)
+{
+    // How much total power the cancellation removed. A headline number, and on
+    // its own a misleading one -- an algorithm scores well here whether it
+    // removed clutter or the targets. Target attenuation has to be measured
+    // from the range-Doppler map.
+    double dInput  = 0.0;
+    double dOutput = 0.0;
+    for (uint64_t n = 0; n < uSamples; ++n) {
+        const double dSr = pcSur[n].real(), dSi = pcSur[n].imag();
+        const double dOr = pcOut[n].real(), dOi = pcOut[n].imag();
+        dInput  += dSr * dSr + dSi * dSi;
+        dOutput += dOr * dOr + dOi * dOi;
+    }
+    return (dInput > 0.0 && dOutput > 0.0) ? 10.0 * std::log10(dInput / dOutput) : 0.0;
 }
 
 } // namespace pbr

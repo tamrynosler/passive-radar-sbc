@@ -104,8 +104,8 @@ struct DSIParams {
     uint64_t     uCpiSamples    = 0;
 
     // K: how many delay taps of clutter to cancel, so how far out in
-    // bistatic range the cancellation extends. At 204800 Hz, 120 taps is
-    // about 176 km.
+    // bistatic range the cancellation extends: c / fs per tap, so 120 taps at
+    // 200 kHz is about 180 km.
     uint64_t     uClutterTaps   = 0;
 
     // N_A in [2]: the stretch of signal the weights are ESTIMATED from.
@@ -127,8 +127,8 @@ struct DSIParams {
     // per-fragment weights are themselves a modulation, which puts false
     // peaks at 1/T_S spacing around any target inside the cancellation
     // notch ([2] eq. 17). They are a property of the algorithm, not a bug:
-    // at 5120 samples (25 ms) they sit every 40 Hz, inside our +-200 Hz
-    // Doppler span. ECA-S exists to move them outside it.
+    // at 25 ms they sit every 40 Hz, inside our +-200 Hz Doppler span. ECA-S
+    // exists to move them outside it.
     uint64_t     uUpdateSamples = 0;
 
     // P: half the number of Doppler bins in the clutter subspace, which
@@ -161,9 +161,10 @@ struct DSIParams {
     // would make it slower than the CPU. It therefore ignores this flag and
     // always works in single precision.
     //
-    // On the CPU the flag exists so the reference implementation can be made
-    // to do the SAME arithmetic as the GPU. Comparing the two then isolates
-    // structural bugs -- a wrong index, a race -- from the precision
+    // On the CPU the flag rounds the heavy arithmetic the way the GPU does:
+    // the Gram sums and the loading for ECA (its small solve stays in
+    // double), every step for CGLS and ECA-CD. Comparing the two then
+    // isolates structural bugs -- a wrong index, a race -- from the precision
     // difference, which would otherwise mask them. Measured cost of single
     // precision against the MATLAB reference: ~5e-3 relative L2, with the
     // suppression figure unchanged to four decimals
@@ -172,7 +173,8 @@ struct DSIParams {
 
     // ECA-CD: samples per batch (a power of two that divides the CPI), and
     // Doppler columns either side of zero in the per-carrier subspace, so
-    // the projection removes 2P+1 columns per carrier. At most 3.
+    // the projection removes 2P+1 columns per carrier. At most
+    // kMaxCdDopplerTaps.
     uint64_t     uCdBatchSamples = 0;
     uint64_t     uCdDopplerTaps  = 0;
 
@@ -277,13 +279,16 @@ bool dsiBackendFromString(const char* pName, DSIBackend& eBackend);
 const char* dsiAlgorithmName(DSIAlgorithm eAlgorithm);
 const char* dsiBackendName(DSIBackend eBackend);
 
+// The per-carrier solve in ECA-CD is sized for 2P+1 <= 7 at compile time.
+const uint64_t kMaxCdDopplerTaps = 3;
+
 // Fill oParams from a loaded config.
 //
-// This is where the window rules live: ECA-m forces the estimation and
-// update windows to the whole CPI and switches on absolute diagonal
-// loading, and the other algorithms take theirs from the file. Returns
-// false, having logged the reason, if the configured windows do not divide
-// the CPI exactly or are otherwise inconsistent.
+// ECA-m forces the estimation and update windows to the whole CPI and
+// switches on absolute diagonal loading; the other algorithms take theirs
+// from the file. The window rules themselves are checked by the config
+// loader and again by each canceller's init(). Returns false, having logged
+// the reason, on an unknown algorithm or backend name.
 bool dsiParamsFromConfig(const PbrConfig& oConfig, DSIParams& oParams);
 
 // Where the estimation window for one update window starts.

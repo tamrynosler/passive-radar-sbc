@@ -18,10 +18,6 @@
 
 namespace pbr {
 
-namespace {
-const double kPi = 3.14159265358979323846;
-}
-
 bool BatchesArdCpu::init(uint64_t uCpiSamples, uint64_t uStride,
                          uint64_t uRangeBins)
 {
