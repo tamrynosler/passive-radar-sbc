@@ -2,7 +2,10 @@
 % The MATLAB reference chain, fed live by FERS over VITA 49.2 UDP instead of
 % from recorded files: ECA-m cancellation, the decimation CAF and 2D CA-CFAR,
 % the same processing as fm_passive_radar_process.m, one CPI at a time, with
-% the range-Doppler map drawn as it goes.
+% the range-Doppler map drawn as it goes. The CFAR detections are grouped
+% into plots by group_detections.m, the same rule as the C++ chain's
+% DetectionGrouper: every plot is marked on the map, and the strongest is
+% tracked.
 %
 %   fm_passive_radar_stream                      % config/fers.conf
 %   fm_passive_radar_stream('config/fers.conf')
@@ -10,8 +13,8 @@
 % Every parameter comes from the chain config, so MATLAB and the C++ chain
 % run with the same settings: sample rate, receiver names, UDP port, full
 % scale, CPI and hop, range bins, clutter taps, Doppler decimation and span,
-% minimum CPI coverage, CFAR. Needs parse_vita49_packet.m and
-% read_prb_conf.m (both in matlab/) and the Instrument Control Toolbox
+% minimum CPI coverage, CFAR. Needs parse_vita49_packet.m, read_prb_conf.m
+% and group_detections.m (all in matlab/) and the Instrument Control Toolbox
 % (udpport). Run from the repository root.
 %
 % Workflow:
@@ -61,8 +64,6 @@ function fm_passive_radar_stream(confPath)
     rngAxis = (0:nRange-1) * c/fs / 1e3;
     keep    = abs(dopAxis) <= fdMax;
     dopKeep = dopAxis(keep);
-    dRange  = rngAxis(2) - rngAxis(1);
-    dDop    = dopKeep(2) - dopKeep(1);
 
     % ---- UDP listener --------------------------------------------------------
     u = udpport("datagram", "LocalPort", cfg.UDP_PORT, "EnablePortSharing", true);
@@ -185,17 +186,25 @@ function fm_passive_radar_stream(confPath)
                         magDb = 20*log10(mag + eps);
                         magDb = magDb - max(magDb(:));
 
-                        [rangeF, dopF] = cfar_peak(mag, pfa, guard, train);
+                        detect = cfar_detect(mag.^2, pfa, guard, train);
+                        plots  = group_detections(mag.^2, detect, rngAxis, dopKeep);
 
                         tNow = (cpiStart-1)/fs + N/fs/2 - t0;
                         nProcessed = nProcessed + 1;
-                        tAxis(nProcessed)    = tNow;                          %#ok<AGROW>
-                        tgtRange(nProcessed) = rngAxis(1) + (rangeF-1)*dRange; %#ok<AGROW>
-                        tgtDop(nProcessed)   = dopKeep(1) + (dopF-1)*dDop;    %#ok<AGROW>
+                        tAxis(nProcessed) = tNow;                             %#ok<AGROW>
+                        if isempty(plots)
+                            tgtRange(nProcessed) = NaN;                       %#ok<AGROW>
+                            tgtDop(nProcessed)   = NaN;                       %#ok<AGROW>
+                        else
+                            [~, iBest] = max([plots.peakPowerDb]);
+                            tgtRange(nProcessed) = plots(iBest).rangeKm;      %#ok<AGROW>
+                            tgtDop(nProcessed)   = plots(iBest).dopplerHz;    %#ok<AGROW>
+                        end
 
                         img.CData = magDb;
-                        set(mk, 'XData', tgtDop(nProcessed), 'YData', tgtRange(nProcessed));
-                        ttl.String = sprintf('Range-Doppler  t = %.2f s  (CPI %d)', tNow, nProcessed);
+                        set(mk, 'XData', [plots.dopplerHz], 'YData', [plots.rangeKm]);
+                        ttl.String = sprintf('Range-Doppler  t = %.2f s  (CPI %d)  %d plots from %d detections', ...
+                                             tNow, nProcessed, numel(plots), nnz(detect));
                         drawnow limitrate;
                     end
                     cpiStart = cpiStart + hopN;
@@ -212,17 +221,17 @@ function fm_passive_radar_stream(confPath)
         end
     end
 
-    % ---- the strongest detection's track ------------------------------------
+    % ---- the strongest plot's track ------------------------------------------
     if nProcessed > 0
         figure('Color', 'w');
         subplot(2,1,1);
         plot(tAxis, tgtRange, 'o-', 'LineWidth', 1.2); grid on;
         xlabel('Time (s)'); ylabel('Bistatic range (km)');
-        title('Strongest detection: bistatic range against time');
+        title('Strongest plot: bistatic range against time');
         subplot(2,1,2);
         plot(tAxis, tgtDop, 'o-', 'LineWidth', 1.2); grid on;
         xlabel('Time (s)'); ylabel('Bistatic Doppler (Hz)');
-        title('Strongest detection: Doppler against time');
+        title('Strongest plot: Doppler against time');
     end
 end
 
@@ -300,10 +309,9 @@ function rd = process_cpi(sref, ssur, N, nRange, nTaps, dec, nDop)
     end
 end
 
-function [rangeF, dopF] = cfar_peak(mag, pfa, guard, train)
-    % 2D CA-CFAR; the fractional [row, col] of the strongest detection by
-    % parabolic interpolation, or NaN if there is none.
-    P  = mag.^2;
+function detect = cfar_detect(P, pfa, guard, train)
+    % 2D CA-CFAR on power P (range down the rows, Doppler across): true
+    % where a cell exceeds alpha times the mean of its training cells.
     gr = guard(1); gd = guard(2);
     tr = train(1); td = train(2);
     kernel = ones(2*(gr+tr)+1, 2*(gd+td)+1);
@@ -312,29 +320,4 @@ function [rangeF, dopF] = cfar_peak(mag, pfa, guard, train)
     alpha  = nTrain*(pfa^(-1/nTrain) - 1);
     noise  = conv2(P, kernel, 'same') / nTrain;
     detect = P > alpha*noise;
-
-    if ~any(detect(:)), rangeF = NaN; dopF = NaN; return; end
-    Pd = P; Pd(~detect) = -inf;
-    [~, ix] = max(Pd(:));
-    [r, d]  = ind2sub(size(P), ix);
-
-    L      = 20*log10(mag + eps);          % interpolate in dB
-    rangeF = r + parab(L, r, d, 1);
-    dopF   = d + parab(L, r, d, 2);
-end
-
-function delta = parab(L, r, d, dim)
-    % Sub-bin offset of a peak from a parabola through three points,
-    % clamped to half a bin.
-    delta = 0;
-    if dim == 1 && r > 1 && r < size(L,1)
-        a = L(r-1,d); b = L(r,d); cc = L(r+1,d);
-    elseif dim == 2 && d > 1 && d < size(L,2)
-        a = L(r,d-1); b = L(r,d); cc = L(r,d+1);
-    else
-        return;
-    end
-    den = a - 2*b + cc;
-    if den ~= 0, delta = 0.5*(a-cc)/den; end
-    delta = max(min(delta, 0.5), -0.5);
 end

@@ -38,6 +38,13 @@ namespace pbr {
 //
 // Detection records are fixed 48-byte: two uint64 bin indices then four
 // float64 (range km, Doppler Hz, power dB, SNR dB).
+//
+// What the list holds depends on the writer. MATLAB's golden file holds the
+// raw CFAR detections, one per cell, since that is what ard_verify checks.
+// pbr_run's frames (written and streamed) hold PLOTS since 2026-10-06: one
+// record per group of touching detections (DetectionGrouper.hpp), its bins
+// the group's peak cell, its km and Hz the power-weighted centroid, its power
+// and SNR the peak cell's. The raw detections go to DIR/detections.csv.
 
 // Values of uStatus. A blank frame (all-zero map, no detections) with a
 // non-zero status is how the chain says "I received a CPI but could not

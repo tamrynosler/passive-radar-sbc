@@ -67,6 +67,7 @@
 #include "pbr/Config.hpp"
 #include "pbr/CpiFile.hpp"
 #include "pbr/DSICanceller.hpp"
+#include "pbr/DetectionGrouper.hpp"
 #include "pbr/HttpServer.hpp"
 #include "pbr/Spectrum.hpp"
 #include "pbr/UdpReceiver.hpp"
@@ -265,8 +266,14 @@ struct Chain {
     std::vector<ComplexF>  vcSur;
     std::vector<ComplexF>  vcCleaned;
     std::vector<ComplexF>  vcMap;
-    std::vector<Detection> vDet;
+    std::vector<Detection> vDet;        // the CFAR's raw detections
     std::vector<uint8_t>   vFrame;      // one serialised ARD frame
+
+    // The detections grouped into one plot per target; the frame carries
+    // the plots, as Detection records, rather than the raw detections.
+    DetectionGrouper       oGrouper;
+    std::vector<Plot>      vPlots;
+    std::vector<Detection> vPlotRecords;
 
     // The two channels' spectra before any processing, streamed with each
     // frame for the viewer's before-processing spectrogram.
@@ -313,6 +320,10 @@ bool buildChain(const PbrConfig& oCfg, Chain& oChain, double& dMsOut)
                             ComplexF(0.0f, 0.0f));
     oChain.vcMap.assign(static_cast<size_t>(uCells), ComplexF(0.0f, 0.0f));
     oChain.vDet.assign(static_cast<size_t>(kMaxArdDetections), Detection());
+    if (!oChain.oGrouper.init(oChain.oArdParams.uRangeBins, oChain.oArdParams.uDopplerBins))
+        return false;
+    oChain.vPlots.assign(static_cast<size_t>(kMaxArdDetections), Plot());
+    oChain.vPlotRecords.assign(static_cast<size_t>(kMaxArdDetections), Detection());
 
     ArdFileHeader oFrameSizing;
     oFrameSizing.uRangeBins   = oChain.oArdParams.uRangeBins;
@@ -486,6 +497,7 @@ struct Outputs {
     bool        bStreamFrames = false;   // ARD frames over UDP
     std::string sArdDir;
     std::FILE*  pDetCsv    = nullptr;
+    std::FILE*  pPlotCsv   = nullptr;
     std::FILE*  pTelCsv    = nullptr;
     std::FILE*  pChangeLog = nullptr;
     ArdStreamSender oSender;
@@ -565,13 +577,19 @@ bool openOutputFiles(const Options& oOptions, Outputs& oOut)
     std::fprintf(oOut.pDetCsv, "cpi,signalTimeS,rangeBin,dopplerBin,"
                                "rangeKm,dopplerHz,powerDb,snrDb\n");
 
+    oOut.pPlotCsv = openForWriting(oOptions.sOutDir + "/plots.csv");
+    if (oOut.pPlotCsv == nullptr)
+        return false;
+    std::fprintf(oOut.pPlotCsv, "cpi,signalTimeS,rangeKm,dopplerHz,peakRangeBin,"
+                                "peakDopplerBin,peakPowerDb,peakSnrDb,cells\n");
+
     oOut.pTelCsv = openForWriting(oOptions.sOutDir + "/telemetry.csv");
     if (oOut.pTelCsv == nullptr)
         return false;
     std::fprintf(oOut.pTelCsv, "cpi,cpiStartIndex,signalTimeS,wallTimeS,lagS,"
                                "dsiMs,ardMs,totalMs,suppressionDb,peakDb,"
                                "detections,borderDetections,skipped,datagrams,"
-                               "waitMs,printMs,detCsvMs,ardWriteMs,status\n");
+                               "waitMs,printMs,detCsvMs,ardWriteMs,status,plots\n");
 
     if (oOptions.bSaveConfig &&
         !copyFile(oOptions.sConfigPath, oOptions.sOutDir + "/config.conf"))
@@ -590,9 +608,10 @@ bool openOutputFiles(const Options& oOptions, Outputs& oOut)
 void closeOutputFiles(Outputs& oOut)
 {
     if (oOut.pDetCsv != nullptr)    std::fclose(oOut.pDetCsv);
+    if (oOut.pPlotCsv != nullptr)   std::fclose(oOut.pPlotCsv);
     if (oOut.pTelCsv != nullptr)    std::fclose(oOut.pTelCsv);
     if (oOut.pChangeLog != nullptr) std::fclose(oOut.pChangeLog);
-    oOut.pDetCsv = oOut.pTelCsv = oOut.pChangeLog = nullptr;
+    oOut.pDetCsv = oOut.pPlotCsv = oOut.pTelCsv = oOut.pChangeLog = nullptr;
 }
 
 // Append to DIR/changes.log (and echo to the console).
@@ -764,6 +783,7 @@ struct CpiResult {
     const char* pReason   = "";
     DSIStats    oDsiStats;
     ArdStats    oArdStats;
+    uint64_t    uPlots    = 0;
     double      dDsiMs    = 0.0;
     double      dArdMs    = 0.0;
     double      dWaitMs   = 0.0;
@@ -817,6 +837,17 @@ void processCpi(Chain& oChain, ComplexF* pMap, CpiResult& oResult)
             std::fill(oChain.vcMap.begin(), oChain.vcMap.end(), ComplexF(0.0f, 0.0f));
         oResult.oDsiStats = DSIStats();
         oResult.oArdStats = ArdStats();
+    } else {
+        // One plot per group of touching detections. Microseconds, and
+        // deliberately outside ardMs, which times the processor alone. No
+        // plot can be dropped: vPlots holds one per detection.
+        uint64_t uDropped = 0;
+        oResult.uPlots = oChain.oGrouper.group(oChain.vDet.data(), oResult.oArdStats.uDetections,
+                                               oChain.vPlots.data(), oChain.vPlots.size(),
+                                               uDropped);
+        for (uint64_t u = 0; u < oResult.uPlots; ++u)
+            oChain.vPlotRecords[static_cast<size_t>(u)] =
+                plotAsDetection(oChain.vPlots[static_cast<size_t>(u)]);
     }
 
     oResult.dDsiMs = msBetween(tStart, tCancelled);
@@ -875,11 +906,12 @@ void printCpiLine(uint64_t uCpiIndex, const CpiResult& oResult)
 {
     if (oResult.uStatus == kArdStatusOk) {
         std::printf("CPI %4llu  t=%7.3f s  dsi %6.1f  ard %5.1f  "
-                    "total %6.1f ms  %5.2f dB  %3llu det  lag %6.3f s\n",
+                    "total %6.1f ms  %5.2f dB  %3llu det  %3llu plots  lag %6.3f s\n",
                     (unsigned long long)uCpiIndex, oResult.dSignalS,
                     oResult.dDsiMs, oResult.dArdMs, oResult.dDsiMs + oResult.dArdMs,
                     oResult.oDsiStats.dSuppressionDb,
-                    (unsigned long long)oResult.oArdStats.uDetections, oResult.dLagS);
+                    (unsigned long long)oResult.oArdStats.uDetections,
+                    (unsigned long long)oResult.uPlots, oResult.dLagS);
     } else {
         std::printf("CPI %4llu  t=%7.3f s  %s: %s -- blank frame  lag %6.3f s\n",
                     (unsigned long long)uCpiIndex, oResult.dSignalS,
@@ -889,18 +921,32 @@ void printCpiLine(uint64_t uCpiIndex, const CpiResult& oResult)
     std::fflush(stdout);
 }
 
-void writeDetections(std::FILE* pDetCsv, uint64_t uCpiIndex, const Chain& oChain,
+// The raw CFAR detections, for checking the detector, and the plots made
+// from them.
+void writeDetections(const Outputs& oOut, uint64_t uCpiIndex, const Chain& oChain,
                      const CpiResult& oResult)
 {
-    if (pDetCsv == nullptr)
-        return;
-    for (uint64_t u = 0; u < oResult.oArdStats.uDetections; ++u) {
-        const Detection& oDet = oChain.vDet[static_cast<size_t>(u)];
-        std::fprintf(pDetCsv, "%llu,%.6f,%llu,%llu,%.4f,%.4f,%.4f,%.4f\n",
-                     (unsigned long long)uCpiIndex, oResult.dSignalS,
-                     (unsigned long long)oDet.uRangeBin,
-                     (unsigned long long)oDet.uDopplerBin,
-                     oDet.dRangeKm, oDet.dDopplerHz, oDet.dPowerDb, oDet.dSnrDb);
+    if (oOut.pDetCsv != nullptr) {
+        for (uint64_t u = 0; u < oResult.oArdStats.uDetections; ++u) {
+            const Detection& oDet = oChain.vDet[static_cast<size_t>(u)];
+            std::fprintf(oOut.pDetCsv, "%llu,%.6f,%llu,%llu,%.4f,%.4f,%.4f,%.4f\n",
+                         (unsigned long long)uCpiIndex, oResult.dSignalS,
+                         (unsigned long long)oDet.uRangeBin,
+                         (unsigned long long)oDet.uDopplerBin,
+                         oDet.dRangeKm, oDet.dDopplerHz, oDet.dPowerDb, oDet.dSnrDb);
+        }
+    }
+    if (oOut.pPlotCsv != nullptr) {
+        for (uint64_t u = 0; u < oResult.uPlots; ++u) {
+            const Plot& oPlot = oChain.vPlots[static_cast<size_t>(u)];
+            std::fprintf(oOut.pPlotCsv, "%llu,%.6f,%.4f,%.4f,%llu,%llu,%.4f,%.4f,%llu\n",
+                         (unsigned long long)uCpiIndex, oResult.dSignalS,
+                         oPlot.dRangeKm, oPlot.dDopplerHz,
+                         (unsigned long long)oPlot.uPeakRangeBin,
+                         (unsigned long long)oPlot.uPeakDopplerBin,
+                         oPlot.dPeakPowerDb, oPlot.dPeakSnrDb,
+                         (unsigned long long)oPlot.uCells);
+        }
     }
 }
 
@@ -932,7 +978,7 @@ void streamFrame(Run& oRun, size_t uFrameBytes, const CpiResult& oResult)
         "\"reason\":\"%s\",\"signalTimeS\":%.3f,\"lagS\":%.3f,"
         "\"dsiMs\":%.1f,\"ardMs\":%.1f,\"totalMs\":%.1f,"
         "\"suppressionDb\":%.2f,\"peakDb\":%.2f,"
-        "\"detections\":%llu,\"borderDetections\":%llu,\"skipped\":%llu,"
+        "\"detections\":%llu,\"plots\":%llu,\"borderDetections\":%llu,\"skipped\":%llu,"
         "\"controlPort\":%u,\"liveChanges\":%llu,"
         "\"config\":{\"DSI_ALGORITHM\":\"%s\",\"DSI_BACKEND\":\"%s\","
         "\"ARD_ALGORITHM\":\"%s\",\"CFAR_PFA\":\"%g\",\"CPI_LENGTH_s\":\"%g\","
@@ -942,6 +988,7 @@ void streamFrame(Run& oRun, size_t uFrameBytes, const CpiResult& oResult)
         oResult.dDsiMs, oResult.dArdMs, oResult.dDsiMs + oResult.dArdMs,
         oResult.oDsiStats.dSuppressionDb, oResult.oArdStats.dPeakDb,
         (unsigned long long)oResult.oArdStats.uDetections,
+        (unsigned long long)oResult.uPlots,
         (unsigned long long)oResult.oArdStats.uDetectionsInBorder,
         (unsigned long long)oRun.pIngest->stats().uCpisOvertaken,
         static_cast<unsigned>(oCfg.uControlPort),
@@ -953,7 +1000,7 @@ void streamFrame(Run& oRun, size_t uFrameBytes, const CpiResult& oResult)
         oSender.sendStatus(achStatus, uSequence);
 }
 
-// Serialise the map once, then write it and/or stream it.
+// Serialise the map and the plots once, then write it and/or stream it.
 bool publishFrame(Run& oRun, const CpiResult& oResult)
 {
     const Chain& oChain = oRun.oChain;
@@ -963,11 +1010,11 @@ bool publishFrame(Run& oRun, const CpiResult& oResult)
     oHeader.uSampleRateHz      = oChain.oArdParams.uSampleRateHz;
     oHeader.uDopplerDecimation = oChain.oArdParams.uDopplerDecimation;
     oHeader.uCpiStartIndex     = oResult.uCpiStart;
-    oHeader.uDetections        = oResult.oArdStats.uDetections;
+    oHeader.uDetections        = oResult.uPlots;
     oHeader.uStatus            = oResult.uStatus;
 
     size_t uFrameBytes = 0;
-    if (!serialiseArdFrame(oHeader, oChain.vcMap.data(), oChain.vDet.data(),
+    if (!serialiseArdFrame(oHeader, oChain.vcMap.data(), oChain.vPlotRecords.data(),
                            oRun.oChain.vFrame.data(), oChain.vFrame.size(), uFrameBytes))
         return false;
 
@@ -990,7 +1037,7 @@ void writeTelemetry(const Run& oRun, const CpiResult& oResult,
         return;
     std::fprintf(oRun.oOut.pTelCsv,
         "%llu,%llu,%.6f,%.6f,%.6f,%.4f,%.4f,%.4f,%.4f,%.4f,"
-        "%llu,%llu,%llu,%llu,%.4f,%.4f,%.4f,%.4f,%llu\n",
+        "%llu,%llu,%llu,%llu,%.4f,%.4f,%.4f,%.4f,%llu,%llu\n",
         (unsigned long long)oRun.uCpiIndex,
         (unsigned long long)oResult.uCpiStart,
         oResult.dSignalS, oResult.dWallS, oResult.dLagS,
@@ -1001,7 +1048,7 @@ void writeTelemetry(const Run& oRun, const CpiResult& oResult,
         (unsigned long long)oRun.pIngest->stats().uCpisOvertaken,
         (unsigned long long)oRun.uDatagrams,
         oResult.dWaitMs, dPrintMs, dDetCsvMs, dArdWriteMs,
-        (unsigned long long)oResult.uStatus);
+        (unsigned long long)oResult.uStatus, (unsigned long long)oResult.uPlots);
 }
 
 // The first CPI's input, once, if --dump-cpi asked for it.
@@ -1055,7 +1102,7 @@ bool handleCpi(Run& oRun, uint64_t uCpiStart)
     const TimePoint tPrintStart = std::chrono::steady_clock::now();
     printCpiLine(oRun.uCpiIndex, oResult);
     const TimePoint tPrinted = std::chrono::steady_clock::now();
-    writeDetections(oRun.oOut.pDetCsv, oRun.uCpiIndex, oRun.oChain, oResult);
+    writeDetections(oRun.oOut, oRun.uCpiIndex, oRun.oChain, oResult);
     const TimePoint tDetectionsWritten = std::chrono::steady_clock::now();
     if (bWantMap && !publishFrame(oRun, oResult))
         return false;

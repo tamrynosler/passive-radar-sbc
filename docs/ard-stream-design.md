@@ -89,7 +89,12 @@ nobody assumes network order from the VITA side). Two datagram types, both
 | 28 | 4 | reserved, 0 |
 | 32 | ≤1368 | payload: bytes `[index·1368, …)` of the `PBRARD01` frame |
 
-A 120 × 1600 frame with a few detections is 1,536,064 + 48·N bytes, so
+Since 2026-10-06 the frame's detection list holds **plots**, one per group
+of touching CFAR detections, at the power-weighted centroid
+(`DetectionGrouper.hpp`, `ArdFile.hpp`); the raw detections go to
+`detections.csv`, the plots to `plots.csv`.
+
+A 120 × 1600 frame with N plots is 1,536,064 + 48·N bytes, so
 **1123 chunks**, the last one short. 1368 = 1400 − 32, the same datagram
 size as the sample stream: no IP fragmentation on a 1500 MTU, so one lost
 Ethernet frame costs one chunk and never a whole datagram of fragments.
@@ -113,7 +118,7 @@ strip shows, so the page needs no new field names:
 {"runName":"live_20260925_1530","cpi":36,"status":0,"reason":"",
  "signalTimeS":36.864,"lagS":0.012,
  "dsiMs":89.0,"ardMs":31.2,"totalMs":120.2,"suppressionDb":19.8,
- "peakDb":-3.1,"detections":11,"borderDetections":2,"skipped":0,
+ "peakDb":-3.1,"detections":11,"plots":2,"borderDetections":2,"skipped":0,
  "config":{"DSI_ALGORITHM":"ECA-CD","DSI_BACKEND":"GPU",
            "ARD_ALGORITHM":"Direct","CFAR_PFA":"1e-05","CPI_LENGTH_s":"1.024"}}
 ```
