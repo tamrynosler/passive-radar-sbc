@@ -9,32 +9,33 @@ function plot_cgls_sweep(name, cpi, fdMax)
 %   plot_cgls_sweep('sweep60', 2)       % CPI 2
 %   plot_cgls_sweep('sweep60', 0, 400)  % +-400 Hz
 %
-% In the MATLAB desktop with results/CGLS_tuning as the current folder (or
-% on the path). Finds the runs as <name>_b<batch>_<stamp> directories beside
-% this file, ordered from the longest batch to the shortest. Where one batch
-% length was run more than once, the newest run is used.
+% With scripts/cgls_tuning on the path. Finds the runs as
+% <name>_b<batch>_<stamp> directories in results/CGLS_tuning/, ordered from
+% the longest batch to the shortest. Where one batch length was run more
+% than once, the newest run is used.
 %
-% Saves sweep_<name>_cpiN.png beside this file.
+% Saves sweep_<name>_cpiN.png in results/CGLS_tuning/.
 
 if nargin < 2 || isempty(cpi),   cpi   = 0;   end
 if nargin < 3 || isempty(fdMax), fdMax = 200; end
 
 thisDir  = fileparts(mfilename('fullpath'));
 repoRoot = fullfile(thisDir, '..', '..');
+runRoot  = fullfile(repoRoot, 'results', 'CGLS_tuning');
 addpath(fullfile(repoRoot, 'matlab'));
 truth = readtable(fullfile(repoRoot, 'data', 'S0_clean', 'truth.csv'));
 t = truth(truth.cpi == cpi, :);
 c = 299792458;
 
 % ---- find the runs ---------------------------------------------------------
-d = dir(fullfile(thisDir, [name '_b*']));
+d = dir(fullfile(runRoot, [name '_b*']));
 d = d([d.isdir]);
-assert(~isempty(d), 'no directories named %s_b*  in %s', name, thisDir);
+assert(~isempty(d), 'no directories named %s_b*  in %s', name, runRoot);
 runs = struct('dir', {}, 'batch', {}, 'stamp', {});
 for i = 1:numel(d)
     tok = regexp(d(i).name, ['^' regexptranslate('escape', name) '_b([0-9.]+)_(\d{8}_\d{6})$'], 'tokens', 'once');
     if isempty(tok), continue; end
-    runs(end+1) = struct('dir', fullfile(thisDir, d(i).name), ...
+    runs(end+1) = struct('dir', fullfile(runRoot, d(i).name), ...
                          'batch', str2double(tok{1}), 'stamp', tok{2}); %#ok<AGROW>
 end
 % newest per batch length, longest batch first
@@ -77,7 +78,7 @@ for i = 1:n
 end
 sgtitle(sprintf('%s: CPI %d, %d iterations, prime %d, %s  (o CFAR detections, x truth)', ...
                 strrep(name, '_', '\_'), cpi, cfg.CGLS_ITERATIONS, cfg.CGLS_PRIME, cfg.DSI_MATH_PRECISION));
-out = fullfile(thisDir, sprintf('sweep_%s_cpi%d.png', name, cpi));
+out = fullfile(runRoot, sprintf('sweep_%s_cpi%d.png', name, cpi));
 saveas(gcf, out);
 fprintf('  maps:    %s\n', out);
 
@@ -93,7 +94,7 @@ subplot(1, 3, 3);
 semilogx(summary(:,1), summary(:,4), 'o-', 'LineWidth', 1.2);
 grid on; xlabel('batch length (s)'); ylabel('DSI ms per CPI (laptop)'); title('Cost');
 sgtitle(sprintf('%s: CPI %d, %d iterations', strrep(name, '_', '\_'), cpi, summary(1,5)));
-out = fullfile(thisDir, sprintf('sweep_%s_cpi%d_summary.png', name, cpi));
+out = fullfile(runRoot, sprintf('sweep_%s_cpi%d_summary.png', name, cpi));
 saveas(gcf, out);
 fprintf('  summary: %s\n', out);
 

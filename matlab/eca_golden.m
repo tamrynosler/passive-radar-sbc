@@ -1,7 +1,7 @@
 %% eca_golden.m
 % Generate golden DSI-cancellation outputs for validating the C++ chain.
 %
-% Reads one CPI frozen by `ingest_replay --dump-cpi` (so MATLAB and C++ start
+% Reads one CPI frozen by `pbr_run --dump-cpi` (so MATLAB and C++ start
 % from BYTE-IDENTICAL samples -- this sidesteps the unresolved .h5 amplitude
 % scaling entirely), runs the cancellation in double precision, and writes the
 % cleaned surveillance signal for `dsi_verify` to compare against at a
@@ -106,7 +106,7 @@ function [sref, ssur, n, fs, startIdx] = read_cpi(path)
     % Layout: see include/pbr/CpiFile.hpp. 32-byte header, then the reference
     % channel, then the surveillance channel, each as interleaved float32 I,Q.
     fid = fopen(path, 'rb', 'ieee-le');
-    assert(fid >= 0, 'cannot open %s -- run ingest_replay --dump-cpi first', path);
+    assert(fid >= 0, 'cannot open %s -- run pbr_run --dump-cpi first', path);
     magic = fread(fid, 8, '*char')';
     assert(strcmp(magic, 'PBRCPI01'), '%s is not a CPI file', path);
     n        = fread(fid, 1, 'uint64');

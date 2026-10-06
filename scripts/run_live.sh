@@ -66,20 +66,8 @@ cp "${CONFIG}" "${OUTDIR}/prb.conf"
   echo "git         $(git -C . rev-parse --short HEAD 2>/dev/null || echo unknown)"
 } > "${OUTDIR}/run.txt"
 
-echo "Setting nvpmodel mode 0 (max)"
-sudo nvpmodel -m 0 || echo "  (nvpmodel failed; continuing)"
-echo "Pinning clocks"
-sudo jetson_clocks || echo "  (jetson_clocks failed; continuing UNPINNED -- not citable)"
-echo 100 | sudo tee /sys/devices/pwm-fan/target_pwm >/dev/null || true
-sudo jetson_clocks --show > "${OUTDIR}/clocks.txt" 2>&1 || true
-
-sudo tegrastats --interval 1000 --logfile "${OUTDIR}/tegrastats.log" &
-TEGRA_PID=$!
-cleanup() {
-  sudo kill "${TEGRA_PID}" >/dev/null 2>&1 || true
-  echo 0 | sudo tee /sys/devices/pwm-fan/target_pwm >/dev/null || true
-}
-trap cleanup EXIT
+source scripts/pin_clocks.sh
+pinClocks "${OUTDIR}"
 
 echo
 echo "Listening now -- start fers-cli on the other machine, or uhd_to_vita49."

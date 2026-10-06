@@ -6,7 +6,7 @@ protocol for each set is named so it can be rerun.
 
 ## 2026-10-02 (afternoon): CGLS tuning on the laptop CPU, and two findings
 
-**Protocol**: `results/CGLS_tuning/run_cgls.sh`, the whole chain on
+**Protocol**: `scripts/cgls_tuning/run_cgls.sh`, the whole chain on
 `data/S0_clean/capture.pbrcap` (3 CPIs) on the Mac CPU in FP64, cold
 (`CGLS_PRIME = 0`), K = 120; one directory and one `index.csv` row per
 test. Laptop times give the scaling only; Nano figures are above. Driven

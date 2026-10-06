@@ -10,7 +10,7 @@
 #
 # NAME is your label for the test (e.g. it60_fp64). Output:
 #
-#   results/CGLS_tuning/NAME_<stamp>/
+#   results/CGLS_tuning/NAME_<stamp>/   (gitignored)
 #     config.conf      the exact config the chain ran with
 #     run.log          pbr_run's output
 #     telemetry.csv    per CPI: dsiMs, ardMs, totalMs, suppressionDb, detections

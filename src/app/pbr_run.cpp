@@ -6,7 +6,9 @@
 //
 // Usage:
 //   ./pbr_run --live --group 239.192.0.1 --seconds 30 --out /data/results/x
-//   ./pbr_run --file data/fers_capture.pbrcap --config config/fers.conf
+//   ./pbr_run --file data/S0_clean/capture.pbrcap --config config/fers.conf
+//   ./pbr_run --live --config config/fers.conf --capture data/S1/capture.pbrcap \
+//             --dump-cpi data/S1/cpi_0000.bin
 //
 // Both sources run the same loop, so a recorded run exercises the live path.
 //
@@ -63,6 +65,7 @@
 #include "pbr/CaptureFile.hpp"
 #include "pbr/ChannelIngest.hpp"
 #include "pbr/Config.hpp"
+#include "pbr/CpiFile.hpp"
 #include "pbr/DSICanceller.hpp"
 #include "pbr/HttpServer.hpp"
 #include "pbr/Spectrum.hpp"
@@ -116,6 +119,8 @@ struct Options {
     std::string sConfigPath = kDefaultConfigPath;
     std::string sOutDir;            // empty means console only
     std::string sMulticastGroup;    // empty means plain unicast on UDP_PORT
+    std::string sSaveCapturePath;   // empty means no capture is recorded
+    std::string sDumpCpiPath;       // empty means no CPI is written
     double      dSeconds    = 0.0;  // 0 means "until the source ends"
     bool        bLive       = false;
 };
@@ -131,6 +136,11 @@ void printUsage(const char* pProgram)
     std::printf("  --out DIR        write telemetry.csv, detections.csv and changes.log\n");
     std::printf("                   here, and ard/ frames if the config has ARD_WRITE_FILES = 1\n");
     std::printf("  --config FILE    configuration (default %s)\n", kDefaultConfigPath);
+    std::printf("  --capture FILE   also record every datagram to FILE (.pbrcap), for\n");
+    std::printf("                   replaying the same stream later with --file\n");
+    std::printf("  --dump-cpi FILE  also write the first CPI's input, both channels, to\n");
+    std::printf("                   FILE: the fixed input of dsi_verify, dsi_bench and\n");
+    std::printf("                   matlab/eca_golden.m\n");
     std::printf("\n");
     std::printf("Everything else -- algorithm, backend, full scale, CFAR and ECA\n");
     std::printf("settings, outputs -- comes from the config file, so a run is\n");
@@ -150,6 +160,8 @@ bool parseArgs(int argc, char* argv[], Options& o)
         else if (sArg == "--out" && bV)         o.sOutDir = argv[++i];
         else if (sArg == "--seconds" && bV)     o.dSeconds = std::atof(argv[++i]);
         else if (sArg == "--group" && bV)       o.sMulticastGroup = argv[++i];
+        else if (sArg == "--capture" && bV)     o.sSaveCapturePath = argv[++i];
+        else if (sArg == "--dump-cpi" && bV)    o.sDumpCpiPath = argv[++i];
         else {
             std::fprintf(stderr, "unrecognised or incomplete argument: %s\n", sArg.c_str());
             return false;
@@ -667,6 +679,14 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    CaptureWriter oCapture;
+    if (!oOptions.sSaveCapturePath.empty()) {
+        if (!oCapture.open(oOptions.sSaveCapturePath.c_str()))
+            return 1;
+        std::printf("recording every datagram to %s\n", oOptions.sSaveCapturePath.c_str());
+    }
+    bool bCpiDumped = false;
+
     // ---- output files ------------------------------------------------------
     std::FILE* pDetCsv = nullptr;
     if (!sDetectionsPath.empty()) {
@@ -817,6 +837,11 @@ int main(int argc, char* argv[])
 
         ++uDatagrams;
 
+        if (oCapture.isOpen() && !oCapture.write(vDatagram.data(), uLength)) {
+            bProcessError = true;
+            break;
+        }
+
         Vita49Packet oPacket;
         if (!parseVita49Packet(vDatagram.data(), uLength, oPacket)) {
             ++uParseFailures;
@@ -890,6 +915,21 @@ int main(int argc, char* argv[])
 
             if (eCpi == CpiStatus::NotYet)  break;
             if (eCpi == CpiStatus::Skipped) continue;
+
+            if (!oOptions.sDumpCpiPath.empty() && !bCpiDumped) {
+                CpiFileHeader oHeader;
+                oHeader.uSampleCount  = oCfg.uCpiSamples;
+                oHeader.uSampleRateHz = oCfg.uSampleRateHz;
+                oHeader.uStartIndex   = uCpiStart;
+                if (!writeCpiFile(oOptions.sDumpCpiPath.c_str(), oHeader,
+                                  oChain.vcRef.data(), oChain.vcSur.data())) {
+                    bProcessError = true;
+                    break;
+                }
+                bCpiDumped = true;
+                std::printf("wrote the first CPI (start index %llu) to %s\n",
+                            (unsigned long long)uCpiStart, oOptions.sDumpCpiPath.c_str());
+            }
 
             if (!bHaveFirst) {
                 uFirstCpiStart = uCpiStart;
@@ -1183,6 +1223,10 @@ int main(int argc, char* argv[])
                 (unsigned long long)oStats.uReanchors);
     std::printf("live changes applied    %llu\n", (unsigned long long)uLiveChanges);
     std::printf("sample rate adaptions   %llu\n", (unsigned long long)uRateAdaptions);
+    if (oCapture.isOpen())
+        std::printf("captured                %llu datagrams, %.1f MB to %s\n",
+                    (unsigned long long)oCapture.recordCount(), oCapture.byteCount() / 1e6,
+                    oOptions.sSaveCapturePath.c_str());
     if (bStreamFrames)
         std::printf("ARD stream send fails   %llu\n",
                     (unsigned long long)oArdSender.sendFailures());
@@ -1216,6 +1260,11 @@ int main(int argc, char* argv[])
                  oStats.uCpisOvertaken == 0 &&
                  uFailedCpis == 0 &&
                  uCpiIndex > 0;
+    if (!oOptions.sDumpCpiPath.empty() && !bCpiDumped) {
+        std::printf("\n   NO CPI WAS EXTRACTED, so %s was not written\n",
+                    oOptions.sDumpCpiPath.c_str());
+        bPass = false;
+    }
     if (oOptions.bLive) {
         if (dWorstTotalMs > dBudgetMs) {
             std::printf("\n   WORST CPI EXCEEDED THE BUDGET\n");

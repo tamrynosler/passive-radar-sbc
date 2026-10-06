@@ -8,16 +8,18 @@
 # makes a latency number defensible in the methodology chapter: it rules out
 # thermal throttling and DVFS as hidden variables.
 #
-# Usage:
+# Run ON THE JETSON from the repository root. Usage:
 #   scripts/run_cufft_bench.sh -- --sweep-size --min-size 1024 --max-size 33554432 --csv
 #   scripts/run_cufft_bench.sh -- --size 204800 --batch 1 --iters 200 --csv
 #
-# Everything after "--" is passed straight through to ./cufft_bench.
+# Everything after "--" is passed straight through to build/cufft_bench.
+# Output: /data/results/cufft_bench/<stamp>/ (results.csv, tegrastats.log,
+# clocks.txt), which `make pull` brings back to the Mac.
 
 set -euo pipefail
 
-BENCH="${BENCH_BIN:-./cufft_bench}"
-OUTROOT="${OUTROOT:-/data/bench}"
+BENCH="${BENCH_BIN:-./build/cufft_bench}"
+OUTROOT="${OUTROOT:-/data/results/cufft_bench}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 OUTDIR="${OUTROOT}/${STAMP}"
 mkdir -p "${OUTDIR}"
@@ -33,27 +35,8 @@ done
 echo "Output dir : ${OUTDIR}"
 echo "Benchmark  : ${BENCH} ${BENCH_ARGS[*]:-}"
 
-# --- pin clocks and fan for determinism (needs sudo) -------------------------
-if command -v jetson_clocks >/dev/null 2>&1; then
-  echo "Pinning clocks to max (jetson_clocks)"
-  sudo jetson_clocks || echo "  (jetson_clocks failed; continuing unpinned)"
-fi
-echo "Pinning fan to max"
-echo 255 | sudo tee /sys/devices/pwm-fan/target_pwm >/dev/null || true
-
-# --- start tegrastats in the background --------------------------------------
-TEGRA_LOG="${OUTDIR}/tegrastats.log"
-echo "Logging tegrastats -> ${TEGRA_LOG}"
-sudo tegrastats --interval 1000 --logfile "${TEGRA_LOG}" &
-TEGRA_PID=$!
-# Ensure tegrastats is always stopped, even on error/Ctrl-C.
-cleanup() {
-  echo "Stopping tegrastats"
-  sudo kill "${TEGRA_PID}" >/dev/null 2>&1 || true
-  # Hand the fan back to the thermal governor.
-  echo 0 | sudo tee /sys/devices/pwm-fan/target_pwm >/dev/null || true
-}
-trap cleanup EXIT
+source scripts/pin_clocks.sh
+pinClocks "${OUTDIR}"
 
 sleep 2  # a couple of idle samples for a thermal baseline
 
@@ -64,4 +47,4 @@ echo "Running..."
 
 echo "Done."
 echo "  results : ${CSV_OUT}"
-echo "  thermal : ${TEGRA_LOG}"
+echo "  thermal : ${OUTDIR}/tegrastats.log"

@@ -64,7 +64,7 @@ passive-radar-sbc/
 ├── matlab/               the reference implementation (validation ground truth)
 ├── config/               prb.conf (USRP, 200 kHz) and fers.conf (FERS, 204800 Hz)
 ├── third_party/          approved external headers (currently none)
-├── scripts/              run_live.sh, replay_udp.py, bench wrappers
+├── scripts/              Jetson run scripts, clock pinning, CGLS tuning tools
 ├── docs/                 architecture notes, benchmarking methodology, results
 └── cmake/                helper modules
 ```
@@ -107,10 +107,8 @@ make drive     # the USRP driver on the Jetson
 make view      # the viewer, forwarded to http://localhost:8080
 make stop      # end every radar process left on the Jetson
 make replay    # replay a recorded capture through the whole chain
-make verify    # golden-file checks against MATLAB
 make prelim    # one algorithm on one frozen CPI (ARGS=ECA-m)
 make push-data # copy data/SCENARIO to the Jetson
-make bench     # DSI timing sweep (ECA-m, ECA-B)
 make pull      # copy results back to ./results
 ```
 
@@ -161,32 +159,21 @@ make host          # every tool into ./bin
 make host-test     # build and run every unit test locally
 ```
 
-`ingest_probe` is the live checkpoint. Start it **before** `fers-cli`, since it
-binds the UDP port:
+`pbr_run` records what it receives, so a live stream can be replayed later
+through the identical path. Start it **before** `fers-cli`, since it binds
+the UDP port:
 
 ```bash
-./bin/ingest_probe --seconds 30 --capture data/S0_clean/capture.pbrcap
+./bin/pbr_run --live --config config/fers.conf --seconds 30 \
+    --capture data/S0_clean/capture.pbrcap --dump-cpi data/S0_clean/cpi_0000.bin
 # then, in another terminal:
 fers-cli <scenario>.fersxml --out-dir=/tmp/out \
-         --vita49 127.0.0.1:4991 --vita49-fullscale 0.0022 -n=6
+         --vita49 127.0.0.1:4991 --vita49-fullscale 0.005 -n=6
 ```
 
-It verifies, against the live stream, that every sample lands at the absolute
-index its VITA 49 timestamp implies, reads back identically, and survives in
-the ring buffer while being overwritten — then reports how many CPIs it
-extracted. Exit status is 0 on PASS.
-
-`ingest_replay` runs a recorded capture through the identical path, so every
-stage stays testable without live FERS:
-
-```bash
-./bin/ingest_replay --file data/S0_clean/capture.pbrcap --csv /tmp/cpp_decode.csv
-```
-
-The `--csv` output feeds `matlab/compare_vita49_capture.m`, which decodes the
-same bytes with `parse_vita49_packet.m` and compares field by field. A capture
-recorded at a different `--vita49-fullscale` than the config needs
-`--fullscale` to override it.
+`--capture` writes every datagram to a `.pbrcap` file for `--file` replay;
+`--dump-cpi` writes the first CPI's input, both channels, as the fixed input
+of `dsi_verify`, `dsi_bench` and `matlab/eca_golden.m`.
 
 ## DSI cancellation
 
@@ -194,8 +181,8 @@ Two steps. First freeze one CPI from a recorded capture, then run the
 canceller against it. Nothing here needs FERS or a network.
 
 ```bash
-./bin/ingest_replay --file data/S0_clean/capture.pbrcap --fullscale 0.005 \
-                    --dump-cpi data/S0_clean/cpi_0000.bin
+./bin/pbr_run --file data/S0_clean/capture.pbrcap --config config/fers.conf \
+              --dump-cpi data/S0_clean/cpi_0000.bin
 
 ./bin/dsi_bench --cpi data/S0_clean/cpi_0000.bin --algorithm ECA-B --iters 10 \
                 --csv results/L3_bench/dsi_bench.csv
@@ -269,9 +256,8 @@ Characterise the two plan configs against a real-time budget:
 Under controlled clocks/fan with a tegrastats trace (for the methodology chapter):
 
 ```bash
-chmod +x scripts/run_cufft_bench.sh
-scripts/run_cufft_bench.sh -- --sweep-size --min-size 1024 --max-size 33554432 --batch 1 --csv
-# results + tegrastats.log land in /data/bench/<timestamp>/
+bash scripts/run_cufft_bench.sh -- --sweep-size --min-size 1024 --max-size 33554432 --batch 1 --csv
+# results + tegrastats.log land in /data/results/cufft_bench/<timestamp>/
 ```
 
 > **Measurement note.** Latency figures are only meaningful on a stable 5 V/4 A

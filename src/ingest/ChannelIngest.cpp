@@ -427,8 +427,6 @@ bool ChannelIngest::handleData(const Vita49Packet& oPacket)
     // Nothing else happens in this loop on purpose. ADC code-range tracking
     // used to live here, but a running min/max is per-sample work in the
     // production ingest path and would show up in the latency benchmarks.
-    // ingest_probe converts the same payload independently, so the diagnostic
-    // belongs there instead.
     ComplexF acStaging[kMaxSamplesPerPacket];
 
     for (uint64_t u = 0; u < oPacket.uSampleCount; ++u) {

@@ -4,7 +4,7 @@
 // matches the MATLAB reference within relative error < 1e-4 (FP32). This tool
 // applies that rule to DSI cancellation:
 //
-//   1. ingest_replay --dump-cpi freezes one CPI to data/cpi_0000.bin
+//   1. pbr_run --dump-cpi freezes one CPI to data/<scenario>/cpi_0000.bin
 //   2. matlab/eca_golden.m reads those exact bytes, cancels in double
 //      precision, writes data/golden_ecam.bin and data/golden_ecab.bin
 //   3. this tool runs the same algorithm on the same CPI and reports the
@@ -64,7 +64,7 @@ struct Options {
 void printUsage(const char* pProgram)
 {
     std::printf("usage: %s --cpi FILE --golden FILE [options]\n", pProgram);
-    std::printf("  --cpi FILE        CPI dumped by ingest_replay --dump-cpi (required)\n");
+    std::printf("  --cpi FILE        CPI written by pbr_run --dump-cpi (required)\n");
     std::printf("  --golden FILE     golden output from matlab/eca_golden.m (required)\n");
     std::printf("  --config FILE     configuration (default %s)\n", kDefaultConfigPath);
     std::printf("  --algorithm NAME  override DSI_ALGORITHM\n");

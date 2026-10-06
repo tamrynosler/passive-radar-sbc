@@ -36,16 +36,15 @@ from `matlab/fers_truth.m` gives every CPI.
 ## Regenerate
 
 ```bash
-# capture (Mac, two terminals; the receiver first)
-./bin/ingest_probe --seconds 185 --capture data/S0_clean/capture.pbrcap
+# capture and frozen CPI (Mac, two terminals; the receiver first)
+./bin/pbr_run --live --config config/fers.conf --seconds 185 \
+    --capture data/S0_clean/capture.pbrcap --dump-cpi data/S0_clean/cpi_0000.bin
 cd ~/FERS && ./build/release/packages/fers-cli/fers-cli \
     ~/passive-radar-sbc/scenarios/S0_clean/scenario.fersxml \
     --out-dir=/tmp/fers-out --vita49 127.0.0.1:4991 \
     --vita49-fullscale 0.005 -n=6
 
-# frozen CPI, truth
-./bin/ingest_replay --file data/S0_clean/capture.pbrcap --fullscale 0.005 \
-                    --dump-cpi data/S0_clean/cpi_0000.bin
+# truth
 matlab -batch "addpath('matlab'); fers_truth('scenarios/S0_clean/scenario.fersxml', \
     'config/fers.conf', 'data/S0_clean/truth.csv')"
 ```

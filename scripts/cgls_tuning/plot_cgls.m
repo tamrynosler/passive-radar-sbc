@@ -1,6 +1,6 @@
 function plot_cgls(runDir, cpi, fdMax)
 %% plot_cgls
-% Plot one CGLS tuning test (results/CGLS_tuning/run_cgls.sh): the
+% Plot one CGLS tuning test (scripts/cgls_tuning/run_cgls.sh): the
 % range-Doppler map of one CPI with the CFAR detections and the truth
 % position, the zero-Doppler range profile (where the unconverged residue
 % shows up as a ridge), and the Doppler cut through the target's range bin
@@ -10,13 +10,13 @@ function plot_cgls(runDir, cpi, fdMax)
 %   plot_cgls('results/CGLS_tuning/it60_fp64_20261002_143000', 2)     % CPI 2 (primed)
 %   plot_cgls('results/CGLS_tuning/it60_fp64_20261002_143000', 0, 400)
 %
-% In the MATLAB desktop: open this folder (results/CGLS_tuning) as the
-% current folder, or add it to the path, then
+% With this folder (scripts/cgls_tuning) on the path, a run may also be
+% given by its name alone:
 %   plot_cgls('cold30_20261002_124410')
 % From a terminal, from any directory:
-%   matlab -batch "addpath('<repo>/results/CGLS_tuning'); plot_cgls('cold30_20261002_124410')"
-% The function finds the repository root, matlab/ and the truth file from
-% its own location.
+%   matlab -batch "addpath('<repo>/scripts/cgls_tuning'); plot_cgls('cold30_20261002_124410')"
+% The function finds the repository root, matlab/, results/CGLS_tuning/ and
+% the truth file from its own location.
 %
 % Saves <runDir>/map_cpiN.png.
 
@@ -29,11 +29,12 @@ if nargin < 3 || isempty(fdMax), fdMax = 200; end
 % read_ard, and a run directory may be given as just its name.
 thisDir  = fileparts(mfilename('fullpath'));
 repoRoot = fullfile(thisDir, '..', '..');
+runRoot  = fullfile(repoRoot, 'results', 'CGLS_tuning');
 addpath(fullfile(repoRoot, 'matlab'));
 truthPath = fullfile(repoRoot, 'data', 'S0_clean', 'truth.csv');
 if ~isfolder(runDir)
-    if isfolder(fullfile(thisDir, runDir))
-        runDir = fullfile(thisDir, runDir);
+    if isfolder(fullfile(runRoot, runDir))
+        runDir = fullfile(runRoot, runDir);
     elseif isfolder(fullfile(repoRoot, runDir))
         runDir = fullfile(repoRoot, runDir);
     else

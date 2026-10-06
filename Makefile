@@ -29,7 +29,7 @@ RSYNC := $(RSYNC_BIN) -a --delete \
          --filter=':- .gitignore' \
          --exclude '.git' --exclude '.DS_Store'
 
-.PHONY: help build sync test run replay verify prelim push-data bench pull \
+.PHONY: help build sync test run replay prelim push-data pull \
         shell clean view drive stop host host-test host-view
 
 help:
@@ -43,10 +43,8 @@ help:
 	@echo "  make stop       end every radar process left on the Jetson"
 	@echo "  make replay     replay data/SCENARIO/capture.pbrcap on the Jetson"
 	@echo "  make view       the live viewer, forwarded to http://localhost:8080"
-	@echo "  make verify     golden-file checks against MATLAB"
 	@echo "  make prelim     one algorithm on one frozen CPI, clocks pinned (ARGS=ECA-m)"
 	@echo "  make push-data  copy data/SCENARIO to the Jetson"
-	@echo "  make bench      DSI timing sweep (ECA-m, ECA-B), clocks pinned"
 	@echo "  make pull       copy results back to ./results"
 	@echo "  make shell      interactive shell on the Jetson"
 	@echo "  make clean      wipe the Jetson build directory"
@@ -107,14 +105,12 @@ drive:
 ##       SIGKILL for anything that ignored it. The [_] keeps pkill -f from
 ##       matching the shell that runs it.
 stop:
-	@ssh $(JETSON) 'for p in "build/ard[_]view" "build/pbr[_]run" "build/uhd_to[_]vita49" \
-	        "build/ingest[_]probe"; do \
+	@ssh $(JETSON) 'for p in "build/ard[_]view" "build/pbr[_]run" "build/uhd_to[_]vita49"; do \
 	        pkill -TERM -f "$$p" 2>/dev/null && echo "stopped $$p"; done; \
 	    sleep 2; \
-	    for p in "build/ard[_]view" "build/pbr[_]run" "build/uhd_to[_]vita49" \
-	        "build/ingest[_]probe"; do \
+	    for p in "build/ard[_]view" "build/pbr[_]run" "build/uhd_to[_]vita49"; do \
 	        pkill -KILL -f "$$p" 2>/dev/null && echo "killed $$p (ignored SIGTERM)"; done; \
-	    pgrep -af "build/(ard_view|pbr_run|uhd_to_vita49|ingest_probe)" | grep -v pgrep \
+	    pgrep -af "build/(ard_view|pbr_run|uhd_to_vita49)" | grep -v pgrep \
 	        || echo "nothing running"'
 
 ## replay: run a scenario's recorded capture through the whole chain on the
@@ -161,16 +157,6 @@ view:
 	@ssh -o ExitOnForwardFailure=yes -L 8080:localhost:8080 $(JETSON) \
 	    'cd $(REMOTE) && ./build/ard_view --group 239.192.0.2'
 
-## verify: every golden-file check. Run after changing src/dsi or src/ard.
-##         Goldens live under data/SCENARIO/golden/ (regenerate with the
-##         MATLAB generators; none exist there yet as of 2026-10-01).
-verify:
-	@ssh $(JETSON) 'cd $(REMOTE) && \
-	    ./build/dsi_verify --cpi data/$(SCENARIO)/cpi_0000.bin \
-	        --golden data/$(SCENARIO)/golden/golden_ecab.bin --algorithm ECA-B --tolerance 1e-2 && \
-	    ./build/ard_verify --cpi data/$(SCENARIO)/cpi_0000.bin \
-	        --golden data/$(SCENARIO)/golden/golden_ard.bin --chained'
-
 ## prelim: ONE algorithm on the scenario's frozen CPI, on the Jetson with
 ##         clocks pinned: accuracy against the MATLAB golden (CPU FP64 and
 ##         GPU), time per CPI (dsi_bench), and the chain on the capture
@@ -188,12 +174,6 @@ push-data:
 	@ssh $(JETSON) 'mkdir -p $(REMOTE)/data/$(SCENARIO)'
 	@$(RSYNC_BIN) -a --stats data/$(SCENARIO)/ '$(JETSON):$(REMOTE)/data/$(SCENARIO)/' \
 	    | grep -E "Number of files transferred|Total transferred file size" || true
-
-## bench: DSI timing sweep (scripts/run_dsi_bench.sh) with clocks pinned,
-##        then pull the CSVs.
-bench:
-	@ssh -t $(JETSON) 'cd $(REMOTE) && bash scripts/run_dsi_bench.sh $(ARGS)'
-	@$(MAKE) pull
 
 ## pull: copy everything under the Jetson's /data/results to ./results.
 ##

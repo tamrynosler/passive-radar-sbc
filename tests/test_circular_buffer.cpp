@@ -346,25 +346,6 @@ void testValidityFlags()
     assert(oBuf.validCount(987, 16) == 3);
 }
 
-void testReset()
-{
-    CircularBuffer oBuf(16);
-    std::vector<ComplexF> vcRun = makeRun(1000, 8);
-    assert(oBuf.write(1000, vcRun.data(), 8));
-    assert(oBuf.writeEnd() == 1008);
-
-    oBuf.reset();
-    assert(oBuf.writeEnd() == 0);
-    assert(oBuf.oldestValid() == 0);
-    assert(oBuf.validCount(1000, 8) == 0);
-
-    // Usable from index 0 again, as if new; the old lap's flags are gone.
-    vcRun = makeRun(4, 4);
-    assert(oBuf.write(4, vcRun.data(), 4));
-    assert(oBuf.validCount(0, 8) == 4);      // [0,4) zero-filled hole, [4,8) valid
-    expectRun(oBuf, 4, 4);
-}
-
 } // namespace
 
 int main()

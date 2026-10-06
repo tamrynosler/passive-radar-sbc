@@ -2,7 +2,7 @@
 //
 // The whole point is isolation. One CPI is frozen to a file beforehand by
 //
-//     ingest_replay --file capture.pbrcap --dump-cpi data/cpi_0000.bin
+//     pbr_run --file capture.pbrcap --config config/fers.conf --dump-cpi cpi_0000.bin
 //
 // so this program never opens a socket, never decodes a packet and never
 // waits for FERS. It loads the samples once, calls init() once, and then
@@ -13,9 +13,8 @@
 //   dsi_bench --cpi data/cpi_0000.bin [--algorithm ECA-B] [--backend CPU]
 //             [--iters 10] [--csv out.csv]
 //
-// The --algorithm and --backend flags override config/prb.conf when given,
-// the same way --fullscale overrides it in ingest_replay. With neither, the
-// run is entirely described by the tracked config file.
+// The --algorithm and --backend flags override the config file when given.
+// With neither, the run is entirely described by the tracked config file.
 //
 // A note on what the numbers mean. Timing on the Mac proves only that the
 // code runs and gives the order of magnitude; citable figures come from the
@@ -56,7 +55,7 @@ struct Options {
 void printUsage(const char* pProgram)
 {
     std::printf("usage: %s --cpi FILE [options]\n", pProgram);
-    std::printf("  --cpi FILE        CPI dumped by ingest_replay --dump-cpi (required)\n");
+    std::printf("  --cpi FILE        CPI written by pbr_run --dump-cpi (required)\n");
     std::printf("  --config FILE     configuration (default %s)\n", kDefaultConfigPath);
     std::printf("  --algorithm NAME  override DSI_ALGORITHM: ECA-m ECA-B ECA-S ECA-CD CGLS\n");
     std::printf("  --backend NAME    override DSI_BACKEND: CPU or GPU\n");

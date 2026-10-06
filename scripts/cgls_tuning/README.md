@@ -1,4 +1,4 @@
-# results/CGLS_tuning/
+# scripts/cgls_tuning/
 
 Manual CGLS parameter tests on the laptop CPU, driven by the author. Each
 test runs the whole chain on `data/S0_clean/capture.pbrcap` (3 CPIs) with
@@ -8,9 +8,9 @@ time per CPI, detections and a range-Doppler map per CPI.
 ```bash
 # 1. edit the PARAMETERS block in run_cgls.sh
 # 2. run, with a label for the test
-bash results/CGLS_tuning/run_cgls.sh it60_fp64
+bash scripts/cgls_tuning/run_cgls.sh it60_fp64
 # 3. plot (map, zero-Doppler cut, Doppler cut at the target; prints telemetry and score)
-/Applications/MATLAB_R2025a.app/bin/matlab -batch "addpath('matlab'); addpath('results/CGLS_tuning'); plot_cgls('results/CGLS_tuning/it60_fp64_<stamp>')"
+/Applications/MATLAB_R2025a.app/bin/matlab -batch "addpath('scripts/cgls_tuning'); plot_cgls('it60_fp64_<stamp>')"
 ```
 
 A sweep: set `CGLS_BATCH_SWEEP` in `run_cgls.sh` to a list of batch
@@ -23,10 +23,9 @@ iterations, flat in batch length; the warm-up primes CGLS from garbage when
 `CGLS_PRIME = 1`; the Doppler streak through the target is the FM
 illuminator's envelope, not the canceller.
 
-`index.csv` gathers one row per test (parameters and headline numbers), so a
-sweep can be compared without opening each directory. `run_cgls.sh`,
-`plot_cgls.m` and this README are tracked in git; the test directories are
-not.
+Output goes to `results/CGLS_tuning/` (gitignored): one directory per test,
+and `index.csv` with one row per test (parameters and headline numbers), so
+a sweep can be compared without opening each directory.
 
 Needs `bin/pbr_run` (`make host`) and the capture in `data/S0_clean/`.
 

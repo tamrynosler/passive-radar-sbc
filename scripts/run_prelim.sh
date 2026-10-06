@@ -65,7 +65,7 @@ GOLDEN="${DATA}/golden/golden_${TAG}.bin"
 for f in build/dsi_verify build/dsi_bench build/pbr_run; do
   [[ -x "$f" ]] || { echo "error: $f missing. 'make build' from the Mac first." >&2; exit 1; }
 done
-[[ -f "${CPI}" ]]     || { echo "error: ${CPI} missing (ingest_replay --dump-cpi, then make push-data)" >&2; exit 1; }
+[[ -f "${CPI}" ]]     || { echo "error: ${CPI} missing (pbr_run --dump-cpi, then make push-data)" >&2; exit 1; }
 [[ -f "${CAPTURE}" ]] || { echo "error: ${CAPTURE} missing (make push-data)" >&2; exit 1; }
 
 # Accuracy needs a MATLAB golden. eca_golden.m writes them for ECA-m and
@@ -125,20 +125,9 @@ esac
 } > "${META}"
 
 # --- pin clocks, fan; log tegrastats -----------------------------------------
-echo "Pinning clocks (sudo)"
-sudo nvpmodel -m 0 || echo "  nvpmodel failed; continuing"
-sudo jetson_clocks  || echo "  jetson_clocks FAILED; results NOT citable"
-echo 255 | sudo tee /sys/devices/pwm-fan/target_pwm >/dev/null || true
-sudo jetson_clocks --show > "${OUT}/clocks.txt" 2>&1 || true
+source scripts/pin_clocks.sh
+pinClocks "${OUT}"
 echo "nvpmodel      $(sudo nvpmodel -q 2>/dev/null | tr '\n' ' ')" >> "${META}"
-
-sudo tegrastats --interval 1000 --logfile "${OUT}/tegrastats.log" &
-TEGRA_PID=$!
-cleanup() {
-  sudo kill "${TEGRA_PID}" >/dev/null 2>&1 || true
-  echo 0 | sudo tee /sys/devices/pwm-fan/target_pwm >/dev/null || true
-}
-trap cleanup EXIT
 echo "tegrastats t0 $(date +%s)" >> "${META}"
 sleep 3
 
