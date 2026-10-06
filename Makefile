@@ -4,20 +4,9 @@
 # target. NEVER edit files directly on the Jetson — rsync --delete will
 # clobber them on the next sync.
 #
-# ---------------------------------------------------------------------------
-# The workflow
-# ---------------------------------------------------------------------------
-#
-#   edited config/prb.conf only .....  make sync    (2 s, no compile)
-#   edited any C++ / CUDA ...........  make build   (~2 min)
-#   check nothing broke .............  make test
-#   live run against FERS ...........  make run
-#   replay the recorded capture .....  make replay
-#   bring results back to the Mac ...  make pull
-#
-# Everything about a run — algorithm, backend, CFAR and ECA settings — lives
-# in config/prb.conf, which is read at RUN time. So the whole tuning loop is
-# `make sync && make run`: no rebuild, no command-line flags to remember.
+# `make help` lists every target. Everything about a run — algorithm,
+# backend, CFAR and ECA settings — lives in config/*.conf, which is read at
+# RUN time, so a config change needs `make sync`, never a rebuild.
 #
 # Requires a `Host jetson` entry in ~/.ssh/config with key-based auth.
 
@@ -40,8 +29,8 @@ RSYNC := $(RSYNC_BIN) -a --delete \
          --filter=':- .gitignore' \
          --exclude '.git' --exclude '.DS_Store'
 
-.PHONY: help build sync test run replay verify bench pull shell clean \
-        view drive stop host host-test host-view
+.PHONY: help build sync test run replay verify prelim push-data bench pull \
+        shell clean view drive stop host host-test host-view
 
 help:
 	@echo "passive-radar-sbc"
@@ -52,10 +41,12 @@ help:
 	@echo "  make run        live run, clocks pinned (from the USRP or FERS)"
 	@echo "  make drive      the USRP driver on the Jetson: samples -> multicast"
 	@echo "  make stop       end every radar process left on the Jetson"
-	@echo "  make replay     replay the recorded capture on the Jetson"
-	@echo "  make view       watch the newest run in a browser (second terminal)"
+	@echo "  make replay     replay data/SCENARIO/capture.pbrcap on the Jetson"
+	@echo "  make view       the live viewer, forwarded to http://localhost:8080"
 	@echo "  make verify     golden-file checks against MATLAB"
-	@echo "  make bench      DSI + ARD timing sweeps, clocks pinned"
+	@echo "  make prelim     one algorithm on one frozen CPI, clocks pinned (ARGS=ECA-m)"
+	@echo "  make push-data  copy data/SCENARIO to the Jetson"
+	@echo "  make bench      DSI timing sweep (ECA-m, ECA-B), clocks pinned"
 	@echo "  make pull       copy results back to ./results"
 	@echo "  make shell      interactive shell on the Jetson"
 	@echo "  make clean      wipe the Jetson build directory"
@@ -64,14 +55,14 @@ help:
 	@echo "  make host-test  run the unit tests locally"
 	@echo "  make host-view  serve one recorded frame from ./data in the viewer"
 	@echo
-	@echo "  ARGS=... passes extra arguments to run and bench, e.g."
+	@echo "  ARGS=... passes extra arguments to the target, e.g."
 	@echo "    make run ARGS='--seconds 145'"
 
 # ---------------------------------------------------------------------------
 # The Jetson
 # ---------------------------------------------------------------------------
 
-## sync: push config and source. Use this after editing config/prb.conf —
+## sync: push config and source. Use this after editing config/*.conf —
 ##       the config is read at RUN time, so no rebuild is needed.
 sync:
 	@$(RSYNC) ./ $(JETSON):$(REMOTE)/
@@ -88,9 +79,9 @@ build: sync
 test:
 	@ssh $(JETSON) 'cd $(REMOTE)/build && ctest --output-on-failure'
 
-## run: live run against FERS, clocks pinned and tegrastats logged. Needs an
-##      interactive sudo password, hence ssh -t. Start fers-cli on the other
-##      machine when it prints "Listening now".
+## run: live run, clocks pinned and tegrastats logged. Needs an interactive
+##      sudo password, hence ssh -t. Start the source (`make drive`, or FERS
+##      with ARGS='--config config/fers.conf') when it prints "Listening now".
 run:
 	@ssh -t $(JETSON) 'cd $(REMOTE) && bash scripts/run_live.sh $(ARGS)'
 
@@ -110,18 +101,18 @@ drive:
 	@ssh -t $(JETSON) 'cd $(REMOTE) && ./build/uhd_to_vita49 \
 	    --args addr=192.168.10.2 --config config/prb.conf $(ARGS)'
 
-## stop: end every radar process on the Jetson -- viewer, chain, driver,
-##       tegrastats logger -- for when a terminal was closed on one of them
+## stop: end every radar process on the Jetson -- viewer, chain, driver --
+##       for when a terminal was closed on one of them
 ##       and a port is still held. SIGTERM first (clean summaries), then
 ##       SIGKILL for anything that ignored it. The [_] keeps pkill -f from
 ##       matching the shell that runs it.
 stop:
 	@ssh $(JETSON) 'for p in "build/ard[_]view" "build/pbr[_]run" "build/uhd_to[_]vita49" \
-	        "build/ingest[_]probe" "scripts/ard_viewer[.]py"; do \
+	        "build/ingest[_]probe"; do \
 	        pkill -TERM -f "$$p" 2>/dev/null && echo "stopped $$p"; done; \
 	    sleep 2; \
 	    for p in "build/ard[_]view" "build/pbr[_]run" "build/uhd_to[_]vita49" \
-	        "build/ingest[_]probe" "scripts/ard_viewer[.]py"; do \
+	        "build/ingest[_]probe"; do \
 	        pkill -KILL -f "$$p" 2>/dev/null && echo "killed $$p (ignored SIGTERM)"; done; \
 	    pgrep -af "build/(ard_view|pbr_run|uhd_to_vita49|ingest_probe)" | grep -v pgrep \
 	        || echo "nothing running"'
@@ -198,7 +189,8 @@ push-data:
 	@$(RSYNC_BIN) -a --stats data/$(SCENARIO)/ '$(JETSON):$(REMOTE)/data/$(SCENARIO)/' \
 	    | grep -E "Number of files transferred|Total transferred file size" || true
 
-## bench: DSI and ARD timing sweeps with clocks pinned, then pull the CSVs.
+## bench: DSI timing sweep (scripts/run_dsi_bench.sh) with clocks pinned,
+##        then pull the CSVs.
 bench:
 	@ssh -t $(JETSON) 'cd $(REMOTE) && bash scripts/run_dsi_bench.sh $(ARGS)'
 	@$(MAKE) pull
@@ -254,47 +246,36 @@ ifneq ($(UHD_CFG),)
 HOST_UHD_FLAGS := -std=c++17 -DPBR_HAVE_UHD $(shell pkg-config --cflags --libs uhd)
 endif
 
-LIB_SRC := src/ingest/CircularBuffer.cpp src/ingest/CpiFile.cpp \
-           src/ingest/Config.cpp src/ingest/Vita49Packet.cpp \
-           src/ingest/UdpReceiver.cpp src/ingest/ChannelIngest.cpp \
-           src/ingest/CaptureFile.cpp src/ingest/Vita49Writer.cpp \
-           src/ingest/UdpSender.cpp src/ingest/SynthSource.cpp \
-           src/dsi/DSICanceller.cpp src/dsi/cpu/EcaCpu.cpp \
-           src/dsi/cpu/CglsCpu.cpp src/dsi/cpu/EcaCdCpu.cpp \
-           src/ard/ArdProcessor.cpp src/ard/ArdFile.cpp src/ard/cpu/ArdCpu.cpp \
-           src/ard/cpu/BatchesArdCpu.cpp src/ard/ArdStream.cpp \
-           src/ard/Spectrum.cpp src/display/HttpServer.cpp
+# File lists are globbed, so a new source file needs no Makefile edit.
+LIB_SRC    := $(shell find src -name '*.cpp' -not -path 'src/app/*' | sort)
+LIB_OBJ    := $(patsubst %.cpp,$(HOST_BIN)/obj/%.o,$(LIB_SRC))
+HOST_APPS  := $(wildcard src/app/*.cpp) bench/dsi_bench.cpp bench/ard_bench.cpp
+HOST_TESTS := $(wildcard tests/*.cpp)
 
-HOST_APPS  := src/app/pbr_run.cpp src/app/ingest_replay.cpp \
-              src/app/ingest_probe.cpp src/app/dsi_verify.cpp \
-              src/app/ard_verify.cpp src/app/uhd_to_vita49.cpp \
-              src/app/ard_view.cpp bench/dsi_bench.cpp bench/ard_bench.cpp
-HOST_TESTS := tests/test_circular_buffer.cpp tests/test_vita49_packet.cpp \
-              tests/test_config.cpp tests/test_cpi_extraction.cpp \
-              tests/test_eca.cpp tests/test_cgls.cpp tests/test_ecacd.cpp \
-              tests/test_ard.cpp tests/test_batches_ard.cpp \
-              tests/test_vita49_writer.cpp tests/test_ard_stream.cpp \
-              tests/test_http.cpp tests/test_spectrum.cpp
+# The library is compiled once into bin/obj/. -MMD writes each object's
+# header dependencies, so editing a header rebuilds what includes it.
+$(HOST_BIN)/obj/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	@$(HOST_CXX) $(HOST_CXXFLAGS) -MMD -MP -c $< -o $@
+-include $(LIB_OBJ:.o=.d)
 
 ## host: build every tool locally into ./bin
-host:
-	@mkdir -p $(HOST_BIN)
+host: $(LIB_OBJ)
 	@for a in $(HOST_APPS); do \
 	    n=$$(basename $$a .cpp); \
 	    extra=""; \
 	    if [ "$$n" = uhd_to_vita49 ]; then extra="$(HOST_UHD_FLAGS)"; fi; \
-	    $(HOST_CXX) $(HOST_CXXFLAGS) $$a $(LIB_SRC) $$extra -o $(HOST_BIN)/$$n || exit 1; \
+	    $(HOST_CXX) $(HOST_CXXFLAGS) $$a $(LIB_OBJ) $$extra -o $(HOST_BIN)/$$n || exit 1; \
 	done
 	@if [ -n "$(UHD_CFG)" ]; then echo "uhd_to_vita49 built WITH UHD $(UHD_CFG)"; \
 	    else echo "uhd_to_vita49 built without UHD (--synth only); brew install uhd to add it"; fi
 	@echo "built into $(HOST_BIN)/"
 
 ## host-test: build and run the unit tests locally
-host-test:
-	@mkdir -p $(HOST_BIN)
+host-test: $(LIB_OBJ)
 	@for t in $(HOST_TESTS); do \
 	    n=$$(basename $$t .cpp); \
-	    $(HOST_CXX) $(HOST_CXXFLAGS) $$t $(LIB_SRC) -o $(HOST_BIN)/$$n || exit 1; \
+	    $(HOST_CXX) $(HOST_CXXFLAGS) $$t $(LIB_OBJ) -o $(HOST_BIN)/$$n || exit 1; \
 	    ./$(HOST_BIN)/$$n > /dev/null 2>&1 \
 	        || { echo "  FAILED  $$n"; ./$(HOST_BIN)/$$n; exit 1; }; \
 	    echo "  ok      $$n"; \

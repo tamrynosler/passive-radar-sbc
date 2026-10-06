@@ -99,13 +99,18 @@ with `--delete` mirrors the tree and will clobber on-board edits).
 Requires a `Host jetson` entry in `~/.ssh/config` with key-based auth.
 
 ```bash
-make sync      # edited config/prb.conf only — 2 s, no compile
+make sync      # edited config/*.conf only — 2 s, no compile
 make build     # edited any C++/CUDA — sync then compile on the Jetson
 make test      # unit tests on the Jetson
-make run       # live run against FERS, clocks pinned, tegrastats logged
-make replay    # replay the recorded capture through the whole chain
+make run       # live run, clocks pinned, tegrastats logged
+make drive     # the USRP driver on the Jetson
+make view      # the viewer, forwarded to http://localhost:8080
+make stop      # end every radar process left on the Jetson
+make replay    # replay a recorded capture through the whole chain
 make verify    # golden-file checks against MATLAB
-make bench     # DSI + ARD timing sweeps
+make prelim    # one algorithm on one frozen CPI (ARGS=ECA-m)
+make push-data # copy data/SCENARIO to the Jetson
+make bench     # DSI timing sweep (ECA-m, ECA-B)
 make pull      # copy results back to ./results
 ```
 
@@ -152,9 +157,8 @@ builds and runs on the laptop as well as the Jetson. Local runs prove
 function; all timing numbers must come from the Jetson.
 
 ```bash
-make host-test     # build and run every unit test locally (seconds)
-make host-probe    # -> bin/ingest_probe, the live FERS checkpoint
-make host-replay   # -> bin/ingest_replay, replays a recorded capture
+make host          # every tool into ./bin
+make host-test     # build and run every unit test locally
 ```
 
 `ingest_probe` is the live checkpoint. Start it **before** `fers-cli`, since it
@@ -190,11 +194,9 @@ Two steps. First freeze one CPI from a recorded capture, then run the
 canceller against it. Nothing here needs FERS or a network.
 
 ```bash
-make host-replay
 ./bin/ingest_replay --file data/S0_clean/capture.pbrcap --fullscale 0.005 \
                     --dump-cpi data/S0_clean/cpi_0000.bin
 
-make host-bench
 ./bin/dsi_bench --cpi data/S0_clean/cpi_0000.bin --algorithm ECA-B --iters 10 \
                 --csv results/L3_bench/dsi_bench.csv
 ```
@@ -234,7 +236,6 @@ them and exits non-zero on failure:
 
 ```bash
 /Applications/MATLAB_R2025a.app/bin/matlab -batch "addpath('matlab'); eca_golden"
-make host-verify
 ./bin/dsi_verify --cpi data/S0_clean/cpi_0000.bin --golden data/S0_clean/golden/golden_ecam.bin --algorithm ECA-m
 ./bin/dsi_verify --cpi data/S0_clean/cpi_0000.bin --golden data/S0_clean/golden/golden_ecab.bin --algorithm ECA-B
 ```
