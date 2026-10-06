@@ -32,7 +32,7 @@
 #include <cufft.h>
 
 #include "pbr/DSICanceller.hpp"
-#include "pbr/check.hpp"   // must follow the library headers: see check.hpp
+#include "pbr/check.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -278,16 +278,15 @@ bool EcaCdGpu::init(const DSIParams& oParams)
           "too few ECA-CD batches for the Doppler columns; shorten the batch "
           "or reduce ECA_CD_DOPPLER_TAPS");
 
-    CUBLAS_CHECK(cublasCreate(&mhCublas));
+    CUDA_CHECK(cublasCreate(&mhCublas));
 
     // M transforms of length L, each contiguous.
     int iL = static_cast<int>(muBatch);
-    CHECK(cufftPlanMany(&mhPlan, 1, &iL,
-                        nullptr, 1, iL,
-                        nullptr, 1, iL,
-                        CUFFT_C2C,
-                        static_cast<int>(muBatches)) == CUFFT_SUCCESS,
-          "cufftPlanMany failed for the ECA-CD batch transform");
+    CUDA_CHECK(cufftPlanMany(&mhPlan, 1, &iL,
+                             nullptr, 1, iL,
+                             nullptr, 1, iL,
+                             CUFFT_C2C,
+                             static_cast<int>(muBatches)));
     mbPlanValid = true;
 
     const size_t uCpiBytes = static_cast<size_t>(oParams.uCpiSamples) * sizeof(cufftComplex);
@@ -335,10 +334,8 @@ bool EcaCdGpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
                           uCpiBytes, cudaMemcpyHostToDevice));
 
     // Forward, out of place so the time-domain reference survives for the CAF.
-    CHECK(cufftExecC2C(mhPlan, md_cRef, md_cRefSpec, CUFFT_FORWARD) == CUFFT_SUCCESS,
-          "cufftExecC2C failed on the reference");
-    CHECK(cufftExecC2C(mhPlan, md_cSur, md_cOut, CUFFT_FORWARD) == CUFFT_SUCCESS,
-          "cufftExecC2C failed on the surveillance");
+    CUDA_CHECK(cufftExecC2C(mhPlan, md_cRef, md_cRefSpec, CUFFT_FORWARD));
+    CUDA_CHECK(cufftExecC2C(mhPlan, md_cSur, md_cOut, CUFFT_FORWARD));
 
     projectKernel<<<static_cast<uint32_t>(muBatch), kBlock>>>(
         md_cRefSpec, md_cOut, md_cTwiddle,
@@ -348,14 +345,13 @@ bool EcaCdGpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
     CUDA_CHECK(cudaGetLastError());
 
     // Back to time, in place. The 1/L was applied by the kernel.
-    CHECK(cufftExecC2C(mhPlan, md_cOut, md_cOut, CUFFT_INVERSE) == CUFFT_SUCCESS,
-          "cufftExecC2C failed on the inverse");
+    CUDA_CHECK(cufftExecC2C(mhPlan, md_cOut, md_cOut, CUFFT_INVERSE));
 
     float fSurNorm = 0.0f;
     float fOutNorm = 0.0f;
-    CUBLAS_CHECK(cublasScnrm2(mhCublas, static_cast<int>(moParams.uCpiSamples),
+    CUDA_CHECK(cublasScnrm2(mhCublas, static_cast<int>(moParams.uCpiSamples),
                               md_cSur, 1, &fSurNorm));
-    CUBLAS_CHECK(cublasScnrm2(mhCublas, static_cast<int>(moParams.uCpiSamples),
+    CUDA_CHECK(cublasScnrm2(mhCublas, static_cast<int>(moParams.uCpiSamples),
                               md_cOut, 1, &fOutNorm));
 
     if (mbHostOutput) {

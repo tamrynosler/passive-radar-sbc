@@ -21,47 +21,64 @@
         }                                                                     \
     } while (0)
 
-// CUDA_CHECK wraps CUDA / cuFFT / cuBLAS calls. It is only defined where the
-// CUDA runtime headers are already in scope, so this header stays includable
-// from plain C++ translation units.
-#if defined(__CUDACC__) || defined(CUDART_VERSION)
+// CUDA_CHECK wraps every CUDA runtime, cuFFT, cuBLAS and cuSOLVER call.
+// Each library reports failure with its own status type, so gpuCallOk has
+// one overload per type: true on success, otherwise false with a
+// description in pWhy (formatted only on failure, so the check is free on the
+// timed path).
+// Only CUDA translation units (.cu) see it, so this header stays includable
+// from plain C++.
+#if defined(__CUDACC__)
+#include <cstddef>
+#include <cublas_v2.h>
+#include <cuda_runtime.h>
+#include <cufft.h>
+#include <cusolverDn.h>
+
+namespace pbr {
+
+inline bool gpuCallOk(cudaError_t eStatus, char* pWhy, size_t uWhyBytes)
+{
+    if (eStatus == cudaSuccess)
+        return true;
+    std::snprintf(pWhy, uWhyBytes, "%s", cudaGetErrorString(eStatus));
+    return false;
+}
+
+// cuFFT, cuBLAS and cuSOLVER have no strerror-style helper in CUDA 10.2,
+// so the numeric status is printed.
+inline bool gpuCallOk(cufftResult eStatus, char* pWhy, size_t uWhyBytes)
+{
+    if (eStatus == CUFFT_SUCCESS)
+        return true;
+    std::snprintf(pWhy, uWhyBytes, "cuFFT status %d", static_cast<int>(eStatus));
+    return false;
+}
+
+inline bool gpuCallOk(cublasStatus_t eStatus, char* pWhy, size_t uWhyBytes)
+{
+    if (eStatus == CUBLAS_STATUS_SUCCESS)
+        return true;
+    std::snprintf(pWhy, uWhyBytes, "cuBLAS status %d", static_cast<int>(eStatus));
+    return false;
+}
+
+inline bool gpuCallOk(cusolverStatus_t eStatus, char* pWhy, size_t uWhyBytes)
+{
+    if (eStatus == CUSOLVER_STATUS_SUCCESS)
+        return true;
+    std::snprintf(pWhy, uWhyBytes, "cuSOLVER status %d", static_cast<int>(eStatus));
+    return false;
+}
+
+} // namespace pbr
+
 #define CUDA_CHECK(call)                                                      \
     do {                                                                      \
-        cudaError_t eErr = (call);                                            \
-        if (eErr != cudaSuccess) {                                            \
+        char achWhy[64];                                                      \
+        if (!pbr::gpuCallOk((call), achWhy, sizeof(achWhy))) {                \
             std::fprintf(stderr, "CUDA_CHECK failed: %s\n  (%s) at %s:%d\n",  \
-                         cudaGetErrorString(eErr), #call, __FILE__, __LINE__);\
-            return false;                                                     \
-        }                                                                     \
-    } while (0)
-#endif
-
-// cuBLAS and cuSOLVER report status codes of their own rather than
-// cudaError_t, and neither has a strerror-style helper in CUDA 10.2, so the
-// numeric code is printed. Both are only defined when the corresponding
-// library header is already in scope -- include <cublas_v2.h> / <cusolverDn.h>
-// BEFORE this header.
-#if defined(CUBLAS_V2_H_)
-#define CUBLAS_CHECK(call)                                                    \
-    do {                                                                      \
-        cublasStatus_t eStatus = (call);                                      \
-        if (eStatus != CUBLAS_STATUS_SUCCESS) {                               \
-            std::fprintf(stderr, "CUBLAS_CHECK failed: status %d\n"           \
-                                 "  (%s) at %s:%d\n",                         \
-                         static_cast<int>(eStatus), #call, __FILE__, __LINE__);\
-            return false;                                                     \
-        }                                                                     \
-    } while (0)
-#endif
-
-#if defined(CUSOLVERDN_H_)
-#define CUSOLVER_CHECK(call)                                                  \
-    do {                                                                      \
-        cusolverStatus_t eStatus = (call);                                    \
-        if (eStatus != CUSOLVER_STATUS_SUCCESS) {                             \
-            std::fprintf(stderr, "CUSOLVER_CHECK failed: status %d\n"         \
-                                 "  (%s) at %s:%d\n",                         \
-                         static_cast<int>(eStatus), #call, __FILE__, __LINE__);\
+                         achWhy, #call, __FILE__, __LINE__);                  \
             return false;                                                     \
         }                                                                     \
     } while (0)

@@ -100,7 +100,7 @@
 #include <cusolverDn.h>
 
 #include "pbr/DSICanceller.hpp"
-#include "pbr/check.hpp"   // must follow the library headers: see check.hpp
+#include "pbr/check.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -442,8 +442,8 @@ bool EcaGpu::init(const DSIParams& oParams)
     muBuildSamples    = (muWindowSamples < kMaxBuildSamples) ? muWindowSamples
                                                              : kMaxBuildSamples;
 
-    CUBLAS_CHECK(cublasCreate(&mhCublas));
-    CUSOLVER_CHECK(cusolverDnCreate(&mhCusolver));
+    CUDA_CHECK(cublasCreate(&mhCublas));
+    CUDA_CHECK(cusolverDnCreate(&mhCusolver));
 
     const size_t uCpiBytes  = static_cast<size_t>(oParams.uCpiSamples) * sizeof(DeviceComplex);
     const size_t uSubBytes  = static_cast<size_t>(muBuildSamples * muTaps) * sizeof(DeviceComplex);
@@ -590,7 +590,7 @@ bool EcaGpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
             // and fills only the lower triangle, which is the same halving of
             // the work the CPU version does by hand. beta = 1 after the first
             // slice is what lets a long chunk be summed piece by piece.
-            CUBLAS_CHECK(cublasCherk(mhCublas,
+            CUDA_CHECK(cublasCherk(mhCublas,
                                      CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_C,
                                      iTaps, static_cast<int>(uRows),
                                      &fOne, md_cSubspace, static_cast<int>(uRows),
@@ -598,7 +598,7 @@ bool EcaGpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
                                      pcGramDst + c * muTaps * muTaps, iTaps));
 
             // v += R^H s over this slice.
-            CUBLAS_CHECK(cublasCgemv(mhCublas, CUBLAS_OP_C,
+            CUDA_CHECK(cublasCgemv(mhCublas, CUBLAS_OP_C,
                                      static_cast<int>(uRows), iTaps,
                                      &cOne, md_cSubspace, static_cast<int>(uRows),
                                      md_cSur + uStart, 1,
@@ -632,7 +632,7 @@ bool EcaGpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
     // ---- solve every window in two calls -----------------------------------
     // Cholesky factors all the Gram matrices, then the triangular solve turns
     // the right-hand sides in md_cWeights into the weights in place.
-    CUSOLVER_CHECK(cusolverDnCpotrfBatched(mhCusolver, CUBLAS_FILL_MODE_LOWER,
+    CUDA_CHECK(cusolverDnCpotrfBatched(mhCusolver, CUBLAS_FILL_MODE_LOWER,
                                            iTaps, md_ppGram, iTaps,
                                            md_piInfo,
                                            static_cast<int>(muWindows)));
@@ -668,7 +668,7 @@ bool EcaGpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
     // kernel at run time with "unspecified launch failure" -- so md_piInfo,
     // which is already device memory, is reused for it.
     {
-        CUSOLVER_CHECK(cusolverDnCpotrsBatched(mhCusolver, CUBLAS_FILL_MODE_LOWER,
+        CUDA_CHECK(cusolverDnCpotrsBatched(mhCusolver, CUBLAS_FILL_MODE_LOWER,
                                                iTaps, 1,
                                                md_ppGram, iTaps,
                                                md_ppWeights, iTaps,
@@ -696,9 +696,9 @@ bool EcaGpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
     // does no arithmetic over the CPI.
     float fSurNorm = 0.0f;
     float fOutNorm = 0.0f;
-    CUBLAS_CHECK(cublasScnrm2(mhCublas, static_cast<int>(moParams.uCpiSamples),
+    CUDA_CHECK(cublasScnrm2(mhCublas, static_cast<int>(moParams.uCpiSamples),
                               md_cSur, 1, &fSurNorm));
-    CUBLAS_CHECK(cublasScnrm2(mhCublas, static_cast<int>(moParams.uCpiSamples),
+    CUDA_CHECK(cublasScnrm2(mhCublas, static_cast<int>(moParams.uCpiSamples),
                               md_cOut, 1, &fOutNorm));
 
     if (mbHostOutput) {

@@ -41,7 +41,7 @@
 #include "BatchesArdGpu.cuh"
 
 #include "pbr/ArdProcessor.hpp"
-#include "pbr/check.hpp"   // must follow the library headers: see check.hpp
+#include "pbr/check.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -365,16 +365,15 @@ bool ArdGpu::init(const ArdParams& oParams)
     // expected per CPI, so anything near this cap means something is wrong.
     muDetectCapacity = 8192;
 
-    CUBLAS_CHECK(cublasCreate(&mhCublas));
+    CUDA_CHECK(cublasCreate(&mhCublas));
 
     // 120 independent transforms of length 1600, each contiguous.
     int iN = static_cast<int>(oParams.uDopplerBins);
-    CHECK(cufftPlanMany(&mhPlan, 1, &iN,
-                        nullptr, 1, iN,
-                        nullptr, 1, iN,
-                        CUFFT_C2C,
-                        static_cast<int>(oParams.uRangeBins)) == CUFFT_SUCCESS,
-          "cufftPlanMany failed for the Doppler transform");
+    CUDA_CHECK(cufftPlanMany(&mhPlan, 1, &iN,
+                             nullptr, 1, iN,
+                             nullptr, 1, iN,
+                             CUFFT_C2C,
+                             static_cast<int>(oParams.uRangeBins)));
     mbPlanValid = true;
 
     const size_t uCpiBytes  = static_cast<size_t>(oParams.uCpiSamples) * sizeof(cufftComplex);
@@ -424,9 +423,7 @@ bool ArdGpu::buildMap(const cufftComplex* pdRef, const cufftComplex* pdCleaned)
 
     // In place: the transform overwrites the decimated lag products, which are
     // not needed again.
-    CHECK(cufftExecC2C(mhPlan, md_cDecimated, md_cDecimated, CUFFT_FORWARD) ==
-              CUFFT_SUCCESS,
-          "cufftExecC2C failed for the Doppler transform");
+    CUDA_CHECK(cufftExecC2C(mhPlan, md_cDecimated, md_cDecimated, CUFFT_FORWARD));
 
     shiftKernel<<<blocksFor(muCells, uBlock), uBlock>>>(
         md_cDecimated, md_cMap, md_fPower, uRanges, uBlocks);
@@ -441,7 +438,7 @@ bool ArdGpu::runCfar(Detection* pDetections, uint64_t uMaxDetections,
     // The peak, for the dB scale. cublasIsamax finds the largest magnitude;
     // on a non-negative power map that is the peak power.
     int iPeakIndex = 0;
-    CUBLAS_CHECK(cublasIsamax(mhCublas, static_cast<int>(muCells),
+    CUDA_CHECK(cublasIsamax(mhCublas, static_cast<int>(muCells),
                               md_fPower, 1, &iPeakIndex));
     float fPeakPower = 0.0f;
     CUDA_CHECK(cudaMemcpy(&fPeakPower, md_fPower + (iPeakIndex - 1),

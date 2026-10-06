@@ -46,7 +46,7 @@
 #include <cublas_v2.h>
 
 #include "pbr/DSICanceller.hpp"
-#include "pbr/check.hpp"   // must follow the library headers: see check.hpp
+#include "pbr/check.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -320,7 +320,7 @@ bool CglsGpu::init(const DSIParams& oParams)
     muWindowSamples = oParams.uCglsBatchSamples;
     muWindows       = oParams.uCpiSamples / oParams.uCglsBatchSamples;
 
-    CUBLAS_CHECK(cublasCreate(&mhCublas));
+    CUDA_CHECK(cublasCreate(&mhCublas));
 
     const size_t uCpiBytes = static_cast<size_t>(oParams.uCpiSamples) * sizeof(DeviceComplex);
     const size_t uWBytes   = static_cast<size_t>(muWindows * muTaps) * sizeof(DeviceComplex);
@@ -412,8 +412,8 @@ bool CglsGpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
     // kernel error has surfaced by the time it returns.
     float fSurNorm = 0.0f;
     float fOutNorm = 0.0f;
-    CUBLAS_CHECK(cublasScnrm2(mhCublas, static_cast<int>(uTotal), md_cSur, 1, &fSurNorm));
-    CUBLAS_CHECK(cublasScnrm2(mhCublas, static_cast<int>(uTotal), md_cOut, 1, &fOutNorm));
+    CUDA_CHECK(cublasScnrm2(mhCublas, static_cast<int>(uTotal), md_cSur, 1, &fSurNorm));
+    CUDA_CHECK(cublasScnrm2(mhCublas, static_cast<int>(uTotal), md_cOut, 1, &fOutNorm));
 
     if (mbHostOutput) {
         CUDA_CHECK(cudaMemcpy(reinterpret_cast<DeviceComplex*>(pcOut), md_cOut,

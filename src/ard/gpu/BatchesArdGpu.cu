@@ -20,7 +20,7 @@
 #include "BatchesArdGpu.cuh"
 
 #include "pbr/ArdProcessor.hpp"
-#include "pbr/check.hpp"   // must follow the library headers: see check.hpp
+#include "pbr/check.hpp"
 
 #include <cstdio>
 
@@ -174,12 +174,11 @@ bool BatchesArdGpu::init(uint64_t uCpiSamples, uint64_t uStride,
           "the batches transform length exceeds what cuFFT accepts as int");
 
     int iL = static_cast<int>(uL);
-    CHECK(cufftPlanMany(&mhPlan, 1, &iL,
-                        nullptr, 1, iL,
-                        nullptr, 1, iL,
-                        CUFFT_C2C,
-                        static_cast<int>(muBatches)) == CUFFT_SUCCESS,
-          "cufftPlanMany failed for the batches correlation");
+    CUDA_CHECK(cufftPlanMany(&mhPlan, 1, &iL,
+                             nullptr, 1, iL,
+                             nullptr, 1, iL,
+                             CUFFT_C2C,
+                             static_cast<int>(muBatches)));
     mbPlanValid = true;
 
     const size_t uBytes = static_cast<size_t>(uScratch) * sizeof(cufftComplex);
@@ -212,17 +211,14 @@ bool BatchesArdGpu::correlate(const cufftComplex* pdRef,
         pdRef, pdCleaned, md_cX, md_cY, uStride, uL, uBatches, uWrapFirst);
     CUDA_CHECK(cudaGetLastError());
 
-    CHECK(cufftExecC2C(mhPlan, md_cX, md_cX, CUFFT_FORWARD) == CUFFT_SUCCESS,
-          "cufftExecC2C failed on the surveillance blocks");
-    CHECK(cufftExecC2C(mhPlan, md_cY, md_cY, CUFFT_FORWARD) == CUFFT_SUCCESS,
-          "cufftExecC2C failed on the reference blocks");
+    CUDA_CHECK(cufftExecC2C(mhPlan, md_cX, md_cX, CUFFT_FORWARD));
+    CUDA_CHECK(cufftExecC2C(mhPlan, md_cY, md_cY, CUFFT_FORWARD));
 
     multiplyConjKernel<<<blocksFor(uScratch, kBlock), kBlock>>>(
         md_cX, md_cY, static_cast<uint32_t>(uScratch));
     CUDA_CHECK(cudaGetLastError());
 
-    CHECK(cufftExecC2C(mhPlan, md_cX, md_cX, CUFFT_INVERSE) == CUFFT_SUCCESS,
-          "cufftExecC2C failed on the correlation");
+    CUDA_CHECK(cufftExecC2C(mhPlan, md_cX, md_cX, CUFFT_INVERSE));
 
     extractKernel<<<blocksFor(muRangeBins * muBatches, kBlock), kBlock>>>(
         md_cX, pdDecimated, uL, uBatches, uRanges,
