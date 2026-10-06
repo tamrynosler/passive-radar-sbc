@@ -9,6 +9,10 @@ namespace pbr {
 
 namespace {
 
+// The largest int16 ADC code: code / kFullScaleCode * VITA49_FULLSCALE is
+// the sample in physical units.
+const double kFullScaleCode = 32767.0;
+
 // Read a big-endian int16 from two bytes, preserving sign.
 int32_t readBe16Signed(const uint8_t* p)
 {
@@ -142,8 +146,7 @@ ChannelIngest::ChannelIngest(const ChannelIngestConfig& oConfig)
         return;
     }
 
-    // Raw int16 codes map to physical units as code / 32767 * fullscale.
-    mdCodeToVolts = oConfig.dFullScale / 32767.0;
+    mdCodeToVolts = oConfig.dFullScale / kFullScaleCode;
 
     mbValid = true;
 }
@@ -169,8 +172,6 @@ ChannelIngest::StreamState& ChannelIngest::findOrAddStream(uint32_t uStreamId)
     oNew.bHavePacketCount = false;
     oNew.uLastPacketCount = 0;
     oNew.bModeReported    = false;
-    oNew.sName.clear();
-    oNew.sSession.clear();
     mvStreams.push_back(oNew);
 
     return mvStreams.back();
@@ -203,13 +204,13 @@ std::string ChannelIngest::streamSummary() const
     std::string sOut;
     char achLine[160];
     for (size_t u = 0; u < mvStreams.size(); ++u) {
-        const StreamState& o = mvStreams[u];
-        const char* pRole = (o.eRole == ChannelRole::Reference)    ? "reference" :
-                            (o.eRole == ChannelRole::Surveillance) ? "surveillance" :
-                                                                     "NOT ASSIGNED";
+        const StreamState& oStream = mvStreams[u];
+        const char* pRole = (oStream.eRole == ChannelRole::Reference)    ? "reference" :
+                            (oStream.eRole == ChannelRole::Surveillance) ? "surveillance" :
+                                                                           "NOT ASSIGNED";
         std::snprintf(achLine, sizeof(achLine), "%sstream 0x%08X \"%s\" (%s)",
-                      u == 0 ? "" : ", ", o.uStreamId,
-                      o.sName.empty() ? "no context yet" : o.sName.c_str(), pRole);
+                      u == 0 ? "" : ", ", oStream.uStreamId,
+                      oStream.sName.empty() ? "no context yet" : oStream.sName.c_str(), pRole);
         sOut += achLine;
     }
     return sOut;
@@ -236,11 +237,6 @@ bool ChannelIngest::rolesResolved() const
         if (mvStreams[u].eRole == ChannelRole::Surveillance) bHaveSur = true;
     }
     return bHaveRef && bHaveSur;
-}
-
-const CircularBuffer& ChannelIngest::buffer(ChannelRole eRole) const
-{
-    return (eRole == ChannelRole::Surveillance) ? mSurBuffer : mRefBuffer;
 }
 
 uint64_t ChannelIngest::absoluteIndex(uint64_t uSeconds, uint64_t uPicoseconds) const
@@ -421,8 +417,7 @@ bool ChannelIngest::handleData(const Vita49Packet& oPacket)
 
     const bool bIsSurveillance = (oStream.eRole == ChannelRole::Surveillance);
 
-    // Convert big-endian int16 pairs to physical units, scaling by
-    // fullscale / 32767 as they go.
+    // Convert big-endian int16 pairs to physical units as they go.
     //
     // Nothing else happens in this loop on purpose. ADC code-range tracking
     // used to live here, but a running min/max is per-sample work in the

@@ -17,7 +17,7 @@ enum class ChannelRole {
 };
 
 struct ChannelIngestConfig {
-    uint64_t    uSampleRateHz;        // 204800, must match the .fersxml <rate>
+    uint64_t    uSampleRateHz;        // must match the source's declared rate
     double      dFullScale;           // must match --vita49-fullscale
     uint64_t    uBufferCapacity;      // samples per channel (bufSeconds * fs)
     std::string sReferenceName;       // must match <receiver name="..."> exactly
@@ -94,10 +94,7 @@ public:
 
     ChannelRole roleOf(uint32_t uStreamId) const;
 
-    const CircularBuffer& buffer(ChannelRole eRole) const;
-
-    // Counters for the checkpoint program. Cheap, and every one of these
-    // answers a question the checkpoint has to answer.
+    // Counters for pbr_run's summary and the tests.
     struct Stats {
         uint64_t uContextPackets;
         uint64_t uDataPackets;
@@ -154,7 +151,7 @@ private:
     StreamState& findOrAddStream(uint32_t uStreamId);
 
     ChannelIngestConfig mConfig;
-    double              mdCodeToVolts;   // dFullScale / 32767
+    double              mdCodeToVolts;   // dFullScale / kFullScaleCode
     double              mdSourceSampleRateHz;
 
     CircularBuffer mRefBuffer;
