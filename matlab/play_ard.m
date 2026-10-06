@@ -1,7 +1,8 @@
 %% play_ard.m
 % Play a directory of range-Doppler snapshots as a movie.
 %
-% pbr_run --ard-dir DIR writes one ard_NNNNN.bin per CPI. This stitches them
+% pbr_run --out DIR writes one DIR/ard/ard_NNNNN.bin per CPI when the config
+% has ARD_WRITE_FILES = 1. This stitches them
 % together so a run can be watched rather than read: targets trace arcs across
 % the range-Doppler plane as they fly, which is the quickest way to tell a real
 % track from a scatter of false alarms.
@@ -10,20 +11,22 @@
 % convention in Schuepbach RadarConf 2020, Colone TAES 52(3) 2016 and Laptev
 % DSPA 2026.
 %
-%   play_ard                                  % data/ard, +-200 Hz, 4 fps
-%   play_ard('data/ard')
-%   play_ard('data/ard', 200, 10)             % 10 fps
-%   play_ard('data/ard', 200, 4, 'run.mp4')   % also write a video file
+%   play_ard                                        % data/S0_clean/ard, +-200 Hz, 4 fps
+%   play_ard('results/<run>/ard')
+%   play_ard('results/<run>/ard', 200, 10)          % 10 fps
+%   play_ard('results/<run>/ard', 200, 4, 'run.mp4') % also write a video file
+%
+% Run from the repository root.
 %
 % The colour scale is fixed across the whole run, relative to the brightest
 % cell in ANY frame. A per-frame scale would make a quiet frame look as busy
 % as a frame with an aircraft in it, which is exactly the wrong impression.
 
 function play_ard(dirPath, fdMax, fps, videoPath)
-    if nargin < 1 || isempty(dirPath),   dirPath   = '../data/ard_live'; end
-    if nargin < 2 || isempty(fdMax),     fdMax     = 400;        end
-    if nargin < 3 || isempty(fps),       fps       = 8;          end
-    if nargin < 4,                       videoPath = 'flight_test_wgn_1.mp4';         end
+    if nargin < 1 || isempty(dirPath),   dirPath   = 'data/S0_clean/ard'; end
+    if nargin < 2 || isempty(fdMax),     fdMax     = 200; end
+    if nargin < 3 || isempty(fps),       fps       = 4;   end
+    if nargin < 4,                       videoPath = '';  end
 
     files = dir(fullfile(dirPath, 'ard_*.bin'));
     assert(~isempty(files), 'no ard_*.bin files in %s', dirPath);
@@ -53,7 +56,7 @@ function play_ard(dirPath, fdMax, fps, videoPath)
     fig = figure('Color','w');
     dB  = 20*log10(abs(map1(keep,:)) + eps) - peakDb;
     img = imagesc(rngAxis, dopAxis(keep), dB);
-    axis xy; colormap turbo; cb = colorbar; caxis([-50 0]);
+    axis xy; colormap turbo; cb = colorbar; clim([-50 0]);
     cb.Label.String = 'dB below the run peak';
     xlabel('Bistatic range (km)');
     ylabel('Bistatic Doppler (Hz)');
@@ -135,7 +138,7 @@ function play_ard(dirPath, fdMax, fps, videoPath)
     title(sprintf('%d detections over %d frames', numel(trackR), nUsed));
 
     colormap(gca, cmap);
-    caxis([min(trackT) max(trackT)]);
+    clim([min(trackT) max(trackT)]);
     cbT = colorbar;
     cbT.Label.String = 'Time (s)';
 

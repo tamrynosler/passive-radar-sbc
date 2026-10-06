@@ -110,7 +110,7 @@ keep = abs(dopAxis) <= fdMax;                  % crop Doppler for display
 figure('Color','w');
 imagesc(dopAxis(keep), rngAxis, RDdB(:,keep));
 axis xy; colormap turbo; colorbar;
-caxis([-50 0]);
+clim([-50 0]);
 xlabel('Bistatic Doppler (Hz)');
 ylabel('Bistatic range (km)');
 title(sprintf('Range-Doppler map  (ECA-B + CAF),  CPI = %.2f s', Tcpi));

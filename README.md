@@ -107,8 +107,6 @@ make drive     # the USRP driver on the Jetson
 make view      # the viewer, forwarded to http://localhost:8080
 make stop      # end every radar process left on the Jetson
 make replay    # replay a recorded capture through the whole chain
-make prelim    # one algorithm on one frozen CPI (ARGS=ECA-m)
-make push-data # copy data/SCENARIO to the Jetson
 make pull      # copy results back to ./results
 ```
 

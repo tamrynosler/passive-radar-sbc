@@ -4,38 +4,47 @@
 %
 % The detector only ever looks at a map, so a saved snapshot contains
 % everything it needs. Tuning against a file takes a second and needs neither
-% the Jetson nor FERS; tuning by editing prb.conf and re-running a live
+% the Jetson nor FERS; tuning by editing the config and re-running a live
 % capture takes minutes per attempt.
 %
 % Formulation is identical to src/ard/cpu/ArdCpu.cpp, including the zero-
 % padded edges, so whatever settings look right here will behave the same way
 % in the chain.
 %
-%   tune_cfar                                   % shipped settings, one frame
+%   tune_cfar                                   % config/fers.conf settings, one frame
 %   tune_cfar(file, 'Pfa', 1e-9)
 %   tune_cfar(file, 'Pfa', 1e-9, 'Peaks', true)
 %   tune_cfar(file, 'Sweep', [1e-5 1e-7 1e-9 1e-11])   % table, no plot
 %
 % Options (name/value):
-%   Pfa     probability of false alarm            default 1e-5
-%   Guard   [range doppler] guard half-widths     default [2 2]
-%   Train   [range doppler] training half-widths  default [4 8]
+%   Config  chain config the defaults come from   default config/fers.conf
+%   Pfa     probability of false alarm            default CFAR_PFA
+%   Guard   [range doppler] guard half-widths     default CFAR_GUARD_RANGE/_DOPPLER
+%   Train   [range doppler] training half-widths  default CFAR_TRAIN_RANGE/_DOPPLER
 %   Peaks   keep only local maxima                default false
 %   FdMax   Doppler crop for the plot, Hz         default 200
 %   Sweep   vector of Pfa values to tabulate      default []
 
 function tune_cfar(path, varargin)
-    if nargin < 1 || isempty(path), path = 'data/ard_live/ard_00000.bin'; end
+    if nargin < 1 || isempty(path), path = 'data/S0_clean/ard/ard_00000.bin'; end
 
     p = inputParser;
-    addParameter(p, 'Pfa',   1e-5);
-    addParameter(p, 'Guard', [2 2]);
-    addParameter(p, 'Train', [4 8]);
+    addParameter(p, 'Config', 'config/fers.conf');
+    addParameter(p, 'Pfa',   []);
+    addParameter(p, 'Guard', []);
+    addParameter(p, 'Train', []);
     addParameter(p, 'Peaks', false);
     addParameter(p, 'FdMax', 200);
     addParameter(p, 'Sweep', []);
     parse(p, varargin{:});
     o = p.Results;
+
+    % Unset options take the chain's own settings, so the starting point is
+    % what the chain runs with rather than numbers copied by hand.
+    cfg = read_prb_conf(o.Config);
+    if isempty(o.Pfa),   o.Pfa   = cfg.CFAR_PFA; end
+    if isempty(o.Guard), o.Guard = [cfg.CFAR_GUARD_RANGE cfg.CFAR_GUARD_DOPPLER]; end
+    if isempty(o.Train), o.Train = [cfg.CFAR_TRAIN_RANGE cfg.CFAR_TRAIN_DOPPLER]; end
 
     [map, nRange, nDop, fs, dec] = read_ard(path);
     P = abs(map).^2;                       % (doppler, range), display layout
@@ -80,7 +89,7 @@ function tune_cfar(path, varargin)
 
     figure('Color','w');
     imagesc(rngAxis, dopAxis(keep), dB(keep,:));
-    axis xy; colormap turbo; colorbar; caxis([-50 0]);
+    axis xy; colormap turbo; colorbar; clim([-50 0]);
     xlabel('Bistatic range (km)'); ylabel('Bistatic Doppler (Hz)');
     title(sprintf('guard [%d %d]  train [%d %d]  Pfa %.0e  ->  %d detections%s', ...
           o.Guard(1), o.Guard(2), o.Train(1), o.Train(2), o.Pfa, ...

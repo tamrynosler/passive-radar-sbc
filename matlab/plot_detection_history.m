@@ -6,8 +6,8 @@
 % direction is unambiguous, while false alarms scatter without forming one.
 % That is the quickest way to tell a track from noise by eye.
 %
-%   plot_detection_history                              % data/ard_live
-%   plot_detection_history('results/live_20260917_001545/ard')
+%   plot_detection_history                              % data/S0_clean/ard
+%   plot_detection_history('results/<run>/ard')
 %   plot_detection_history(dirPath, 200)                % crop Doppler
 %   plot_detection_history(dirPath, 200, 6)             % only SNR > 6 dB
 %
@@ -15,7 +15,7 @@
 % directory of frames and needs nothing else from the run.
 
 function plot_detection_history(dirPath, fdMax, minSnrDb)
-    if nargin < 1 || isempty(dirPath),  dirPath  = 'data/ard_live'; end
+    if nargin < 1 || isempty(dirPath),  dirPath  = 'data/S0_clean/ard'; end
     if nargin < 2 || isempty(fdMax),    fdMax    = 200;             end
     if nargin < 3 || isempty(minSnrDb), minSnrDb = -Inf;            end
 
@@ -60,7 +60,7 @@ function plot_detection_history(dirPath, fdMax, minSnrDb)
     % A colourbar carrying the same red-grey-blue ramp, labelled in CPI number
     % rather than in the 0-1 the colours are actually built from.
     colormap(timeColour(linspace(0,1,256)'));
-    cb = colorbar; caxis([0 nFrames-1]);
+    cb = colorbar; clim([0 nFrames-1]);
     cb.Label.String = 'CPI';
 end
 

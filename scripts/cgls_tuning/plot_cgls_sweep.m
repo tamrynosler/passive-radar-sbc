@@ -64,7 +64,7 @@ for i = 1:n
 
     subplot(nRows, nCols, i);
     imagesc(rngKm, dopHz(keep), P(keep, :));
-    axis xy; colormap turbo; caxis([-50 0]);
+    axis xy; colormap turbo; clim([-50 0]);
     hold on;
     plot(dets(inWin,3), dets(inWin,4), 'wo', 'MarkerSize', 5, 'LineWidth', 0.8);
     plot(t.rangeBin * c / fs / 1000, t.dopplerHz, 'wx', 'MarkerSize', 12, 'LineWidth', 2);

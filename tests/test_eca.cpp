@@ -16,6 +16,7 @@
 #include "pbr/Config.hpp"
 #include "pbr/DSICanceller.hpp"
 #include "pbr/types.hpp"
+#include "test_signals.hpp"
 
 #include <cassert>
 #include <algorithm>
@@ -26,65 +27,9 @@
 #include <vector>
 
 using namespace pbr;
+using namespace pbrtest;
 
 namespace {
-
-// Deterministic generator, so a failure is always reproducible, and the same
-// on every platform. splitmix64.
-//
-// Two mistakes were made here before, both of which quietly corrupted the
-// tests that compare two independent signals:
-//
-//   1. The original LCG returned  uint32_t(state >> 33) / 2^31 - 1, which is
-//      31 bits over 2^31 -- a range of [-1, 0), not [-1, 1). Every sample
-//      carried a -0.5 DC offset, and a constant offset is exactly the kind of
-//      thing a clutter canceller removes perfectly. "Uncorrelated" signals
-//      cancelled by 6.3 dB when theory says 0.28.
-//   2. Seeding splitmix64 as  state = seed * GAMMA  and then stepping by
-//      += GAMMA means seed s+1 produces precisely stream s offset by one
-//      output. Adjacent seeds gave the same signal, shifted.
-//
-// Hence the seed is hashed below, and testRngIsUsable() checks both
-// properties before anything depends on them.
-struct Rng {
-    uint64_t uState;
-
-    explicit Rng(uint64_t uSeed)
-    {
-        uint64_t z = uSeed + 0x9E3779B97F4A7C15ULL;
-        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-        uState = z ^ (z >> 31);
-    }
-
-    double next()   // uniform in [-1, 1)
-    {
-        uState += 0x9E3779B97F4A7C15ULL;
-        uint64_t z = uState;
-        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-        z =  z ^ (z >> 31);
-        return (static_cast<double>(z >> 11) / 9007199254740992.0) * 2.0 - 1.0;
-    }
-};
-
-std::vector<ComplexF> makeNoise(uint64_t uCount, uint64_t uSeed)
-{
-    Rng oRng(uSeed);
-    std::vector<ComplexF> vc(static_cast<size_t>(uCount));
-    for (size_t u = 0; u < vc.size(); ++u)
-        vc[u] = ComplexF(static_cast<float>(oRng.next()),
-                         static_cast<float>(oRng.next()));
-    return vc;
-}
-
-double totalPower(const std::vector<ComplexF>& vc)
-{
-    double d = 0.0;
-    for (size_t u = 0; u < vc.size(); ++u)
-        d += double(vc[u].real()) * vc[u].real() + double(vc[u].imag()) * vc[u].imag();
-    return d;
-}
 
 // Estimation and update windows given separately: ECA-S.
 DSIParams slidingParams(DSIAlgorithm eAlgorithm, uint64_t uCpi, uint64_t uTaps,
@@ -650,19 +595,6 @@ bool runBackend(DSIAlgorithm eAlgorithm, DSIBackend eBackend, bool bFloat32,
 
     vcOut.assign(vcRef.size(), ComplexF());
     return p->cancel(vcRef.data(), vcSur.data(), vcOut.data(), oStats);
-}
-
-double relativeL2(const std::vector<ComplexF>& vcA, const std::vector<ComplexF>& vcB)
-{
-    double dDiff = 0.0, dRef = 0.0;
-    for (size_t u = 0; u < vcA.size(); ++u) {
-        const double dRe = double(vcA[u].real()) - vcB[u].real();
-        const double dIm = double(vcA[u].imag()) - vcB[u].imag();
-        dDiff += dRe * dRe + dIm * dIm;
-        dRef  += double(vcB[u].real()) * vcB[u].real() +
-                 double(vcB[u].imag()) * vcB[u].imag();
-    }
-    return (dRef > 0.0) ? std::sqrt(dDiff / dRef) : 0.0;
 }
 
 // The real structural check on the GPU port.

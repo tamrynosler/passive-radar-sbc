@@ -19,6 +19,7 @@
 
 #include "pbr/ArdProcessor.hpp"
 #include "pbr/types.hpp"
+#include "test_signals.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -32,59 +33,9 @@
 #include <vector>
 
 using namespace pbr;
+using namespace pbrtest;
 
 namespace {
-
-const double kPi = 3.14159265358979323846;
-
-struct Rng {
-    uint64_t uState;
-    explicit Rng(uint64_t uSeed)
-    {
-        uint64_t z = uSeed + 0x9E3779B97F4A7C15ULL;
-        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-        uState = z ^ (z >> 31);
-    }
-    double next()
-    {
-        uState += 0x9E3779B97F4A7C15ULL;
-        uint64_t z = uState;
-        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-        z =  z ^ (z >> 31);
-        return (static_cast<double>(z >> 11) / 9007199254740992.0) * 2.0 - 1.0;
-    }
-};
-
-std::vector<ComplexF> makeNoise(uint64_t uCount, uint64_t uSeed)
-{
-    Rng oRng(uSeed);
-    std::vector<ComplexF> vc(static_cast<size_t>(uCount));
-    for (size_t u = 0; u < vc.size(); ++u)
-        vc[u] = ComplexF(static_cast<float>(oRng.next()),
-                         static_cast<float>(oRng.next()));
-    return vc;
-}
-
-std::vector<ComplexF> plantEcho(const std::vector<ComplexF>& vcRef,
-                                uint64_t uDelay, double dDopplerHz,
-                                double dAmplitude, uint64_t uSampleRateHz)
-{
-    std::vector<ComplexF> vcOut(vcRef.size(), ComplexF(0.0f, 0.0f));
-    for (size_t n = uDelay; n < vcRef.size(); ++n) {
-        const double dPhase = 2.0 * kPi * dDopplerHz *
-                              static_cast<double>(n) /
-                              static_cast<double>(uSampleRateHz);
-        const std::complex<double> cRef(vcRef[n - uDelay].real(),
-                                        vcRef[n - uDelay].imag());
-        const std::complex<double> cEcho =
-            dAmplitude * std::complex<double>(std::cos(dPhase), std::sin(dPhase)) * cRef;
-        vcOut[n] = ComplexF(static_cast<float>(cEcho.real()),
-                            static_cast<float>(cEcho.imag()));
-    }
-    return vcOut;
-}
 
 ArdParams baseParams(ArdBackend eBackend, ArdAlgorithm eAlgorithm,
                      uint64_t uRangeBins)
@@ -123,21 +74,6 @@ void runOnce(const ArdParams& o,
     vDet.assign(1024, Detection());
     assert(p->process(vcRef.data(), vcSur.data(), vcMap.data(),
                       vDet.data(), 1024, oStats));
-}
-
-double relativeL2(const std::vector<ComplexF>& vcA,
-                  const std::vector<ComplexF>& vcB)
-{
-    assert(vcA.size() == vcB.size());
-    double dDiff = 0.0, dRef = 0.0;
-    for (size_t u = 0; u < vcA.size(); ++u) {
-        const double dRe = double(vcA[u].real()) - vcB[u].real();
-        const double dIm = double(vcA[u].imag()) - vcB[u].imag();
-        dDiff += dRe * dRe + dIm * dIm;
-        dRef  += double(vcB[u].real()) * vcB[u].real() +
-                 double(vcB[u].imag()) * vcB[u].imag();
-    }
-    return (dRef > 0.0) ? std::sqrt(dDiff / dRef) : std::sqrt(dDiff);
 }
 
 std::vector<std::pair<uint64_t, uint64_t> > detectionSet(

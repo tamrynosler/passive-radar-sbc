@@ -92,7 +92,8 @@ CPU ARD stage takes 1.2 s per CPI, the Nano GPU's 13 ms.
 
 ## 2026-10-02: baseline, five cancellers, one CPI, Jetson Nano
 
-**Protocol**: `scripts/run_prelim.sh` (`make prelim ARGS=<ALG>`), one
+**Protocol**: `scripts/run_prelim.sh` (`make prelim ARGS=<ALG>`; archived
+2026-10-06 to `~/passive-radar-archive/tools/`), one
 algorithm per run, all on `data/S0_clean/cpi_0000.bin` (CPI 0 of the
 2026-09-16 FERS capture: 204800 samples at 204800 Hz, one aircraft at bin
 46 / +99 Hz, no clutter, raw ADC codes -279..280). Clocks pinned

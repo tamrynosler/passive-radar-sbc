@@ -29,7 +29,7 @@ RSYNC := $(RSYNC_BIN) -a --delete \
          --filter=':- .gitignore' \
          --exclude '.git' --exclude '.DS_Store'
 
-.PHONY: help build sync test run replay prelim push-data pull \
+.PHONY: help build sync test run replay pull \
         shell clean view drive stop host host-test host-view
 
 help:
@@ -43,8 +43,6 @@ help:
 	@echo "  make stop       end every radar process left on the Jetson"
 	@echo "  make replay     replay data/SCENARIO/capture.pbrcap on the Jetson"
 	@echo "  make view       the live viewer, forwarded to http://localhost:8080"
-	@echo "  make prelim     one algorithm on one frozen CPI, clocks pinned (ARGS=ECA-m)"
-	@echo "  make push-data  copy data/SCENARIO to the Jetson"
 	@echo "  make pull       copy results back to ./results"
 	@echo "  make shell      interactive shell on the Jetson"
 	@echo "  make clean      wipe the Jetson build directory"
@@ -156,24 +154,6 @@ view:
 	@echo "open http://localhost:8080 -- Ctrl-C here to stop"
 	@ssh -o ExitOnForwardFailure=yes -L 8080:localhost:8080 $(JETSON) \
 	    'cd $(REMOTE) && ./build/ard_view --group 239.192.0.2'
-
-## prelim: ONE algorithm on the scenario's frozen CPI, on the Jetson with
-##         clocks pinned: accuracy against the MATLAB golden (CPU FP64 and
-##         GPU), time per CPI (dsi_bench), and the chain on the capture
-##         (latency, suppression, maps). scripts/run_prelim.sh says exactly
-##         what it does. Results land in results/prelim/SCENARIO/ALG/STAMP.
-##           make prelim ARGS=ECA-m
-prelim:
-	@ssh -t $(JETSON) 'cd $(REMOTE) && SCENARIO=$(SCENARIO) STAMP=$(shell date +%Y%m%d_%H%M%S) \
-	    bash scripts/run_prelim.sh $(ARGS)'
-	@$(MAKE) pull
-
-## push-data: copy data/SCENARIO (capture, frozen CPIs, truth, goldens) to the
-##            board. Data never syncs with make build, so this is explicit.
-push-data:
-	@ssh $(JETSON) 'mkdir -p $(REMOTE)/data/$(SCENARIO)'
-	@$(RSYNC_BIN) -a --stats data/$(SCENARIO)/ '$(JETSON):$(REMOTE)/data/$(SCENARIO)/' \
-	    | grep -E "Number of files transferred|Total transferred file size" || true
 
 ## pull: copy everything under the Jetson's /data/results to ./results.
 ##

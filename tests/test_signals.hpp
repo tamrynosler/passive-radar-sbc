@@ -1,13 +1,13 @@
-// Synthetic signals shared by the DSI canceller tests.
+// Synthetic signals shared by the canceller and range-Doppler tests.
 //
 // Header-only and test-only. CMake globs tests/*.cpp, so this is not built on
-// its own. tests/test_eca.cpp predates it and carries its own copy of the RNG
-// with the history of how it went wrong; this is the same generator.
+// its own.
 #ifndef PBR_TEST_SIGNALS_HPP
 #define PBR_TEST_SIGNALS_HPP
 
 #include "pbr/types.hpp"
 
+#include <cassert>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -15,8 +15,23 @@
 
 namespace pbrtest {
 
-// splitmix64 with a hashed seed. See tests/test_eca.cpp for why the seed is
-// hashed and why the output is 53 bits over 2^53: both were bugs once.
+// Deterministic generator, so a failure is always reproducible, and the same
+// on every platform. splitmix64.
+//
+// Two mistakes were made here before, both of which quietly corrupted the
+// tests that compare two independent signals:
+//
+//   1. The original LCG returned  uint32_t(state >> 33) / 2^31 - 1, which is
+//      31 bits over 2^31 -- a range of [-1, 0), not [-1, 1). Every sample
+//      carried a -0.5 DC offset, and a constant offset is exactly the kind of
+//      thing a clutter canceller removes perfectly. "Uncorrelated" signals
+//      cancelled by 6.3 dB when theory says 0.28.
+//   2. Seeding splitmix64 as  state = seed * GAMMA  and then stepping by
+//      += GAMMA means seed s+1 produces precisely stream s offset by one
+//      output. Adjacent seeds gave the same signal, shifted.
+//
+// Hence the seed is hashed, and tests/test_eca.cpp's testRngIsUsable() checks
+// both properties before anything depends on them.
 struct Rng {
     uint64_t uState;
 
@@ -61,6 +76,7 @@ inline double totalPower(const std::vector<pbr::ComplexF>& vc)
 inline double relativeL2(const std::vector<pbr::ComplexF>& vcA,
                          const std::vector<pbr::ComplexF>& vcB)
 {
+    assert(vcA.size() == vcB.size());
     double dDiff = 0.0, dRef = 0.0;
     for (size_t u = 0; u < vcA.size(); ++u) {
         const double dRe = double(vcA[u].real()) - vcB[u].real();
@@ -69,7 +85,8 @@ inline double relativeL2(const std::vector<pbr::ComplexF>& vcA,
         dRef  += double(vcB[u].real()) * vcB[u].real() +
                  double(vcB[u].imag()) * vcB[u].imag();
     }
-    return (dRef > 0.0) ? std::sqrt(dDiff / dRef) : 0.0;
+    // Against an all-zero reference the absolute difference is all there is.
+    return (dRef > 0.0) ? std::sqrt(dDiff / dRef) : std::sqrt(dDiff);
 }
 
 // Stationary clutter: sum over k of w[k] r[n-k], with the reference zero
@@ -133,6 +150,27 @@ inline double targetResidualFraction(const std::vector<pbr::ComplexF>& vcOut,
         dResidual += dRe * dRe + dIm * dIm;
     }
     return dResidual / totalPower(vcTarget);
+}
+
+// vcRef delayed by uDelay samples, Doppler-shifted by dDopplerHz and scaled
+// by dAmplitude: one echo, zero before the delay reaches the CPI.
+inline std::vector<pbr::ComplexF> plantEcho(const std::vector<pbr::ComplexF>& vcRef,
+                                            uint64_t uDelay, double dDopplerHz,
+                                            double dAmplitude, uint64_t uSampleRateHz)
+{
+    std::vector<pbr::ComplexF> vcOut(vcRef.size(), pbr::ComplexF(0.0f, 0.0f));
+    for (size_t n = uDelay; n < vcRef.size(); ++n) {
+        const double dPhase = 2.0 * pbr::kPi * dDopplerHz *
+                              static_cast<double>(n) /
+                              static_cast<double>(uSampleRateHz);
+        const std::complex<double> cRef(vcRef[n - uDelay].real(),
+                                        vcRef[n - uDelay].imag());
+        const std::complex<double> cEcho =
+            dAmplitude * std::complex<double>(std::cos(dPhase), std::sin(dPhase)) * cRef;
+        vcOut[n] = pbr::ComplexF(static_cast<float>(cEcho.real()),
+                                 static_cast<float>(cEcho.imag()));
+    }
+    return vcOut;
 }
 
 } // namespace pbrtest

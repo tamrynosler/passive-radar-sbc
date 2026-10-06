@@ -41,45 +41,83 @@
 //
 // Build
 // -----
-//   Via CMake (see top-level CMakeLists.txt), or directly:
-//     nvcc -O3 -arch=sm_53 bench/cufft_bench.cu -lcufft -o cufft_bench
+//   Via CMake (make build), into build/cufft_bench.
 //
 // Examples
 // --------
-//   ./cufft_bench --size 204800 --batch 1 --iters 100
-//   ./cufft_bench --size 128 --batch 1600 --iters 200 --budget-ms 5
-//   ./cufft_bench --sweep-size --min-size 1024 --max-size 33554432 --batch 1 --csv > size_sweep.csv
-//   ./cufft_bench --sweep-batch --size 128 --max-batch 1048576 --csv > batch_sweep.csv
+//   ./build/cufft_bench --size 204800 --batch 1 --iters 100
+//   ./build/cufft_bench --size 128 --batch 1600 --iters 200 --budget-ms 5
+//   ./build/cufft_bench --sweep-size --min-size 1024 --max-size 33554432 --batch 1 --csv > size_sweep.csv
+//   ./build/cufft_bench --sweep-batch --size 128 --max-batch 1048576 --csv > batch_sweep.csv
 //
 // CSV goes to stdout (redirect to a file); human-readable progress goes to stderr,
 // so you can log and watch at the same time.
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
-#include <cstdint>
-#include <cmath>
 #include <string>
 #include <vector>
-#include <algorithm>
 
-#include <cuda_runtime.h>
-#include <cufft.h>
+#include "pbr/check.hpp"   // CUDA_CHECK, and the CUDA library headers
+#include "BenchCommon.hpp"
 
-// ---- error handling ---------------------------------------------------------
+namespace {
 
-#define CUDA_CHECK(x)                                                          \
-  do {                                                                         \
-    cudaError_t err = (x);                                                     \
-    if (err != cudaSuccess) {                                                  \
-      fprintf(stderr, "CUDA error %s:%d: %s\n", __FILE__, __LINE__,            \
-              cudaGetErrorString(err));                                        \
-      std::exit(2);                                                            \
-    }                                                                          \
-  } while (0)
+const double kBytesPerMiB  = 1048576.0;
+const int    kWarmupRuns   = 3;    // the first exec pays for lazy initialisation
+const int    kExitCudaError = 2;   // an unexpected CUDA failure, not a ceiling
+const int    kExitPointFailed = 3; // a single-point run that did not fit
 
-static const char* cufftErr(cufftResult r) {
-  switch (r) {
+// One (size, batch) measurement. The CSV columns keep these names.
+struct PointResult {
+    uint64_t    uSize           = 0;
+    uint64_t    uBatch          = 0;
+    bool        bOk             = false;
+    const char* pFailReason     = "";
+    double      dPlanMs         = 0.0;
+    double      dExecMeanMs     = 0.0;
+    double      dExecMinMs      = 0.0;
+    double      dExecStdMs      = 0.0;
+    size_t      uWorkspaceBytes = 0;
+    size_t      uDataBytes      = 0;
+    size_t      uMemFreeAfter   = 0;
+    double      dGflops         = 0.0;
+    double      dThroughputMsps = 0.0;
+    uint64_t    uLargestPrime   = 1;
+    bool        bWithinBudget   = true;
+};
+
+struct BenchConfig {
+    int    iIters    = 100;
+    bool   bManaged  = false;   // cudaMallocManaged (unified) vs cudaMalloc (device)
+    bool   bInPlace  = true;    // in-place C2C
+    double dBudgetMs = -1.0;    // below zero: no budget check
+};
+
+// Everything one point allocates, freed together by releasePoint().
+struct PointBuffers {
+    cufftHandle   hPlan      = 0;
+    bool          bPlanValid = false;
+    void*         d_pWork    = nullptr;
+    cufftComplex* d_cIn      = nullptr;
+    cufftComplex* d_cOut     = nullptr;   // == d_cIn when in place
+};
+
+void releasePoint(PointBuffers& oBuffers)
+{
+    if (oBuffers.d_cOut != oBuffers.d_cIn)
+        cudaFree(oBuffers.d_cOut);
+    cudaFree(oBuffers.d_cIn);
+    cudaFree(oBuffers.d_pWork);
+    if (oBuffers.bPlanValid)
+        cufftDestroy(oBuffers.hPlan);
+    oBuffers = PointBuffers();
+}
+
+const char* cufftErrorName(cufftResult eResult)
+{
+    switch (eResult) {
     case CUFFT_SUCCESS:        return "SUCCESS";
     case CUFFT_INVALID_PLAN:   return "INVALID_PLAN";
     case CUFFT_ALLOC_FAILED:   return "ALLOC_FAILED";
@@ -89,321 +127,371 @@ static const char* cufftErr(cufftResult r) {
     case CUFFT_SETUP_FAILED:   return "SETUP_FAILED";
     case CUFFT_INVALID_SIZE:   return "INVALID_SIZE";
     default:                   return "UNKNOWN";
-  }
+    }
 }
 
-// ---- helpers ----------------------------------------------------------------
-
-static size_t largestPrimeFactor(size_t n) {
-  size_t lpf = 1;
-  while (n % 2 == 0) { lpf = 2; n /= 2; }
-  for (size_t f = 3; f * f <= n; f += 2) {
-    while (n % f == 0) { lpf = f; n /= f; }
-  }
-  if (n > 1) lpf = n;
-  return lpf;
+uint64_t largestPrimeFactor(uint64_t uN)
+{
+    uint64_t uLargest = 1;
+    while (uN % 2 == 0) { uLargest = 2; uN /= 2; }
+    for (uint64_t uFactor = 3; uFactor * uFactor <= uN; uFactor += 2)
+        while (uN % uFactor == 0) { uLargest = uFactor; uN /= uFactor; }
+    if (uN > 1)
+        uLargest = uN;
+    return uLargest;
 }
 
-struct Result {
-  size_t n = 0, batch = 0;
-  bool ok = false;
-  const char* fail_reason = "";
-  double plan_ms = 0, exec_mean_ms = 0, exec_min_ms = 0, exec_std_ms = 0;
-  size_t workspace_bytes = 0, data_bytes = 0;
-  size_t mem_free_after = 0, mem_total = 0;
-  double gflops = 0, throughput_msps = 0;
-  size_t largest_prime = 1;
-  bool within_budget = true;
-};
+// Plan, allocate and time one point into oResult. Running out of memory is a
+// result, not an error: it returns true with bOk false and the reason, so a
+// sweep can walk right up to the ceiling and report it. False only on an
+// unexpected CUDA failure, already logged.
+bool measurePoint(const BenchConfig& oConfig, PointBuffers& oBuffers, PointResult& oResult)
+{
+    const uint64_t uSize  = oResult.uSize;
+    const uint64_t uBatch = oResult.uBatch;
 
-struct Config {
-  int iters = 100;
-  bool managed = false;   // cudaMallocManaged (unified) vs cudaMalloc (device)
-  bool inplace = true;    // in-place C2C
-  double budget_ms = -1;  // <0 means no budget check
-};
-
-// Run one (N, batch) point. Never aborts on resource exhaustion: returns ok=false
-// with a reason, so sweeps can walk right up to the ceiling and report it.
-static Result runOne(size_t n, size_t batch, const Config& cfg) {
-  Result R;
-  R.n = n;
-  R.batch = batch;
-  R.largest_prime = largestPrimeFactor(n);
-
-  int rank = 1;
-  int dims[1] = {static_cast<int>(n)};
-
-  cufftHandle plan;
-  if (cufftCreate(&plan) != CUFFT_SUCCESS) { R.fail_reason = "cufftCreate"; return R; }
-  cufftSetAutoAllocation(plan, 0);  // manage workspace ourselves so we can measure/catch OOM
-
-  // --- plan creation (timed) ---
-  cudaEvent_t p0, p1;
-  CUDA_CHECK(cudaEventCreate(&p0));
-  CUDA_CHECK(cudaEventCreate(&p1));
-  CUDA_CHECK(cudaEventRecord(p0));
-  size_t ws = 0;
-  cufftResult pr = cufftMakePlanMany(plan, rank, dims,
-                                     nullptr, 1, 0,
-                                     nullptr, 1, 0,
-                                     CUFFT_C2C, static_cast<int>(batch), &ws);
-  CUDA_CHECK(cudaEventRecord(p1));
-  CUDA_CHECK(cudaEventSynchronize(p1));
-  float pms = 0;
-  CUDA_CHECK(cudaEventElapsedTime(&pms, p0, p1));
-  cudaEventDestroy(p0);
-  cudaEventDestroy(p1);
-  if (pr != CUFFT_SUCCESS) {
-    R.fail_reason = (pr == CUFFT_ALLOC_FAILED) ? "plan_alloc" : cufftErr(pr);
-    cufftDestroy(plan);
-    return R;
-  }
-  R.plan_ms = pms;
-  R.workspace_bytes = ws;
-
-  // --- workspace ---
-  void* work = nullptr;
-  if (ws > 0) {
-    if (cudaMalloc(&work, ws) != cudaSuccess) {
-      cudaGetLastError();  // clear sticky error
-      R.fail_reason = "workspace_malloc";
-      cufftDestroy(plan);
-      return R;
+    if (cufftCreate(&oBuffers.hPlan) != CUFFT_SUCCESS) {
+        oResult.pFailReason = "cufftCreate";
+        return true;
     }
-  }
-  cufftSetWorkArea(plan, work);
+    oBuffers.bPlanValid = true;
+    // Manage the workspace ourselves, so its size is measured and running out
+    // of memory for it is caught.
+    cufftSetAutoAllocation(oBuffers.hPlan, 0);
 
-  // --- data buffers ---
-  const size_t elems = n * batch;
-  const size_t bytes = elems * sizeof(cufftComplex);
-  R.data_bytes = cfg.inplace ? bytes : 2 * bytes;
-
-  auto allocBuf = [&](cufftComplex** p) -> cudaError_t {
-    return cfg.managed ? cudaMallocManaged((void**)p, bytes)
-                       : cudaMalloc((void**)p, bytes);
-  };
-
-  cufftComplex *in = nullptr, *out = nullptr;
-  if (allocBuf(&in) != cudaSuccess) {
-    cudaGetLastError();
-    R.fail_reason = "input_malloc";
-    if (work) cudaFree(work);
-    cufftDestroy(plan);
-    return R;
-  }
-  if (cfg.inplace) {
-    out = in;
-  } else if (allocBuf(&out) != cudaSuccess) {
-    cudaGetLastError();
-    R.fail_reason = "output_malloc";
-    cudaFree(in);
-    if (work) cudaFree(work);
-    cufftDestroy(plan);
-    return R;
-  }
-
-  // Initialise input. Values are irrelevant to timing; we just need it defined.
-  if (cfg.managed) {
-    for (size_t i = 0; i < elems; ++i) {
-      uint32_t h = (uint32_t)(i * 2654435761u);
-      in[i].x = (float)(h & 0xFFFF) / 65536.0f - 0.5f;
-      in[i].y = 0.0f;
+    // ---- plan creation, timed ------------------------------------------------
+    int aiDims[1] = { static_cast<int>(uSize) };
+    cudaEvent_t hStart, hStop;
+    CUDA_CHECK(cudaEventCreate(&hStart));
+    CUDA_CHECK(cudaEventCreate(&hStop));
+    CUDA_CHECK(cudaEventRecord(hStart));
+    size_t uWorkspace = 0;
+    const cufftResult ePlan = cufftMakePlanMany(oBuffers.hPlan, 1, aiDims,
+                                                nullptr, 1, 0, nullptr, 1, 0,
+                                                CUFFT_C2C, static_cast<int>(uBatch),
+                                                &uWorkspace);
+    CUDA_CHECK(cudaEventRecord(hStop));
+    CUDA_CHECK(cudaEventSynchronize(hStop));
+    float fPlanMs = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&fPlanMs, hStart, hStop));
+    cudaEventDestroy(hStart);
+    cudaEventDestroy(hStop);
+    if (ePlan != CUFFT_SUCCESS) {
+        oResult.pFailReason = (ePlan == CUFFT_ALLOC_FAILED) ? "plan_alloc" : cufftErrorName(ePlan);
+        return true;
     }
-  } else {
-    CUDA_CHECK(cudaMemset(in, 0, bytes));
-  }
+    oResult.dPlanMs         = fPlanMs;
+    oResult.uWorkspaceBytes = uWorkspace;
 
-  // --- warmup (first exec includes lazy init) ---
-  for (int w = 0; w < 3; ++w) {
-    cufftResult er = cufftExecC2C(plan, in, out, CUFFT_FORWARD);
-    if (er != CUFFT_SUCCESS) {
-      R.fail_reason = cufftErr(er);
-      if (out != in) cudaFree(out);
-      cudaFree(in);
-      if (work) cudaFree(work);
-      cufftDestroy(plan);
-      return R;
+    // ---- workspace and data buffers ------------------------------------------
+    // A failed allocation leaves a sticky error; cudaGetLastError clears it.
+    if (uWorkspace > 0 && cudaMalloc(&oBuffers.d_pWork, uWorkspace) != cudaSuccess) {
+        cudaGetLastError();
+        oResult.pFailReason = "workspace_malloc";
+        return true;
     }
-  }
-  CUDA_CHECK(cudaDeviceSynchronize());
+    cufftSetWorkArea(oBuffers.hPlan, oBuffers.d_pWork);
 
-  // --- timed loop ---
-  cudaEvent_t e0, e1;
-  CUDA_CHECK(cudaEventCreate(&e0));
-  CUDA_CHECK(cudaEventCreate(&e1));
-  std::vector<double> times;
-  times.reserve(cfg.iters);
-  for (int it = 0; it < cfg.iters; ++it) {
-    CUDA_CHECK(cudaEventRecord(e0));
-    cufftExecC2C(plan, in, out, CUFFT_FORWARD);
-    CUDA_CHECK(cudaEventRecord(e1));
-    CUDA_CHECK(cudaEventSynchronize(e1));
-    float ms = 0;
-    CUDA_CHECK(cudaEventElapsedTime(&ms, e0, e1));
-    times.push_back((double)ms);
-  }
-  cudaEventDestroy(e0);
-  cudaEventDestroy(e1);
+    const size_t uElements = static_cast<size_t>(uSize * uBatch);
+    const size_t uBytes    = uElements * sizeof(cufftComplex);
+    oResult.uDataBytes = oConfig.bInPlace ? uBytes : 2 * uBytes;
 
-  // --- statistics ---
-  double sum = 0, mn = 1e300;
-  for (double t : times) { sum += t; mn = std::min(mn, t); }
-  double mean = sum / times.size();
-  double var = 0;
-  for (double t : times) var += (t - mean) * (t - mean);
-  var /= times.size();
-  R.exec_mean_ms = mean;
-  R.exec_min_ms = mn;
-  R.exec_std_ms = std::sqrt(var);
+    cudaError_t eIn = oConfig.bManaged
+        ? cudaMallocManaged(reinterpret_cast<void**>(&oBuffers.d_cIn), uBytes)
+        : cudaMalloc(reinterpret_cast<void**>(&oBuffers.d_cIn), uBytes);
+    if (eIn != cudaSuccess) {
+        cudaGetLastError();
+        oResult.pFailReason = "input_malloc";
+        return true;
+    }
+    if (oConfig.bInPlace) {
+        oBuffers.d_cOut = oBuffers.d_cIn;
+    } else {
+        cudaError_t eOut = oConfig.bManaged
+            ? cudaMallocManaged(reinterpret_cast<void**>(&oBuffers.d_cOut), uBytes)
+            : cudaMalloc(reinterpret_cast<void**>(&oBuffers.d_cOut), uBytes);
+        if (eOut != cudaSuccess) {
+            cudaGetLastError();
+            oResult.pFailReason = "output_malloc";
+            return true;
+        }
+    }
 
-  // FLOPs: standard 5 N log2(N) per complex transform, times batch.
-  double flops = 5.0 * (double)n * std::log2((double)n) * (double)batch;
-  R.gflops = flops / (mean * 1e-3) / 1e9;
-  R.throughput_msps = ((double)n * (double)batch) / (mean * 1e-3) / 1e6;
+    // The values are irrelevant to timing; the input only has to be defined.
+    if (oConfig.bManaged) {
+        for (size_t u = 0; u < uElements; ++u) {
+            const uint32_t uHash = static_cast<uint32_t>(u * 2654435761u);
+            oBuffers.d_cIn[u].x = static_cast<float>(uHash & 0xFFFF) / 65536.0f - 0.5f;
+            oBuffers.d_cIn[u].y = 0.0f;
+        }
+    } else {
+        CUDA_CHECK(cudaMemset(oBuffers.d_cIn, 0, uBytes));
+    }
 
-  size_t freeb = 0, totb = 0;
-  CUDA_CHECK(cudaMemGetInfo(&freeb, &totb));
-  R.mem_free_after = freeb;
-  R.mem_total = totb;
+    // ---- warm-up, then the timed runs ----------------------------------------
+    for (int i = 0; i < kWarmupRuns; ++i) {
+        const cufftResult eExec = cufftExecC2C(oBuffers.hPlan, oBuffers.d_cIn,
+                                               oBuffers.d_cOut, CUFFT_FORWARD);
+        if (eExec != CUFFT_SUCCESS) {
+            oResult.pFailReason = cufftErrorName(eExec);
+            return true;
+        }
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
 
-  if (cfg.budget_ms > 0) R.within_budget = (mean <= cfg.budget_ms);
-  R.ok = true;
+    CUDA_CHECK(cudaEventCreate(&hStart));
+    CUDA_CHECK(cudaEventCreate(&hStop));
+    std::vector<double> vdMs;
+    vdMs.reserve(static_cast<size_t>(oConfig.iIters));
+    for (int i = 0; i < oConfig.iIters; ++i) {
+        CUDA_CHECK(cudaEventRecord(hStart));
+        const cufftResult eExec = cufftExecC2C(oBuffers.hPlan, oBuffers.d_cIn,
+                                               oBuffers.d_cOut, CUFFT_FORWARD);
+        CUDA_CHECK(cudaEventRecord(hStop));
+        CUDA_CHECK(cudaEventSynchronize(hStop));
+        // A failed transform returns at once and would be timed as a fast one.
+        if (eExec != CUFFT_SUCCESS) {
+            cudaEventDestroy(hStart);
+            cudaEventDestroy(hStop);
+            oResult.pFailReason = cufftErrorName(eExec);
+            return true;
+        }
+        float fMs = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&fMs, hStart, hStop));
+        vdMs.push_back(static_cast<double>(fMs));
+    }
+    cudaEventDestroy(hStart);
+    cudaEventDestroy(hStop);
 
-  if (out != in) cudaFree(out);
-  cudaFree(in);
-  if (work) cudaFree(work);
-  cufftDestroy(plan);
-  return R;
+    // ---- statistics ----------------------------------------------------------
+    // Population standard deviation, as this tool has always reported it.
+    const pbrbench::TimingSummary oTiming = pbrbench::summarise(vdMs);
+    double dSq = 0.0;
+    for (size_t u = 0; u < vdMs.size(); ++u)
+        dSq += (vdMs[u] - oTiming.dMeanMs) * (vdMs[u] - oTiming.dMeanMs);
+    oResult.dExecMeanMs = oTiming.dMeanMs;
+    oResult.dExecMinMs  = oTiming.dMinMs;
+    oResult.dExecStdMs  = std::sqrt(dSq / static_cast<double>(vdMs.size()));
+
+    // The standard 5 N log2(N) operations per complex transform, times batch.
+    const double dFlops = 5.0 * static_cast<double>(uSize) *
+                          std::log2(static_cast<double>(uSize)) * static_cast<double>(uBatch);
+    oResult.dGflops         = dFlops / (oResult.dExecMeanMs * 1e-3) / 1e9;
+    oResult.dThroughputMsps = (static_cast<double>(uSize) * static_cast<double>(uBatch)) /
+                              (oResult.dExecMeanMs * 1e-3) / 1e6;
+
+    size_t uFree = 0, uTotal = 0;
+    CUDA_CHECK(cudaMemGetInfo(&uFree, &uTotal));
+    oResult.uMemFreeAfter = uFree;
+
+    if (oConfig.dBudgetMs > 0.0)
+        oResult.bWithinBudget = (oResult.dExecMeanMs <= oConfig.dBudgetMs);
+    oResult.bOk = true;
+    return true;
+}
+
+// One point, start to finish. False only on an unexpected CUDA failure.
+bool runPoint(uint64_t uSize, uint64_t uBatch, const BenchConfig& oConfig, PointResult& oResult)
+{
+    oResult = PointResult();
+    oResult.uSize         = uSize;
+    oResult.uBatch        = uBatch;
+    oResult.uLargestPrime = largestPrimeFactor(uSize);
+
+    PointBuffers oBuffers;
+    const bool bOk = measurePoint(oConfig, oBuffers, oResult);
+    releasePoint(oBuffers);
+    return bOk;
 }
 
 // ---- reporting --------------------------------------------------------------
 
-static void printHeaderCSV() {
-  printf("n,batch,ok,fail_reason,plan_ms,exec_mean_ms,exec_min_ms,exec_std_ms,"
-         "gflops,throughput_msps,workspace_MB,data_MB,mem_free_MB,"
-         "largest_prime,within_budget\n");
+void printCsvHeader()
+{
+    std::printf("n,batch,ok,fail_reason,plan_ms,exec_mean_ms,exec_min_ms,exec_std_ms,"
+                "gflops,throughput_msps,workspace_MB,data_MB,mem_free_MB,"
+                "largest_prime,within_budget\n");
 }
 
-static void printRowCSV(const Result& R) {
-  printf("%zu,%zu,%d,%s,%.4f,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%.2f,%.2f,%zu,%d\n",
-         R.n, R.batch, R.ok ? 1 : 0, R.ok ? "" : R.fail_reason,
-         R.plan_ms, R.exec_mean_ms, R.exec_min_ms, R.exec_std_ms,
-         R.gflops, R.throughput_msps,
-         R.workspace_bytes / 1048576.0, R.data_bytes / 1048576.0,
-         R.mem_free_after / 1048576.0, R.largest_prime, R.within_budget ? 1 : 0);
-  fflush(stdout);
+void printCsvRow(const PointResult& oResult)
+{
+    std::printf("%zu,%zu,%d,%s,%.4f,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%.2f,%.2f,%zu,%d\n",
+                static_cast<size_t>(oResult.uSize), static_cast<size_t>(oResult.uBatch),
+                oResult.bOk ? 1 : 0, oResult.bOk ? "" : oResult.pFailReason,
+                oResult.dPlanMs, oResult.dExecMeanMs, oResult.dExecMinMs, oResult.dExecStdMs,
+                oResult.dGflops, oResult.dThroughputMsps,
+                oResult.uWorkspaceBytes / kBytesPerMiB, oResult.uDataBytes / kBytesPerMiB,
+                oResult.uMemFreeAfter / kBytesPerMiB, static_cast<size_t>(oResult.uLargestPrime),
+                oResult.bWithinBudget ? 1 : 0);
+    std::fflush(stdout);
 }
 
-static void printHuman(const Result& R, const Config& cfg) {
-  if (!R.ok) {
-    fprintf(stderr, "  N=%-9zu batch=%-8zu  FAILED (%s)\n",
-            R.n, R.batch, R.fail_reason);
-    return;
-  }
-  fprintf(stderr,
-          "  N=%-9zu batch=%-8zu  exec %.3f ms (min %.3f, sd %.3f)  "
-          "%.1f GFLOP/s  %.1f MS/s  data %.0f MB  ws %.0f MB  free %.0f MB",
-          R.n, R.batch, R.exec_mean_ms, R.exec_min_ms, R.exec_std_ms,
-          R.gflops, R.throughput_msps,
-          R.data_bytes / 1048576.0, R.workspace_bytes / 1048576.0,
-          R.mem_free_after / 1048576.0);
-  if (cfg.budget_ms > 0)
-    fprintf(stderr, "  [%s budget]", R.within_budget ? "WITHIN" : "OVER");
-  if (R.largest_prime > 7)
-    fprintf(stderr, "  (!) largest prime factor %zu > 7: cuFFT slow, "
-                    "prefer a 7-smooth size", R.largest_prime);
-  fprintf(stderr, "\n");
-}
-
-// ---- CLI --------------------------------------------------------------------
-
-static void usage(const char* prog) {
-  fprintf(stderr,
-    "Usage: %s [options]\n"
-    "  --size N            FFT length (default 204800)\n"
-    "  --batch B           number of transforms (default 1)\n"
-    "  --iters I           timed iterations (default 100)\n"
-    "  --managed           use unified memory (cudaMallocManaged)\n"
-    "  --outofplace        separate input/output buffers\n"
-    "  --budget-ms X       flag configs whose mean latency exceeds X ms\n"
-    "  --sweep-size        double N from --min-size to --max-size at fixed batch\n"
-    "  --sweep-batch       double batch from 1 up to --max-batch at fixed size\n"
-    "  --min-size N        sweep lower bound (default 1024)\n"
-    "  --max-size N        sweep upper bound (default 67108864)\n"
-    "  --max-batch B       batch sweep upper bound (default 4194304)\n"
-    "  --csv               emit CSV rows on stdout\n"
-    "  --help\n", prog);
-}
-
-int main(int argc, char** argv) {
-  size_t size = 204800, batch = 1;
-  size_t min_size = 1024, max_size = 67108864, max_batch = 4194304;
-  bool sweep_size = false, sweep_batch = false, csv = false;
-  Config cfg;
-
-  auto need = [&](int& i) -> const char* {
-    if (i + 1 >= argc) { usage(argv[0]); std::exit(1); }
-    return argv[++i];
-  };
-
-  for (int i = 1; i < argc; ++i) {
-    std::string a = argv[i];
-    if      (a == "--size")       size = strtoull(need(i), nullptr, 10);
-    else if (a == "--batch")      batch = strtoull(need(i), nullptr, 10);
-    else if (a == "--iters")      cfg.iters = atoi(need(i));
-    else if (a == "--managed")    cfg.managed = true;
-    else if (a == "--outofplace") cfg.inplace = false;
-    else if (a == "--budget-ms")  cfg.budget_ms = atof(need(i));
-    else if (a == "--sweep-size") sweep_size = true;
-    else if (a == "--sweep-batch")sweep_batch = true;
-    else if (a == "--min-size")   min_size = strtoull(need(i), nullptr, 10);
-    else if (a == "--max-size")   max_size = strtoull(need(i), nullptr, 10);
-    else if (a == "--max-batch")  max_batch = strtoull(need(i), nullptr, 10);
-    else if (a == "--csv")        csv = true;
-    else if (a == "--help")       { usage(argv[0]); return 0; }
-    else { fprintf(stderr, "unknown option: %s\n", a.c_str()); usage(argv[0]); return 1; }
-  }
-
-  int dev = 0;
-  cudaDeviceProp prop;
-  CUDA_CHECK(cudaGetDevice(&dev));
-  CUDA_CHECK(cudaGetDeviceProperties(&prop, dev));
-  size_t freeb = 0, totb = 0;
-  CUDA_CHECK(cudaMemGetInfo(&freeb, &totb));
-  fprintf(stderr, "Device: %s  sm_%d%d  total %.0f MB  free %.0f MB  "
-                  "memory=%s  placement=%s\n\n",
-          prop.name, prop.major, prop.minor, totb / 1048576.0, freeb / 1048576.0,
-          cfg.managed ? "managed" : "device",
-          cfg.inplace ? "in-place" : "out-of-place");
-
-  if (csv) printHeaderCSV();
-
-  if (sweep_size) {
-    fprintf(stderr, "Sweeping N = %zu .. %zu (x2) at batch=%zu\n",
-            min_size, max_size, batch);
-    for (size_t n = min_size; n <= max_size; n *= 2) {
-      Result R = runOne(n, batch, cfg);
-      printHuman(R, cfg);
-      if (csv) printRowCSV(R);
-      if (!R.ok) { fprintf(stderr, "-> ceiling reached at N=%zu (%s)\n",
-                           n, R.fail_reason); break; }
+void printHuman(const PointResult& oResult, const BenchConfig& oConfig)
+{
+    if (!oResult.bOk) {
+        std::fprintf(stderr, "  N=%-9zu batch=%-8zu  FAILED (%s)\n",
+                     static_cast<size_t>(oResult.uSize), static_cast<size_t>(oResult.uBatch),
+                     oResult.pFailReason);
+        return;
     }
-  } else if (sweep_batch) {
-    fprintf(stderr, "Sweeping batch = 1 .. %zu (x2) at N=%zu\n", max_batch, size);
-    for (size_t b = 1; b <= max_batch; b *= 2) {
-      Result R = runOne(size, b, cfg);
-      printHuman(R, cfg);
-      if (csv) printRowCSV(R);
-      if (!R.ok) { fprintf(stderr, "-> ceiling reached at batch=%zu (%s)\n",
-                           b, R.fail_reason); break; }
-    }
-  } else {
-    Result R = runOne(size, batch, cfg);
-    printHuman(R, cfg);
-    if (csv) printRowCSV(R);
-    if (!R.ok) return 3;
-  }
+    std::fprintf(stderr,
+                 "  N=%-9zu batch=%-8zu  exec %.3f ms (min %.3f, sd %.3f)  "
+                 "%.1f GFLOP/s  %.1f MS/s  data %.0f MB  ws %.0f MB  free %.0f MB",
+                 static_cast<size_t>(oResult.uSize), static_cast<size_t>(oResult.uBatch),
+                 oResult.dExecMeanMs, oResult.dExecMinMs, oResult.dExecStdMs,
+                 oResult.dGflops, oResult.dThroughputMsps,
+                 oResult.uDataBytes / kBytesPerMiB, oResult.uWorkspaceBytes / kBytesPerMiB,
+                 oResult.uMemFreeAfter / kBytesPerMiB);
+    if (oConfig.dBudgetMs > 0.0)
+        std::fprintf(stderr, "  [%s budget]", oResult.bWithinBudget ? "WITHIN" : "OVER");
+    // cuFFT is fastest on sizes whose prime factors are all 2, 3, 5 or 7.
+    if (oResult.uLargestPrime > 7)
+        std::fprintf(stderr, "  (!) largest prime factor %zu > 7: cuFFT slow, "
+                             "prefer a 7-smooth size",
+                     static_cast<size_t>(oResult.uLargestPrime));
+    std::fprintf(stderr, "\n");
+}
 
-  return 0;
+// ---- command line -----------------------------------------------------------
+
+struct Options {
+    uint64_t    uSize       = 204800;
+    uint64_t    uBatch      = 1;
+    uint64_t    uMinSize    = 1024;
+    uint64_t    uMaxSize    = 67108864;
+    uint64_t    uMaxBatch   = 4194304;
+    bool        bSweepSize  = false;
+    bool        bSweepBatch = false;
+    bool        bCsv        = false;
+    BenchConfig oConfig;
+};
+
+void printUsage(const char* pProgram)
+{
+    std::fprintf(stderr,
+        "Usage: %s [options]\n"
+        "  --size N            FFT length (default 204800)\n"
+        "  --batch B           number of transforms (default 1)\n"
+        "  --iters I           timed iterations (default 100)\n"
+        "  --managed           use unified memory (cudaMallocManaged)\n"
+        "  --outofplace        separate input/output buffers\n"
+        "  --budget-ms X       flag configs whose mean latency exceeds X ms\n"
+        "  --sweep-size        double N from --min-size to --max-size at fixed batch\n"
+        "  --sweep-batch       double batch from 1 up to --max-batch at fixed size\n"
+        "  --min-size N        sweep lower bound (default 1024)\n"
+        "  --max-size N        sweep upper bound (default 67108864)\n"
+        "  --max-batch B       batch sweep upper bound (default 4194304)\n"
+        "  --csv               emit CSV rows on stdout\n"
+        "  --help\n", pProgram);
+}
+
+// 0 to run, otherwise the exit code: 0 for --help, 1 for a bad argument.
+int parseArgs(int argc, char* argv[], Options& oOptions, bool& bRun)
+{
+    bRun = false;
+    for (int i = 1; i < argc; ++i) {
+        const std::string sArg = argv[i];
+        const bool bHasValue   = (i + 1 < argc);
+        const bool bTakesValue = (sArg == "--size" || sArg == "--batch" || sArg == "--iters" ||
+                                  sArg == "--budget-ms" || sArg == "--min-size" ||
+                                  sArg == "--max-size" || sArg == "--max-batch");
+        if (bTakesValue && !bHasValue) {
+            printUsage(argv[0]);
+            return 1;
+        }
+
+        if      (sArg == "--size")        oOptions.uSize     = std::strtoull(argv[++i], nullptr, 10);
+        else if (sArg == "--batch")       oOptions.uBatch    = std::strtoull(argv[++i], nullptr, 10);
+        else if (sArg == "--iters")       oOptions.oConfig.iIters    = std::atoi(argv[++i]);
+        else if (sArg == "--budget-ms")   oOptions.oConfig.dBudgetMs = std::atof(argv[++i]);
+        else if (sArg == "--min-size")    oOptions.uMinSize  = std::strtoull(argv[++i], nullptr, 10);
+        else if (sArg == "--max-size")    oOptions.uMaxSize  = std::strtoull(argv[++i], nullptr, 10);
+        else if (sArg == "--max-batch")   oOptions.uMaxBatch = std::strtoull(argv[++i], nullptr, 10);
+        else if (sArg == "--managed")     oOptions.oConfig.bManaged = true;
+        else if (sArg == "--outofplace")  oOptions.oConfig.bInPlace = false;
+        else if (sArg == "--sweep-size")  oOptions.bSweepSize  = true;
+        else if (sArg == "--sweep-batch") oOptions.bSweepBatch = true;
+        else if (sArg == "--csv")         oOptions.bCsv = true;
+        else if (sArg == "--help")        { printUsage(argv[0]); return 0; }
+        else {
+            std::fprintf(stderr, "unknown option: %s\n", sArg.c_str());
+            printUsage(argv[0]);
+            return 1;
+        }
+    }
+    bRun = true;
+    return 0;
+}
+
+bool printDevice(const BenchConfig& oConfig)
+{
+    int iDevice = 0;
+    cudaDeviceProp oProp;
+    CUDA_CHECK(cudaGetDevice(&iDevice));
+    CUDA_CHECK(cudaGetDeviceProperties(&oProp, iDevice));
+    size_t uFree = 0, uTotal = 0;
+    CUDA_CHECK(cudaMemGetInfo(&uFree, &uTotal));
+    std::fprintf(stderr, "Device: %s  sm_%d%d  total %.0f MB  free %.0f MB  "
+                         "memory=%s  placement=%s\n\n",
+                 oProp.name, oProp.major, oProp.minor, uTotal / kBytesPerMiB, uFree / kBytesPerMiB,
+                 oConfig.bManaged ? "managed" : "device",
+                 oConfig.bInPlace ? "in-place" : "out-of-place");
+    return true;
+}
+
+} // namespace
+
+int main(int argc, char* argv[])
+{
+    Options oOptions;
+    bool bRun = false;
+    const int iParse = parseArgs(argc, argv, oOptions, bRun);
+    if (!bRun)
+        return iParse;
+
+    const BenchConfig& oConfig = oOptions.oConfig;
+    if (!printDevice(oConfig))
+        return kExitCudaError;
+    if (oOptions.bCsv)
+        printCsvHeader();
+
+    PointResult oResult;
+    if (oOptions.bSweepSize) {
+        std::fprintf(stderr, "Sweeping N = %zu .. %zu (x2) at batch=%zu\n",
+                     static_cast<size_t>(oOptions.uMinSize), static_cast<size_t>(oOptions.uMaxSize),
+                     static_cast<size_t>(oOptions.uBatch));
+        for (uint64_t uSize = oOptions.uMinSize; uSize <= oOptions.uMaxSize; uSize *= 2) {
+            if (!runPoint(uSize, oOptions.uBatch, oConfig, oResult))
+                return kExitCudaError;
+            printHuman(oResult, oConfig);
+            if (oOptions.bCsv) printCsvRow(oResult);
+            if (!oResult.bOk) {
+                std::fprintf(stderr, "-> ceiling reached at N=%zu (%s)\n",
+                             static_cast<size_t>(uSize), oResult.pFailReason);
+                break;
+            }
+        }
+    } else if (oOptions.bSweepBatch) {
+        std::fprintf(stderr, "Sweeping batch = 1 .. %zu (x2) at N=%zu\n",
+                     static_cast<size_t>(oOptions.uMaxBatch), static_cast<size_t>(oOptions.uSize));
+        for (uint64_t uBatch = 1; uBatch <= oOptions.uMaxBatch; uBatch *= 2) {
+            if (!runPoint(oOptions.uSize, uBatch, oConfig, oResult))
+                return kExitCudaError;
+            printHuman(oResult, oConfig);
+            if (oOptions.bCsv) printCsvRow(oResult);
+            if (!oResult.bOk) {
+                std::fprintf(stderr, "-> ceiling reached at batch=%zu (%s)\n",
+                             static_cast<size_t>(uBatch), oResult.pFailReason);
+                break;
+            }
+        }
+    } else {
+        if (!runPoint(oOptions.uSize, oOptions.uBatch, oConfig, oResult))
+            return kExitCudaError;
+        printHuman(oResult, oConfig);
+        if (oOptions.bCsv) printCsvRow(oResult);
+        if (!oResult.bOk)
+            return kExitPointFailed;
+    }
+    return 0;
 }

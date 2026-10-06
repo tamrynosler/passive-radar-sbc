@@ -1,18 +1,22 @@
-%% ard_golden.m
+%% ard_golden
 % Generate the golden range-Doppler map and CFAR detections for validating
 % the C++/CUDA ARD stage.
 %
-% Reads the CLEANED CPI written by
-%   ./bin/dsi_verify --cpi data/cpi_0000.bin --golden data/golden_ecab.bin \
-%                    --algorithm ECA-B --dump-output data/cleaned_0000.bin
-% which holds (reference, cleaned surveillance) in the same two-channel format
-% as an ordinary CPI dump, so the loader below is the same one eca_golden.m
-% uses.
+%   ard_golden(confPath, scenarioDir)
+%
+%   confPath     the chain config, config/fers.conf for the FERS scenarios
+%   scenarioDir  data/<scenario>: reads cleaned_0000.bin, writes
+%                golden/golden_ard.bin for ard_verify to compare against
+%
+% cleaned_0000.bin is written by dsi_verify, and holds (reference, cleaned
+% surveillance) in the ordinary two-channel CPI format:
+%   ./bin/dsi_verify --cpi data/S0_clean/cpi_0000.bin \
+%       --golden data/S0_clean/golden/golden_ecab.bin --config <ECA-B config> \
+%       --algorithm ECA-B --dump-output data/S0_clean/cleaned_0000.bin
 %
 % Computes, in double precision and verbatim from fm_passive_radar_process.m:
 %   * the cross-ambiguity map (lag product -> integrate and dump -> FFT)
 %   * the 2D cell-averaging CFAR detections
-% and writes both to data/golden_ard.bin for ard_verify to compare against.
 %
 % AXIS CONVENTION. fm_passive_radar_process.m stores the map as
 % (range, doppler) and plots Doppler horizontally. Everything downstream of
@@ -23,25 +27,27 @@
 % has to think about it again.
 %
 % Run from the repository root:
-%   matlab -batch "addpath('matlab'); ard_golden"
+%   matlab -batch "addpath('matlab'); ard_golden('config/fers.conf', 'data/S0_clean')"
 
-clear; clc;
+function ard_golden(confPath, scenarioDir)
 
 % ---- parameters, straight from the config the C++ side reads ---------------
 % Not copied by hand: a golden file generated with different settings than the
 % run it is compared against proves nothing, and hand-copied constants drift
 % the moment the config is tuned.
-cfg    = read_prb_conf('config/prb.conf');
+cfg    = read_prb_conf(confPath);
 Lrange = cfg.N_RANGE_BINS;
 dec    = cfg.DOPPLER_DECIMATION;
 Pfa    = cfg.CFAR_PFA;
 guard  = [cfg.CFAR_GUARD_RANGE cfg.CFAR_GUARD_DOPPLER];
 train  = [cfg.CFAR_TRAIN_RANGE cfg.CFAR_TRAIN_DOPPLER];
-fprintf('config: %d range bins, dec %d, Pfa %g, guard [%d %d], train [%d %d]\n', ...
-        Lrange, dec, Pfa, guard(1), guard(2), train(1), train(2));
+fprintf('config %s: %d range bins, dec %d, Pfa %g, guard [%d %d], train [%d %d]\n', ...
+        confPath, Lrange, dec, Pfa, guard(1), guard(2), train(1), train(2));
 
-cleanedPath = 'data/cleaned_0000.bin';
-outPath     = 'data/golden_ard.bin';
+cleanedPath = fullfile(scenarioDir, 'cleaned_0000.bin');
+goldenDir   = fullfile(scenarioDir, 'golden');
+if ~exist(goldenDir, 'dir'), mkdir(goldenDir); end
+outPath     = fullfile(goldenDir, 'golden_ard.bin');
 
 % ---- read the cleaned CPI --------------------------------------------------
 [sref, sclean, N, fs, startIdx] = read_cpi(cleanedPath);
@@ -108,6 +114,8 @@ end
 % ---- write, transposed into display layout ---------------------------------
 write_ard(outPath, rd.', fs, dec, startIdx, dets);
 fprintf('wrote %s (%d detections)\n', outPath, nDet);
+
+end
 
 %% ================= helpers =================
 function [ref, sur, n, fs, startIdx] = read_cpi(path)

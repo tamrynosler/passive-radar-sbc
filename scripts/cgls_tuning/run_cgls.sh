@@ -32,7 +32,7 @@
 # CGLS_PRIME = 0 all three are cold and should agree closely.
 #
 # Laptop timings say only how the cost scales with the parameters; the
-# citable numbers come from the Nano (make prelim ARGS=CGLS).
+# citable numbers come from the Nano with clocks pinned.
 
 set -euo pipefail
 

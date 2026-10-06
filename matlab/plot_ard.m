@@ -5,12 +5,14 @@
 % Schuepbach RadarConf 2020, Colone TAES 52(3) 2016 and Laptev DSPA 2026, and
 % matching how the file stores it -- so this is an imagesc with no transpose.
 %
-%   plot_ard                          % data/golden_ard.bin, +-200 Hz
-%   plot_ard('data/ard_0000.bin')
-%   plot_ard('data/ard_0000.bin', 400)
+%   plot_ard                                       % data/S0_clean/ard/ard_00000.bin
+%   plot_ard('data/S0_clean/golden/golden_ard.bin')
+%   plot_ard('results/<run>/ard/ard_00003.bin', 400) % +-400 Hz
+%
+% Run from the repository root.
 
 function plot_ard(path, fdMax)
-    if nargin < 1 || isempty(path),  path  = '../data/golden_ard.bin'; end
+    if nargin < 1 || isempty(path),  path  = 'data/S0_clean/ard/ard_00000.bin'; end
     if nargin < 2 || isempty(fdMax), fdMax = 200; end
 
     [map, nRange, nDop, fs, dec, dets] = read_ard(path);
@@ -27,7 +29,7 @@ function plot_ard(path, fdMax)
 
     figure('Color','w');
     imagesc(rngAxis, dopAxis(keep), dB(keep,:));
-    axis xy; colormap turbo; colorbar; caxis([-50 0]);
+    axis xy; colormap turbo; colorbar; clim([-50 0]);
     xlabel('Bistatic range (km)');
     ylabel('Bistatic Doppler (Hz)');
     title(sprintf('Range-Doppler map  (%d x %d,  %.1f Hz/bin)', ...

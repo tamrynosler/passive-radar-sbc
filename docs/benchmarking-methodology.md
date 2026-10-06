@@ -49,7 +49,9 @@ and version used for each figure.
 
 ## Protocol used for the 2026-10-02 baseline
 
-`scripts/run_prelim.sh` (`make prelim ARGS=<ALG>`): one algorithm, one frozen
+`scripts/run_prelim.sh` (`make prelim ARGS=<ALG>`; both archived 2026-10-06
+to `~/passive-radar-archive/tools/`, to be replaced by the redesigned
+tests): one algorithm, one frozen
 CPI (`data/S0_clean/cpi_0000.bin`), on the Jetson with clocks pinned and
 `tegrastats` logged. Four measurements land in one directory under
 `results/prelim/<scenario>/<ALG>/<stamp>/` with a manifest (`run.txt`: git

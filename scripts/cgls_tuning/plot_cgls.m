@@ -73,7 +73,7 @@ figure('Color', 'w', 'Position', [100 100 1100 800]);
 % map
 subplot(2, 2, [1 2]);
 imagesc(rngKm, dopHz(keep), P(keep, :));
-axis xy; colormap turbo; colorbar; caxis([-50 0]);
+axis xy; colormap turbo; colorbar; clim([-50 0]);
 hold on;
 inWin = abs(dets(:,4)) <= fdMax;
 plot(dets(inWin,3), dets(inWin,4), 'wo', 'MarkerSize', 7, 'LineWidth', 1);
