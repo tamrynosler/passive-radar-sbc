@@ -15,7 +15,8 @@
 //                         layout -- all in the pass that has to read and write
 //                         anyway, so the reordering is free
 //   4. cuBLAS isamax      the map's peak, for the dB scale
-//   5. cfarKernel         one thread per cell, direct window sum
+//   5. dopplerPrefixKernel  running sum along Doppler for each range bin
+//      cfarKernel         one thread per cell, window sums from the prefixes
 //
 // powerKernel replaces 1-3 when detect() is handed a finished map.
 //
@@ -155,9 +156,17 @@ __global__ void powerKernel(const cufftComplex* d_cMap, float* d_fPower,
 // ---------------------------------------------------------------------------
 // CFAR.
 //
-// One thread per cell, walking its own window. Direct and obvious; a
-// summed-area table would cut the reads to a handful per cell, and is
-// deliberately not done -- correct first.
+// dopplerPrefixKernel gives each range bin a running sum along Doppler,
+// S[r][d] = sum of P[r][0..d], in the layout of the power map. cfarKernel then
+// has one thread per cell, and the sum of a row's cells over a Doppler span
+// is two reads (S at the span's end minus S just before its start). The
+// window is its rows' spans added up, minus the guard block's rows: 4 reads
+// for the 1-D window, 20 for the 2-D one, instead of walking every cell.
+//
+// The prefix is a float over up to uDopplers cells, so a window sum is a
+// difference of two large numbers and carries an error of about
+// uDopplers * 6e-8 of the row's running total. A cell within that of its
+// threshold can flip against the CPU, which sums each window directly.
 //
 // Cells whose window runs off the map contribute zero and the divisor stays
 // the full training count, matching MATLAB's conv2(..., 'same'). Border
@@ -167,7 +176,36 @@ __global__ void powerKernel(const cufftComplex* d_cMap, float* d_fPower,
 // Detections are appended through an atomic counter, so they land in an
 // order that changes from run to run; the host sorts them afterwards.
 // ---------------------------------------------------------------------------
-__global__ void cfarKernel(const float* d_fPower, uint32_t uRanges,
+// One thread per range bin, serial over Doppler. d_fPrefix has the layout of
+// d_fPower: index d * uRanges + r.
+__global__ void dopplerPrefixKernel(const float* d_fPower, float* d_fPrefix,
+                                    uint32_t uRanges, uint32_t uDopplers)
+{
+    const uint32_t uR = blockIdx.x * blockDim.x + threadIdx.x;
+    if (uR >= uRanges)
+        return;
+    float fRun = 0.0f;
+    for (uint32_t uD = 0; uD < uDopplers; ++uD) {
+        fRun += d_fPower[static_cast<size_t>(uD) * uRanges + uR];
+        d_fPrefix[static_cast<size_t>(uD) * uRanges + uR] = fRun;
+    }
+}
+
+// Sum of range bin iR over Doppler bins iLo..iHi, both clipped to the map.
+__device__ float rowSpanSum(const float* d_fPrefix, uint32_t uRanges, uint32_t uDopplers,
+                            int32_t iR, int32_t iLo, int32_t iHi)
+{
+    if (iLo < 0)
+        iLo = 0;
+    if (iHi > static_cast<int32_t>(uDopplers) - 1)
+        iHi = static_cast<int32_t>(uDopplers) - 1;
+    float fSum = d_fPrefix[static_cast<size_t>(iHi) * uRanges + iR];
+    if (iLo > 0)
+        fSum -= d_fPrefix[static_cast<size_t>(iLo - 1) * uRanges + iR];
+    return fSum;
+}
+
+__global__ void cfarKernel(const float* d_fPower, const float* d_fPrefix, uint32_t uRanges,
                            uint32_t uDopplers,
                            int32_t iGuardR, int32_t iGuardD,
                            int32_t iHalfR,  int32_t iHalfD,
@@ -186,22 +224,18 @@ __global__ void cfarKernel(const float* d_fPower, uint32_t uRanges,
 
     const float fCell = d_fPower[uIdx];
 
+    // Whole window minus the guard block (which holds the cell under test),
+    // each row's span from the prefixes. Rows off the map contribute zero.
     float fSum = 0.0f;
-    for (int32_t iOffD = -iHalfD; iOffD <= iHalfD; ++iOffD) {
-        const int32_t iD = iDoppler + iOffD;
-        if (iD < 0 || iD >= static_cast<int32_t>(uDopplers))
+    for (int32_t iOffR = -iHalfR; iOffR <= iHalfR; ++iOffR) {
+        const int32_t iR = iRange + iOffR;
+        if (iR < 0 || iR >= static_cast<int32_t>(uRanges))
             continue;
-        const bool bGuardD = (iOffD >= -iGuardD && iOffD <= iGuardD);
-
-        for (int32_t iOffR = -iHalfR; iOffR <= iHalfR; ++iOffR) {
-            if (bGuardD && iOffR >= -iGuardR && iOffR <= iGuardR)
-                continue;   // guard block, including the cell under test
-            const int32_t iR = iRange + iOffR;
-            if (iR < 0 || iR >= static_cast<int32_t>(uRanges))
-                continue;
-            fSum += d_fPower[static_cast<uint32_t>(iD) * uRanges +
-                             static_cast<uint32_t>(iR)];
-        }
+        fSum += rowSpanSum(d_fPrefix, uRanges, uDopplers, iR,
+                           iDoppler - iHalfD, iDoppler + iHalfD);
+        if (iOffR >= -iGuardR && iOffR <= iGuardR)
+            fSum -= rowSpanSum(d_fPrefix, uRanges, uDopplers, iR,
+                               iDoppler - iGuardD, iDoppler + iGuardD);
     }
 
     const float fThreshold = fAlphaOverTrain * fSum;
@@ -294,6 +328,7 @@ private:
     cufftComplex*  md_cDecimated    = nullptr;   // [range][block]
     cufftComplex*  md_cMap          = nullptr;   // [doppler][range]
     float*         md_fPower        = nullptr;
+    float*         md_fPrefix       = nullptr;   // running sum of md_fPower along Doppler
     Detection*     md_oDetections   = nullptr;   // kMaxArdDetections
     uint32_t*      md_uCounters     = nullptr;   // kCounters
 
@@ -314,6 +349,7 @@ void ArdGpu::release()
     cudaFree(md_cDecimated);
     cudaFree(md_cMap);
     cudaFree(md_fPower);
+    cudaFree(md_fPrefix);
     cudaFree(md_oDetections);
     cudaFree(md_uCounters);
     if (mbPlanValid)
@@ -323,6 +359,7 @@ void ArdGpu::release()
 
     md_cRef = md_cCleaned = md_cDecimated = md_cMap = nullptr;
     md_fPower      = nullptr;
+    md_fPrefix     = nullptr;
     md_oDetections = nullptr;
     md_uCounters   = nullptr;
     mhCublas       = nullptr;
@@ -368,6 +405,7 @@ bool ArdGpu::setUp(const ArdParams& oParams)
     CUDA_CHECK(cudaMalloc(&md_cDecimated,  uMapBytes));
     CUDA_CHECK(cudaMalloc(&md_cMap,        uMapBytes));
     CUDA_CHECK(cudaMalloc(&md_fPower,      uPowBytes));
+    CUDA_CHECK(cudaMalloc(&md_fPrefix,     uPowBytes));
     CUDA_CHECK(cudaMalloc(&md_oDetections, uDetBytes));
     CUDA_CHECK(cudaMalloc(&md_uCounters,   kCounters * sizeof(uint32_t)));
 
@@ -433,8 +471,14 @@ bool ArdGpu::runCfar(Detection* pDetections, uint64_t uMaxDetections,
     const uint32_t uCapacity = static_cast<uint32_t>(
         (uMaxDetections < kMaxArdDetections) ? uMaxDetections : kMaxArdDetections);
 
+    dopplerPrefixKernel<<<blocksFor(moParams.uRangeBins, kBlock), kBlock>>>(
+        md_fPower, md_fPrefix,
+        static_cast<uint32_t>(moParams.uRangeBins),
+        static_cast<uint32_t>(moParams.uDopplerBins));
+    CUDA_CHECK(cudaGetLastError());
+
     cfarKernel<<<blocksFor(muCells, kBlock), kBlock>>>(
-        md_fPower,
+        md_fPower, md_fPrefix,
         static_cast<uint32_t>(moParams.uRangeBins),
         static_cast<uint32_t>(moParams.uDopplerBins),
         static_cast<int32_t>(moParams.uCfarGuardRange),
