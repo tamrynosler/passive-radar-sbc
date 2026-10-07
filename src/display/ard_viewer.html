@@ -282,6 +282,7 @@ var DISPLAY_DEFAULTS = {
 
 var state = {
   runName: null,
+  runSerial: 0,         // counts new runs, so a fetch begun in an old run is dropped
   latestCpi: null,
   shownCpi: null,
   cpiChangedAt: 0,
@@ -1185,9 +1186,16 @@ function onStatus(status) {
     stream = state.telemetry;
   }
   var runName = stream ? stream.runName : null;
-  if (runName !== state.runName) {
+  // A restarted chain counts CPIs from 0 again under the same run name (a
+  // live run is always "live"). Without this the time histories, which only
+  // take a CPI newer than their last, froze at the old run's rows.
+  var restarted = stream !== null && state.telemetry !== null &&
+                  typeof stream.cpi === "number" && typeof state.telemetry.cpi === "number" &&
+                  stream.cpi < state.telemetry.cpi;
+  if (runName !== state.runName || restarted) {
     // A new run: the old running peak and histories belong to different data.
     state.runName = runName;
+    state.runSerial += 1;
     state.refDb = null;
     state.frame = null;
     state.shownCpi = null;
@@ -1240,13 +1248,13 @@ function onStatus(status) {
 function fetchFrame() {
   state.fetching = true;
   var cpi = null;
-  var wantRun = state.runName;
+  var wantRun = state.runSerial;
   fetch("/api/frame/latest", {cache: "no-store"}).then(function (response) {
     if (!response.ok) { throw new Error("frame request returned " + response.status); }
     cpi = parseInt(response.headers.get("X-Pbr-Cpi"), 10);
     return response.arrayBuffer();
   }).then(function (buffer) {
-    if (state.runName !== wantRun) {
+    if (state.runSerial !== wantRun) {
       // The run changed while this was in flight; it belongs to the old one.
       state.fetching = false;
       return;
@@ -1272,7 +1280,7 @@ function fetchFrame() {
       if (!response.ok) { return null; }
       return response.arrayBuffer().then(parseSpectra);
     }).catch(function () { return null; }).then(function (parsed) {
-      if (state.runName !== wantRun) { return; }
+      if (state.runSerial !== wantRun) { return; }
       pushSpectrumRow(cpi, frame.cpiStartIndex / frame.sampleRateHz, parsed);
       if (el("cellRf").classList.contains("shown")) { drawRfPanel(el("cvRf")); }
     });
