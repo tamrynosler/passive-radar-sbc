@@ -8,7 +8,13 @@
 
 #include "pbr/HttpServer.hpp"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -54,6 +60,20 @@ bool handler(const std::string& sMethod, const std::string& sPath,
     return false;
 }
 
+// A connection that is opened and never written to, as a browser's spare
+// connection is. Returns the socket; the caller closes it.
+int idleConnection()
+{
+    const int iSocket = ::socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in oAddress;
+    std::memset(&oAddress, 0, sizeof(oAddress));
+    oAddress.sin_family      = AF_INET;
+    oAddress.sin_port        = htons(kPort);
+    oAddress.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    assert(::connect(iSocket, reinterpret_cast<sockaddr*>(&oAddress), sizeof(oAddress)) == 0);
+    return iSocket;
+}
+
 void serveN(HttpServer* pServer, Context* pCtx, int iCount)
 {
     for (int i = 0; i < iCount; ++i)
@@ -68,7 +88,8 @@ int main()
     assert(oServer.open(kPort));
 
     Context oCtx;
-    std::thread oThread(serveN, &oServer, &oCtx, 5);
+    // Six requests and three idle connections, each one serveOne call.
+    std::thread oThread(serveN, &oServer, &oCtx, 9);
 
     int iStatus = 0;
     std::string sBody;
@@ -96,13 +117,28 @@ int main()
     assert(httpRequest("127.0.0.1", kPort, "PUT", "/hello", "", 5.0, iStatus, sBody));
     assert(iStatus == 405);
 
+    // Three idle connections ahead of a real request must not hold it up for
+    // the 5 s client timeout each: each is dropped after 250 ms.
+    int aiIdle[3];
+    for (int i = 0; i < 3; ++i)
+        aiIdle[i] = idleConnection();
+    const std::chrono::steady_clock::time_point tStart = std::chrono::steady_clock::now();
+    assert(httpRequest("127.0.0.1", kPort, "GET", "/hello", "", 5.0, iStatus, sBody));
+    const double dSeconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - tStart).count();
+    assert(iStatus == 200 && sBody == "hello\n");
+    std::printf("request behind 3 idle connections: %.3f s\n", dSeconds);
+    assert(dSeconds < 2.0);
+    for (int i = 0; i < 3; ++i)
+        ::close(aiIdle[i]);
+
     oThread.join();
-    assert(oCtx.iCalls == 4);   // PUT is refused before the handler
+    assert(oCtx.iCalls == 5);   // PUT is refused before the handler
 
     // Nothing pending: servePending returns at once, without calling the
     // handler.
     assert(oServer.servePending(handler, &oCtx));
-    assert(oCtx.iCalls == 4);
+    assert(oCtx.iCalls == 5);
 
     // Nobody listening there: the client reports why, quickly.
     oServer.close();

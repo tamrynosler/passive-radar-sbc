@@ -26,6 +26,13 @@ const size_t kMaxRequestBodyBytes  = 65536;             // a whole config is und
 const size_t kMaxResponseBodyBytes = 16 * 1024 * 1024;  // what the client will take back
 const int    kClientTimeoutSeconds = 5;
 
+// How long an accepted connection may sit silent before it is dropped. A
+// browser opens spare connections ahead of need and sends nothing on them;
+// waiting the full client timeout on each stalled the viewer for 5 s per
+// spare connection (15 s with three, 2026-10-07). A real request's first
+// bytes arrive within milliseconds of the connect.
+const int    kFirstByteTimeoutMs = 250;
+
 const char* reasonPhrase(int iStatus)
 {
     switch (iStatus) {
@@ -220,6 +227,16 @@ bool HttpServer::serveOne(HttpHandler pHandler, void* pContext)
             return true;
         std::fprintf(stderr, "HttpServer: accept failed: %s\n", std::strerror(errno));
         return false;
+    }
+    // Nothing sent yet: an idle spare connection, not a request. Drop it
+    // rather than hold up the clients behind it.
+    pollfd oFirstByte;
+    oFirstByte.fd      = iClient;
+    oFirstByte.events  = POLLIN;
+    oFirstByte.revents = 0;
+    if (::poll(&oFirstByte, 1, kFirstByteTimeoutMs) <= 0) {
+        ::close(iClient);
+        return true;
     }
     setTimeouts(iClient, kClientTimeoutSeconds);
 

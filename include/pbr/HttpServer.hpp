@@ -12,8 +12,10 @@ namespace pbr {
 // and nothing else. It serves a handful of paths on the lab network; it is
 // not a web server.
 //
-// A stalled client cannot hang it: the accepted socket carries 5 s send and
-// receive timeouts, and a failed client is dropped and the loop goes on.
+// A stalled client cannot hang it: a connection that sends nothing within
+// 250 ms is dropped (browsers open idle spare connections), the accepted
+// socket carries 5 s send and receive timeouts, and a failed client is
+// dropped and the loop goes on.
 
 struct HttpResponse {
     int                  iStatus = 200;               // 200, 400, 404, 405, 500
