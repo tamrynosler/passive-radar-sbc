@@ -544,6 +544,12 @@ void testConfigMapping()
     assert(oParams.uMaxIterations == 30);
     assert(oParams.uCglsBatchSamples == 12800);
     assert(oParams.bCglsPrime);
+    assert(oParams.bEcaGramRecurrence);      // PbrConfig defaults to on
+    oCfg.bEcaGramRecurrence = false;
+    assert(dsiParamsFromConfig(oCfg, oParams));
+    assert(!oParams.bEcaGramRecurrence);
+    oCfg.bEcaGramRecurrence = true;
+    assert(dsiParamsFromConfig(oCfg, oParams));
 
     // ECA-m overrides them: one window over the whole CPI, and the MATLAB
     // reference's absolute loading rather than a relative fraction.
@@ -583,11 +589,13 @@ bool runBackend(DSIAlgorithm eAlgorithm, DSIBackend eBackend, bool bFloat32,
                 const std::vector<ComplexF>& vcRef,
                 const std::vector<ComplexF>& vcSur,
                 uint64_t uTaps, uint64_t uEstimate, uint64_t uWindow,
-                std::vector<ComplexF>& vcOut, DSIStats& oStats)
+                std::vector<ComplexF>& vcOut, DSIStats& oStats,
+                bool bRecurrence = false)
 {
     DSIParams o = slidingParams(eAlgorithm, vcRef.size(), uTaps, uEstimate, uWindow);
     o.eBackend     = eBackend;
     o.bFloat32Math = bFloat32;
+    o.bEcaGramRecurrence = bRecurrence;   // GPU only; the CPU ignores it
 
     std::unique_ptr<DSICanceller> p = makeDSICanceller(eAlgorithm, eBackend);
     if (!p || !p->init(o))
@@ -614,39 +622,55 @@ void testGpuMatchesCpuWithoutAmplification()
     const std::vector<ComplexF> vcRef = makeNoise(uCpi, 101);
     const std::vector<ComplexF> vcSur = makeNoise(uCpi, 202);   // uncorrelated
 
-    std::vector<ComplexF> vcCpu, vcGpu;
-    DSIStats oCpu, oGpu;
-    assert(runBackend(DSIAlgorithm::EcaB, DSIBackend::Cpu, true,
-                      vcRef, vcSur, uTaps, uWindow, uWindow, vcCpu, oCpu));
-    assert(runBackend(DSIAlgorithm::EcaB, DSIBackend::Gpu, true,
-                      vcRef, vcSur, uTaps, uWindow, uWindow, vcGpu, oGpu));
+    // Each comparison runs with the Gram built by cherk and by the shift
+    // recurrence. Both must agree with the CPU.
+    for (int iRec = 0; iRec < 2; ++iRec) {
+        const bool bRec = (iRec == 1);
+        const char* pName = bRec ? "recurrence" : "cherk     ";
 
-    const double dRel = relativeL2(vcGpu, vcCpu);
-    std::printf("  GPU vs CPU-FP32, no amplification: relL2 %.2e, "
-                "suppression %.3f dB\n", dRel, oCpu.dSuppressionDb);
+        std::vector<ComplexF> vcCpu, vcGpu;
+        DSIStats oCpu, oGpu;
+        assert(runBackend(DSIAlgorithm::EcaB, DSIBackend::Cpu, true,
+                          vcRef, vcSur, uTaps, uWindow, uWindow, vcCpu, oCpu));
+        assert(runBackend(DSIAlgorithm::EcaB, DSIBackend::Gpu, true,
+                          vcRef, vcSur, uTaps, uWindow, uWindow, vcGpu, oGpu, bRec));
 
-    // Fitting K complex taps over an N-sample window absorbs about K/N of the
-    // energy even from uncorrelated noise, so a little suppression is
-    // expected. What matters is that it is nowhere near the 50 dB of real
-    // data, because that is the factor the Gram rounding gets amplified by.
-    assert(oCpu.dSuppressionDb < 1.0);
-    // Measured 3.4e-07. This is the tolerance that actually catches GPU bugs:
-    // against the deeply-cancelled real CPI the same comparison is only good
-    // to ~1e-2, because the suppression ratio amplifies the difference in
-    // cuBLAS's summation order.
-    assert(dRel < 1e-6);
+        const double dRel = relativeL2(vcGpu, vcCpu);
+        std::printf("  GPU (%s) vs CPU-FP32, ECA-B: relL2 %.2e, "
+                    "suppression %.3f dB\n", pName, dRel, oCpu.dSuppressionDb);
 
-    // ECA-S: the estimation window is 4x the update window, so the first two
-    // and last two windows are clamped and the rest centred. An edge mistake
-    // in either backend's chunk loop would show up here.
-    assert(runBackend(DSIAlgorithm::EcaS, DSIBackend::Cpu, true,
-                      vcRef, vcSur, uTaps, 4 * uWindow, uWindow, vcCpu, oCpu));
-    assert(runBackend(DSIAlgorithm::EcaS, DSIBackend::Gpu, true,
-                      vcRef, vcSur, uTaps, 4 * uWindow, uWindow, vcGpu, oGpu));
-    const double dRelS = relativeL2(vcGpu, vcCpu);
-    std::printf("  GPU vs CPU-FP32, ECA-S:            relL2 %.2e, "
-                "suppression %.3f dB\n", dRelS, oCpu.dSuppressionDb);
-    assert(dRelS < 1e-6);
+        // Fitting K complex taps over an N-sample window absorbs about K/N of
+        // the energy even from uncorrelated noise, so a little suppression is
+        // expected. What matters is that it is nowhere near the 50 dB of real
+        // data, because that is the factor the Gram rounding gets amplified by.
+        assert(oCpu.dSuppressionDb < 1.0);
+        // Measured 3.4e-07 with cherk. This is the tolerance that actually
+        // catches GPU bugs: against the deeply-cancelled real CPI the same
+        // comparison is only good to ~1e-2, because the suppression ratio
+        // amplifies the difference in cuBLAS's summation order.
+        assert(dRel < 1e-6);
+
+        // ECA-S: the estimation window is 4x the update window, so the first
+        // two and last two windows are clamped and the rest centred. An edge
+        // mistake in either backend's chunk loop would show up here.
+        assert(runBackend(DSIAlgorithm::EcaS, DSIBackend::Cpu, true,
+                          vcRef, vcSur, uTaps, 4 * uWindow, uWindow, vcCpu, oCpu));
+        assert(runBackend(DSIAlgorithm::EcaS, DSIBackend::Gpu, true,
+                          vcRef, vcSur, uTaps, 4 * uWindow, uWindow, vcGpu, oGpu, bRec));
+        const double dRelS = relativeL2(vcGpu, vcCpu);
+        std::printf("  GPU (%s) vs CPU-FP32, ECA-S: relL2 %.2e, "
+                    "suppression %.3f dB\n", pName, dRelS, oCpu.dSuppressionDb);
+        assert(dRelS < 1e-6);
+
+        // ECA-m: one window over the whole CPI, several build slices.
+        assert(runBackend(DSIAlgorithm::EcaM, DSIBackend::Cpu, true,
+                          vcRef, vcSur, uTaps, uCpi, uCpi, vcCpu, oCpu));
+        assert(runBackend(DSIAlgorithm::EcaM, DSIBackend::Gpu, true,
+                          vcRef, vcSur, uTaps, uCpi, uCpi, vcGpu, oGpu, bRec));
+        const double dRelM = relativeL2(vcGpu, vcCpu);
+        std::printf("  GPU (%s) vs CPU-FP32, ECA-m: relL2 %.2e\n", pName, dRelM);
+        assert(dRelM < 1e-6);
+    }
 }
 
 // Clutter built from known taps must still cancel enormously on the GPU. An

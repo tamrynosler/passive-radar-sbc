@@ -146,6 +146,7 @@ bool dsiParamsFromConfig(const PbrConfig& oConfig, DSIParams& oParams)
     oParams.uMaxIterations   = oConfig.uCglsIterations;
     oParams.uCglsBatchSamples= oConfig.uCglsBatchSamples;
     oParams.bCglsPrime       = oConfig.bCglsPrime;
+    oParams.bEcaGramRecurrence = oConfig.bEcaGramRecurrence;
     oParams.uFblmsTaps       = oConfig.uFblmsTaps;
     oParams.dFblmsStep       = oConfig.dFblmsStep;
     oParams.dFblmsForget     = oConfig.dFblmsForget;

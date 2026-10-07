@@ -44,6 +44,7 @@ const char* const kValidConfig =
     "ECA_UPDATE_INTERVAL_s = 0.025\n"
     "ECA_DOPPLER_TAPS = 0\n"
     "ECA_DIAGONAL_LOADING = 1e-6\n"
+    "ECA_GRAM_RECURRENCE = 1\n"
     "ECA_CD_BATCH_s = 0.0025\n"
     "ECA_CD_DOPPLER_TAPS = 1\n"
     "ARD_SNAPSHOT_EVERY = 1\n"
@@ -308,6 +309,13 @@ void testValidationRules()
     assert(oConfig.uCdBatchSamples == 512u);
     assert(oConfig.uCdDopplerTaps == 1u);
     assert(!oConfig.bCglsPrime);
+    assert(oConfig.bEcaGramRecurrence);
+    assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "ECA_GRAM_RECURRENCE = 1", "ECA_GRAM_RECURRENCE = 2")), oConfig));
+    assert(loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "ECA_GRAM_RECURRENCE = 1", "ECA_GRAM_RECURRENCE = 0")), oConfig));
+    assert(!oConfig.bEcaGramRecurrence);
+    assert(loadPbrConfig(writeTemp(kValidConfig), oConfig));
 
     assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
         "ECA_CD_DOPPLER_TAPS = 1", "ECA_CD_DOPPLER_TAPS = 4")), oConfig));
@@ -389,6 +397,7 @@ void testWhitespaceAndCommentHandling()
         "ECA_UPDATE_INTERVAL_s = 0.025\n"
         "ECA_DOPPLER_TAPS = 0\n"
         "ECA_DIAGONAL_LOADING = 1e-6\n"
+        "ECA_GRAM_RECURRENCE = 1\n"
         "ECA_CD_BATCH_s = 0.0025\n"
         "ECA_CD_DOPPLER_TAPS = 1\n"
         "ARD_SNAPSHOT_EVERY = 1\n"

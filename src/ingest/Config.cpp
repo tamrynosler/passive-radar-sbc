@@ -578,6 +578,7 @@ bool configFromKeyValues(const KeyValueMap& mValues, const char* pLabel, PbrConf
     }
     getUInt64(mValues, "CGLS_ITERATIONS",      oConfig.uCglsIterations,    bOk);
     getDouble(mValues, "CGLS_BATCH_s",         oConfig.dCglsBatchSeconds,  bOk);
+    getFlag(mValues,   "ECA_GRAM_RECURRENCE",  oConfig.bEcaGramRecurrence, bOk);
     getFlag(mValues,   "CGLS_PRIME",           oConfig.bCglsPrime,         bOk);
     getUInt64(mValues, "FBLMS_TAPS",           oConfig.uFblmsTaps,         bOk);
     getDouble(mValues, "FBLMS_STEP",           oConfig.dFblmsStep,         bOk);
@@ -715,6 +716,7 @@ std::string pbrConfigToText(const PbrConfig& oConfig)
         "ECA_UPDATE_INTERVAL_s = %.10g\n"
         "ECA_DOPPLER_TAPS = %llu\n"
         "ECA_DIAGONAL_LOADING = %.10g\n"
+        "ECA_GRAM_RECURRENCE = %d\n"
         "ECA_CD_BATCH_s = %.10g\n"
         "ECA_CD_DOPPLER_TAPS = %llu\n"
         "ARD_SNAPSHOT_EVERY = %llu\n"
@@ -742,7 +744,7 @@ std::string pbrConfigToText(const PbrConfig& oConfig)
         oConfig.dMinCpiCoverage, oConfig.sArdAlgorithm.c_str(),
         oConfig.sDsiAlgorithm.c_str(), oConfig.sDsiBackend.c_str(), oConfig.sDsiMathPrecision.c_str(),
         oConfig.dEcaBatchSeconds, oConfig.dEcaUpdateSeconds, (unsigned long long)oConfig.uEcaDopplerTaps,
-        oConfig.dEcaDiagLoading, oConfig.dCdBatchSeconds, (unsigned long long)oConfig.uCdDopplerTaps,
+        oConfig.dEcaDiagLoading, oConfig.bEcaGramRecurrence ? 1 : 0, oConfig.dCdBatchSeconds, (unsigned long long)oConfig.uCdDopplerTaps,
         (unsigned long long)oConfig.uArdSnapshotEvery,
         oConfig.bArdWriteFiles ? 1 : 0, oConfig.bArdStream ? 1 : 0,
         oConfig.sArdStreamHost.c_str(), (unsigned)oConfig.uArdStreamPort,
@@ -982,6 +984,8 @@ void printPbrConfig(const PbrConfig& oConfig)
     std::printf("  ECA loading        %g (relative), doppler taps %llu\n",
                 oConfig.dEcaDiagLoading,
                 static_cast<unsigned long long>(oConfig.uEcaDopplerTaps));
+    std::printf("  ECA Gram           %s\n",
+                oConfig.bEcaGramRecurrence ? "by shift recurrence" : "by cuBLAS cherk");
     std::printf("  ECA-CD             batch %.4f s (%llu samples), doppler taps %llu\n",
                 oConfig.dCdBatchSeconds,
                 static_cast<unsigned long long>(oConfig.uCdBatchSamples),
