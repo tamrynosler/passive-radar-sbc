@@ -737,6 +737,26 @@ for ECA-B (1d.4). Replay of the S0_clean capture through `pbr_run` on the
 GPU: 51.62 dB on CPI 0 (the golden's figure), 46 ms DSI per CPI after the
 first.
 
+### 1d.13 Speed work, 2026-10-09 (branch `speed-improvements`)
+
+Measured first (nvprof per kernel, `results/performance_improvements/
+baseline/`), then one change per item, each verified against the goldens
+and the CPU twin before merge, then measured again (`after/`). The
+process and every item's write-up are in `results/performance_improvements/
+README.md`; the before/after table there is the one to cite. In short:
+FBLMS's 1600-block loop moved into one kernel with a shared-memory FFT
+(launch-bound 364 ms -> 36 ms); CGLS's two kernels were tiled and the
+adjoint split into segments (482 -> about 220 ms); the ECA Gram is built
+from its first column by the exact shift recurrence of 1d.7 instead of
+`cherk`, selectable with `ECA_GRAM_RECURRENCE` so both rows exist (ECA-B
+153 -> 56 ms, ECA-S 225 -> 120 ms, and closer to the FP64 goldens); the
+2-D CFAR uses running sums along Doppler (6.6 -> about 2.6 ms, no
+detection moved); ECA-LD's Levinson step runs one thread per batch
+(10 -> 6 ms); the map former defaults to Batches (1e.8); the display
+spectrum averages every tenth segment. None of these changes what an
+algorithm computes; the measured rounding differences are recorded per
+item.
+
 ---
 
 ## 1e. Range-Doppler map and CFAR (`pbr::ArdProcessor`)
