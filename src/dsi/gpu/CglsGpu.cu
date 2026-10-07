@@ -12,16 +12,20 @@
 // The CPU solves the windows one after another. Here all of them advance
 // together: each kernel launch does one step of the iteration for every
 // window, and the per-window scalars -- gamma, Re(p^H s) -- live in device
-// memory, computed by one block per window and read by the next kernel. The
-// host queues 3 + 3I + I/10 launches per CPI for I iterations and never waits
+// memory, computed by one block per window (reduceKernel, stepKernel) and read by the next kernel. The
+// host queues 3 + 4I + I/10 launches per CPI for I iterations and never waits
 // for any of them until the very end. Per iteration:
 //
-//   convolveKernel   q = R p                          one thread per sample
+//   convolveKernel   q = R p                          tiles of 256 samples
 //   stepKernel       alpha; x += alpha p; r -= alpha q  one block per window
-//   adjointKernel    s = R^H r; beta; p = s + beta p    one block per window
+//   adjointKernel    partial s = R^H r per segment      windows x segments blocks
+//   reduceKernel     sum partials; beta; p = s + beta p one block per window
 //
 // plus a second convolveKernel every kCglsResidualRefresh iterations to
-// recompute r = b - R x. convolveKernel is shared with ECA (DsiGpu.cuh).
+// recompute r = b - R x. convolveKernel is shared with ECA (DsiGpu.cuh). The
+// adjoint is split over segments of each window so that enough blocks exist
+// to fill the GPU; reduceKernel adds the partials in a fixed order, so runs
+// are still bit-identical (the sum is grouped differently from the CPU's).
 // The products with R are written directly rather than through cuBLAS, so the
 // delayed-reference matrix is never built: the reference is read in place,
 // which is what makes the memory footprint a few vectors.
@@ -60,7 +64,7 @@ namespace {
 //
 //   delta = |q|^2;  alpha = Re(p^H s) / delta;  x += alpha p;  r -= alpha q
 //
-// Re(p^H s) was left in d_fPs by the adjoint kernel. On a refresh iteration
+// Re(p^H s) was left in d_fPs by the reduce kernel. On a refresh iteration
 // the residual update is skipped and a convolveKernel recomputes r from x.
 // A window that has stopped (see below) is left alone; each step taken is
 // counted in d_uSteps.
@@ -112,41 +116,100 @@ __global__ void stepKernel(const cufftComplex* d_cQ, cufftComplex* d_cR,
 }
 
 // ---------------------------------------------------------------------------
-// The new direction. One block per window, one thread per tap.
+// The new direction, in two kernels.
 //
 //   s = R^H r;  gammaNew = |s|^2;  beta = gammaNew / gamma;  p = s + beta p
 //   gamma = gammaNew;  ps = Re(p^H s)
 //
-// Thread k sums conj(r[n-k]) r_res[n] over the window: neighbouring threads
-// read neighbouring reference samples and share the residual sample, so the
-// reads coalesce. With bInit set this is the start of a window: p = s and
-// beta plays no part. A stopped window is left alone.
+// Thread k sums conj(r[n-k]) r_res[n] over the window. One block per window
+// left the GPU nearly idle, so each window is cut into uSegs segments and
+// adjointKernel gives one block to each (grid = uSegs x windows). A block
+// walks its segment kBlock samples at a time: the residual chunk and the
+// reference samples it needs go into shared memory with coalesced loads, then
+// thread k (one per tap) accumulates from shared memory. The block writes its
+// partial s to d_cPartial[(w * uSegs + seg) * K + k].
+//
+// reduceKernel (one block per window, one thread per tap) adds the uSegs
+// partials in a fixed order, so every run gives the same bits, and does the
+// rest: gammaNew, beta, p, ps. With bInit set this is the start of a window:
+// p = s and beta plays no part. A stopped window is left alone by both.
 // ---------------------------------------------------------------------------
 __global__ void adjointKernel(const cufftComplex* d_cRef, const cufftComplex* d_cR,
-                              cufftComplex* d_cP, float* d_fGamma, float* d_fPs,
-                              const bool* d_bStopped,
-                              uint32_t uTaps, uint32_t uWindow, bool bInit)
+                              cufftComplex* d_cPartial, const bool* d_bStopped,
+                              uint32_t uTaps, uint32_t uWindow, uint32_t uSegs)
+{
+    __shared__ cufftComplex acRes[kBlock];
+    __shared__ cufftComplex acRef[2 * kBlock];   // kBlock + uTaps - 1 <= 2 kBlock - 1
+
+    const uint32_t w = blockIdx.y;
+    if (d_bStopped[w])   // the same for every thread of the block
+        return;
+    const uint32_t uBase   = w * uWindow;
+    const uint32_t uSegLen = (uWindow + uSegs - 1) / uSegs;
+    const uint32_t uBegin  = uBase + blockIdx.x * uSegLen;
+    uint32_t       uEnd    = uBegin + uSegLen;
+    if (uEnd > uBase + uWindow)
+        uEnd = uBase + uWindow;
+    const uint32_t k = threadIdx.x;
+
+    float fRe = 0.0f;
+    float fIm = 0.0f;
+    for (uint32_t uN0 = uBegin; uN0 < uEnd; uN0 += kBlock) {
+        uint32_t uCount = uEnd - uN0;
+        if (uCount > kBlock)
+            uCount = kBlock;
+
+        // acRes[t] = r[uN0 + t];  acRef[j] = ref[uN0 - (uTaps - 1) + j],
+        // zero before the start of the CPI.
+        __syncthreads();   // the previous chunk is finished with the tiles
+        cufftComplex cZero;
+        cZero.x = 0.0f;
+        cZero.y = 0.0f;
+        acRes[threadIdx.x] = (threadIdx.x < uCount) ? d_cR[uN0 + threadIdx.x] : cZero;
+        for (uint32_t j = threadIdx.x; j < uCount + uTaps - 1; j += kBlock) {
+            const int64_t iIdx = static_cast<int64_t>(uN0) - (uTaps - 1) + j;
+            acRef[j] = (iIdx >= 0) ? d_cRef[iIdx] : cZero;
+        }
+        __syncthreads();
+
+        if (k < uTaps) {
+            for (uint32_t t = 0; t < uCount; ++t) {
+                const cufftComplex cA = acRef[t + uTaps - 1 - k];
+                const cufftComplex cB = acRes[t];
+                fRe += cA.x * cB.x + cA.y * cB.y;
+                fIm += cA.x * cB.y - cA.y * cB.x;
+            }
+        }
+    }
+
+    if (k < uTaps) {
+        cufftComplex cS;
+        cS.x = fRe;
+        cS.y = fIm;
+        d_cPartial[(static_cast<size_t>(w) * uSegs + blockIdx.x) * uTaps + k] = cS;
+    }
+}
+
+__global__ void reduceKernel(const cufftComplex* d_cPartial, cufftComplex* d_cP,
+                             float* d_fGamma, float* d_fPs, const bool* d_bStopped,
+                             uint32_t uTaps, uint32_t uSegs, bool bInit)
 {
     __shared__ float afShared[kBlock];
 
-    const uint32_t w     = blockIdx.x;
+    const uint32_t w = blockIdx.x;
     if (d_bStopped[w])   // the same for every thread of the block
         return;
-    const uint32_t uBase = w * uWindow;
-    const uint32_t k     = threadIdx.x;
-    const bool     bTap  = (k < uTaps);
+    const uint32_t k    = threadIdx.x;
+    const bool     bTap = (k < uTaps);
 
     cufftComplex cS;
     cS.x = 0.0f;
     cS.y = 0.0f;
     if (bTap) {
-        // The reference is zero before the start of the CPI.
-        const uint32_t uFirst = (uBase > k) ? uBase : k;
-        for (uint32_t n = uFirst; n < uBase + uWindow; ++n) {
-            const cufftComplex cA = d_cRef[n - k];
-            const cufftComplex cB = d_cR[n];
-            cS.x += cA.x * cB.x + cA.y * cB.y;
-            cS.y += cA.x * cB.y - cA.y * cB.x;
+        for (uint32_t uSeg = 0; uSeg < uSegs; ++uSeg) {
+            const cufftComplex cPart = d_cPartial[(static_cast<size_t>(w) * uSegs + uSeg) * uTaps + k];
+            cS.x += cPart.x;
+            cS.y += cPart.y;
         }
     }
 
@@ -212,6 +275,8 @@ private:
     float*          md_fPs          = nullptr;   // per window, Re(p^H s)
     bool*           md_bStopped     = nullptr;   // per window, nothing left to fit
     uint32_t*       md_uSteps       = nullptr;   // per window, steps taken this CPI
+    cufftComplex*   md_cSPartial    = nullptr;   // windows x segments x K, partial s
+    uint32_t        muSegs          = 1;         // adjoint segments per window
 
     bool            mbHaveWeights   = false;
     bool            mbReady         = false;
@@ -234,6 +299,7 @@ void CglsGpu::release()
     cudaFree(md_fPs);
     cudaFree(md_bStopped);
     cudaFree(md_uSteps);
+    cudaFree(md_cSPartial);
     if (mhCublas)
         cublasDestroy(mhCublas);
 
@@ -241,6 +307,7 @@ void CglsGpu::release()
     md_fGamma = md_fPs = nullptr;
     md_bStopped = nullptr;
     md_uSteps   = nullptr;
+    md_cSPartial = nullptr;
     mhCublas = nullptr;
     mbReady  = false;
 }
@@ -260,6 +327,8 @@ bool CglsGpu::setUp(const DSIParams& oParams)
         return false;
     CHECK(oParams.uClutterTaps <= kBlock,
           "the GPU adjoint kernel gives one thread per tap; K is over kBlock");
+    CHECK(oParams.uCpiSamples % oParams.uCglsBatchSamples == 0,
+          "the CPI is not a whole number of CGLS windows");
     // Kernel arguments are uint32_t and cuBLAS takes int.
     CHECK(oParams.uCpiSamples <= INT_MAX,
           "the CPI is longer than the kernels and cuBLAS can index");
@@ -280,6 +349,15 @@ bool CglsGpu::setUp(const DSIParams& oParams)
     CUDA_CHECK(cudaMalloc(&md_cOut,   uCpiBytes));
     CUDA_CHECK(cudaMalloc(&md_cR,     uCpiBytes));
     CUDA_CHECK(cudaMalloc(&md_cQ,     uCpiBytes));
+    // Enough adjoint blocks to fill the GPU (about 64), but a segment of at
+    // least K samples.
+    muSegs = static_cast<uint32_t>(64 / muWindows);
+    if (muSegs > muWindowSamples / muTaps)
+        muSegs = static_cast<uint32_t>(muWindowSamples / muTaps);
+    if (muSegs < 1)
+        muSegs = 1;
+
+    CUDA_CHECK(cudaMalloc(&md_cSPartial, uWBytes * muSegs));
     CUDA_CHECK(cudaMalloc(&md_cX,     uWBytes));
     CUDA_CHECK(cudaMalloc(&md_cP,     uWBytes));
     CUDA_CHECK(cudaMalloc(&md_fGamma, static_cast<size_t>(muWindows) * sizeof(float)));
@@ -304,8 +382,11 @@ bool CglsGpu::iterate()
     // r = b - R x;  s = R^H r;  p = s;  gamma = |s|^2;  ps = |s|^2
     if (!launchConvolve(md_cRef, md_cX, md_cSur, md_cR, uTotal, muTaps, muWindowSamples))
         return false;
-    adjointKernel<<<uWindows, kBlock>>>(md_cRef, md_cR, md_cP, md_fGamma, md_fPs,
-                                        md_bStopped, uTaps, uWindow, true);
+    adjointKernel<<<dim3(muSegs, uWindows), kBlock>>>(md_cRef, md_cR, md_cSPartial,
+                                                      md_bStopped, uTaps, uWindow, muSegs);
+    CUDA_CHECK(cudaGetLastError());
+    reduceKernel<<<uWindows, kBlock>>>(md_cSPartial, md_cP, md_fGamma, md_fPs,
+                                       md_bStopped, uTaps, muSegs, true);
     CUDA_CHECK(cudaGetLastError());
 
     for (uint64_t uIt = 1; uIt <= moParams.uMaxIterations; ++uIt) {
@@ -324,8 +405,11 @@ bool CglsGpu::iterate()
             !launchConvolve(md_cRef, md_cX, md_cSur, md_cR, uTotal, muTaps, muWindowSamples))
             return false;
 
-        adjointKernel<<<uWindows, kBlock>>>(md_cRef, md_cR, md_cP, md_fGamma, md_fPs,
-                                            md_bStopped, uTaps, uWindow, false);
+        adjointKernel<<<dim3(muSegs, uWindows), kBlock>>>(md_cRef, md_cR, md_cSPartial,
+                                                          md_bStopped, uTaps, uWindow, muSegs);
+        CUDA_CHECK(cudaGetLastError());
+        reduceKernel<<<uWindows, kBlock>>>(md_cSPartial, md_cP, md_fGamma, md_fPs,
+                                           md_bStopped, uTaps, muSegs, false);
         CUDA_CHECK(cudaGetLastError());
     }
     return true;
