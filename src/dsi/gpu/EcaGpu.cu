@@ -30,14 +30,50 @@
 // ---------------------------------------------------------------------------
 //
 //   build the delayed-reference matrix   custom kernel (below)
-//   Gram matrix, 97% of the work         cuBLAS cherk
+//   Gram matrix, 97% of the work         cuBLAS cherk, OR (bEcaGramRecurrence)
+//                                        a cuBLAS cgemv for the first column
+//                                        plus gramRecurrenceKernel (below)
 //   right-hand side                      cuBLAS cgemv
 //   share partial Grams between windows  custom kernel (below, ECA-S only)
 //   solve all windows at once            cuSOLVER Cpotrf/CpotrsBatched
 //   subtract the clutter                 convolveKernel (DsiGpu.cuh)
 //   suppression figure                   cuBLAS scnrm2
 //
-// Everything heavy is a library call: less to get wrong, and less to review.
+// Everything heavy is a library call, except the recurrence: less to get
+// wrong, and less to review.
+//
+// ---------------------------------------------------------------------------
+// Two ways to build the Gram matrix
+// ---------------------------------------------------------------------------
+//
+// cherk (bEcaGramRecurrence = false) computes G = R^H R, K x K over N samples:
+// K^2 N / 2 complex multiply-adds, which is the 97% above. It does not know
+// that R is a delayed copy of ONE signal.
+//
+// The recurrence (true) uses that. For a window of samples [n0, n1),
+//
+//   G[i][j] = sum_n conj(r[n-i]) r[n-j]        (r[negative] = 0)
+//
+// and shifting both delays by one gives, exactly,
+//
+//   G[i+1][j+1] = G[i][j] + conj(r[n0-1-i]) r[n0-1-j]
+//                         - conj(r[n1-1-i]) r[n1-1-j]
+//
+// (the sum over m = n-1 gains the sample before the window and loses the last
+// one). So the whole matrix follows from its first column G[i][0] by walking
+// each diagonal down and to the right: at most K-1 steps of two products each.
+// The first column is R^H r, one cgemv, the same call that gives the
+// right-hand side with s replaced by r. Work falls from K^2 N / 2 to about
+// K N + K^2.
+//
+// It is not an approximation, but each diagonal accumulates up to K-1
+// add/subtract steps in FP32, about 1e-5 relative to the entry at K = 120.
+// Both paths are kept so the thesis can show both. See
+// results/performance_improvements/eca-gram.md.
+//
+// With the recurrence the per-chunk Grams of ECA-S are never built or stored:
+// only the first columns are summed over the window's chunks, and the
+// recurrence runs once per window with the WINDOW's n0 and n1.
 //
 // ---------------------------------------------------------------------------
 // ECA-S: one Gram per chunk, shared between the windows that span it
@@ -211,6 +247,98 @@ __global__ void accumulateWindowsKernel(const cufftComplex* d_cChunkGram,
 }
 
 // ---------------------------------------------------------------------------
+// ECA-S with the recurrence: share the chunk first columns and RHSs out among
+// the windows, in a fixed order. Same mapping as accumulateWindowsKernel; one
+// thread per (window, row).
+// ---------------------------------------------------------------------------
+__global__ void accumulateVectorsKernel(const cufftComplex* d_cChunkCol,
+                                        const cufftComplex* d_cChunkRhs,
+                                        const uint32_t* d_uFirstChunk,
+                                        cufftComplex* d_cWinCol,
+                                        cufftComplex* d_cRhs,
+                                        uint32_t uTaps, uint32_t uWindows,
+                                        uint32_t uSpan)
+{
+    const uint32_t uIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (uIdx >= uWindows * uTaps)
+        return;
+
+    const uint32_t w = uIdx / uTaps;
+    const uint32_t i = uIdx % uTaps;
+    const uint32_t uFirst = d_uFirstChunk[w];
+
+    float fCr = 0.0f;
+    float fCi = 0.0f;
+    float fVr = 0.0f;
+    float fVi = 0.0f;
+    for (uint32_t m = 0; m < uSpan; ++m) {
+        const size_t uSrc = static_cast<size_t>(uFirst + m) * uTaps + i;
+        fCr += d_cChunkCol[uSrc].x;
+        fCi += d_cChunkCol[uSrc].y;
+        fVr += d_cChunkRhs[uSrc].x;
+        fVi += d_cChunkRhs[uSrc].y;
+    }
+    d_cWinCol[uIdx] = make_cuComplex(fCr, fCi);
+    d_cRhs[uIdx]    = make_cuComplex(fVr, fVi);
+}
+
+// ---------------------------------------------------------------------------
+// Build each window's Gram matrix (lower triangle) from its first column.
+//
+// Window w covers samples [n0, n1) with n0 = d_uFirstChunk[w] * uChunk and
+// n1 = n0 + uEstimate. One block per window; thread d walks diagonal d, which
+// starts at (d, 0) with the first column's entry and steps down and right by
+// the recurrence in the file header. Column-major, leading dimension K, as
+// cherk wrote it: G[i][j] sits at i + j * K.
+//
+// r[idx] is zero for idx < 0, which only happens in the first window.
+// ---------------------------------------------------------------------------
+__device__ cufftComplex refSample(const cufftComplex* d_cRef, int iIdx)
+{
+    if (iIdx < 0)
+        return make_cuComplex(0.0f, 0.0f);
+    return d_cRef[iIdx];
+}
+
+__global__ void gramRecurrenceKernel(const cufftComplex* d_cRef,
+                                     const cufftComplex* d_cCol,
+                                     const uint32_t* d_uFirstChunk,
+                                     cufftComplex* d_cGram,
+                                     uint32_t uTaps, uint32_t uChunk,
+                                     uint32_t uEstimate)
+{
+    const uint32_t w = blockIdx.x;
+    const int iN0 = static_cast<int>(d_uFirstChunk[w] * uChunk);
+    const int iN1 = iN0 + static_cast<int>(uEstimate);
+    const int iK  = static_cast<int>(uTaps);
+
+    const cufftComplex* d_cC = d_cCol + static_cast<size_t>(w) * uTaps;
+    cufftComplex* d_cG = d_cGram + static_cast<size_t>(w) * uTaps * uTaps;
+
+    for (int d = threadIdx.x; d < iK; d += blockDim.x) {
+        cufftComplex cG = d_cC[d];
+        if (d == 0)
+            cG.y = 0.0f;
+        d_cG[d] = cG;                                   // entry (d, 0)
+
+        for (int t = 1; d + t < iK; ++t) {
+            const int i = d + t - 1;
+            const int j = t - 1;
+            const cufftComplex cA0 = refSample(d_cRef, iN0 - 1 - i);
+            const cufftComplex cB0 = refSample(d_cRef, iN0 - 1 - j);
+            const cufftComplex cA1 = refSample(d_cRef, iN1 - 1 - i);
+            const cufftComplex cB1 = refSample(d_cRef, iN1 - 1 - j);
+            // conj(a) * b: re = ar br + ai bi, im = ar bi - ai br.
+            cG.x += (cA0.x * cB0.x + cA0.y * cB0.y) - (cA1.x * cB1.x + cA1.y * cB1.y);
+            cG.y += (cA0.x * cB0.y - cA0.y * cB0.x) - (cA1.x * cB1.y - cA1.y * cB1.x);
+            if (d == 0)
+                cG.y = 0.0f;                            // a diagonal is real
+            d_cG[(d + t) + static_cast<size_t>(t) * uTaps] = cG;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Diagonal loading.
 //
 // One thread per window, each walking its own K-entry diagonal -- far too
@@ -267,7 +395,7 @@ private:
 
     // The steps of cancel(), in order.
     bool buildNormalEquations();            // one Gram and RHS per chunk
-    bool shareChunks();                     // ECA-S: chunk Grams to windows
+    bool shareChunks();                     // ECA-S: chunk Grams to windows; recurrence: Gram from columns
     bool addLoading();
     bool solve();                           // RHS in md_cWeights -> weights
 
@@ -277,6 +405,7 @@ private:
     uint64_t           muWindowSamples= 0;   // T_S, one set of weights applied
     uint64_t           muSpan         = 0;   // M = T_A / T_S, chunks per estimate
     bool               mbChunked      = false;   // M > 1: ECA-S shares chunk Grams
+    bool               mbRecurrence   = false;   // Gram from its first column, no cherk
     uint64_t           muBuildSamples = 0;   // rows of R built per cuBLAS call
 
     cublasHandle_t     mhCublas       = nullptr;
@@ -292,6 +421,9 @@ private:
     // ECA-S only; null when M == 1, where the chunk IS the window.
     cufftComplex*      md_cChunkGram  = nullptr;   // chunks x K x K
     cufftComplex*      md_cChunkRhs   = nullptr;   // chunks x K
+    // Recurrence only: first column of each chunk's Gram, and (ECA-S) of each window's.
+    cufftComplex*      md_cChunkCol   = nullptr;   // chunks x K
+    cufftComplex*      md_cWinCol     = nullptr;   // windows x K, ECA-S only
     uint32_t*          md_uFirstChunk = nullptr;   // windows: first chunk estimated from
     cufftComplex**     md_ppGram      = nullptr;   // pointer array for cuSOLVER
     cufftComplex**     md_ppWeights   = nullptr;
@@ -317,6 +449,8 @@ void EcaGpu::release()
     cudaFree(md_cWeights);
     cudaFree(md_cChunkGram);
     cudaFree(md_cChunkRhs);
+    cudaFree(md_cChunkCol);
+    cudaFree(md_cWinCol);
     cudaFree(md_uFirstChunk);
     cudaFree(md_ppGram);
     cudaFree(md_ppWeights);
@@ -327,7 +461,7 @@ void EcaGpu::release()
         cusolverDnDestroy(mhCusolver);
 
     md_cRef = md_cSur = md_cOut = md_cSubspace = md_cGram = md_cWeights = nullptr;
-    md_cChunkGram = md_cChunkRhs = nullptr;
+    md_cChunkGram = md_cChunkRhs = md_cChunkCol = md_cWinCol = nullptr;
     md_uFirstChunk = nullptr;
     md_ppGram = md_ppWeights = nullptr;
     md_piInfo = nullptr;
@@ -359,6 +493,7 @@ bool EcaGpu::setUp(const DSIParams& oParams)
     muWindows         = oParams.uCpiSamples / oParams.uUpdateSamples;
     muSpan            = oParams.uEstimateSamples / oParams.uUpdateSamples;
     mbChunked         = (muSpan > 1);
+    mbRecurrence      = oParams.bEcaGramRecurrence;
     // A chunk is one update window long; the build buffer holds a slice of one.
     muBuildSamples    = (muWindowSamples < kMaxBuildSamples) ? muWindowSamples
                                                              : kMaxBuildSamples;
@@ -384,8 +519,11 @@ bool EcaGpu::allocate()
     // ECA-S alone needs somewhere to put the per-chunk Grams. With M == 1 the
     // chunk is the window, so cherk writes straight into md_cGram and these
     // are never allocated.
-    const size_t uChunkGramBytes = mbChunked ? uGramBytes : 0;
+    // With the recurrence there are no chunk Grams at all, only first columns.
+    const size_t uChunkGramBytes = (mbChunked && !mbRecurrence) ? uGramBytes : 0;
     const size_t uChunkRhsBytes  = mbChunked ? uWBytes    : 0;
+    const size_t uChunkColBytes  = mbRecurrence ? uWBytes : 0;
+    const size_t uWinColBytes    = (mbRecurrence && mbChunked) ? uWBytes : 0;
     const size_t uPerWindowBytes = static_cast<size_t>(muWindows) *
                                    (2 * sizeof(cufftComplex*) + sizeof(int) + sizeof(uint32_t));
 
@@ -393,7 +531,8 @@ bool EcaGpu::allocate()
     // failing cleanly. The arithmetic is dominated by the two Gram arrays,
     // which grow as 1 / T_S.
     const size_t uTotal = 3 * uCpiBytes + uSubBytes + uGramBytes + uWBytes +
-                          uChunkGramBytes + uChunkRhsBytes + uPerWindowBytes;
+                          uChunkGramBytes + uChunkRhsBytes + uChunkColBytes +
+                          uWinColBytes + uPerWindowBytes;
     char achMsg[256];
     std::snprintf(achMsg, sizeof(achMsg),
                   "this configuration needs %.0f MB of device memory, over "
@@ -414,10 +553,17 @@ bool EcaGpu::allocate()
     CUDA_CHECK(cudaMalloc(&md_cGram,     uGramBytes));
     CUDA_CHECK(cudaMalloc(&md_cWeights,  uWBytes));
     if (mbChunked) {
-        CUDA_CHECK(cudaMalloc(&md_cChunkGram,  uChunkGramBytes));
+        if (!mbRecurrence)
+            CUDA_CHECK(cudaMalloc(&md_cChunkGram,  uChunkGramBytes));
         CUDA_CHECK(cudaMalloc(&md_cChunkRhs,   uChunkRhsBytes));
-        CUDA_CHECK(cudaMalloc(&md_uFirstChunk, static_cast<size_t>(muWindows) * sizeof(uint32_t)));
     }
+    if (mbRecurrence) {
+        CUDA_CHECK(cudaMalloc(&md_cChunkCol, uChunkColBytes));
+        if (mbChunked)
+            CUDA_CHECK(cudaMalloc(&md_cWinCol, uWinColBytes));
+    }
+    if (mbChunked || mbRecurrence)
+        CUDA_CHECK(cudaMalloc(&md_uFirstChunk, static_cast<size_t>(muWindows) * sizeof(uint32_t)));
     CUDA_CHECK(cudaMalloc(&md_ppGram,    static_cast<size_t>(muWindows) * sizeof(cufftComplex*)));
     CUDA_CHECK(cudaMalloc(&md_ppWeights, static_cast<size_t>(muWindows) * sizeof(cufftComplex*)));
     CUDA_CHECK(cudaMalloc(&md_piInfo,    static_cast<size_t>(muWindows) * sizeof(int)));
@@ -441,8 +587,9 @@ bool EcaGpu::uploadWindowTables()
                           vpWeights.size() * sizeof(cufftComplex*), cudaMemcpyHostToDevice));
 
     // ECA-S: the first chunk each window's estimate is summed from, by the
-    // rule both backends share.
-    if (mbChunked) {
+    // rule both backends share. The recurrence also needs it, for the window's
+    // start n0 = first chunk * T_S (one chunk per window when M == 1).
+    if (mbChunked || mbRecurrence) {
         std::vector<uint32_t> vuFirstChunk(static_cast<size_t>(muWindows));
         for (uint64_t w = 0; w < muWindows; ++w) {
             const uint64_t uStart = dsiEstimationStart(w * muWindowSamples, muWindowSamples,
@@ -468,7 +615,7 @@ bool EcaGpu::buildNormalEquations()
     // because a chunk is one update window long. With M == 1 these are the
     // window Grams already and nothing more is needed; with M > 1 they are
     // shared out by shareChunks().
-    cufftComplex* const d_cGramDst = mbChunked ? md_cChunkGram : md_cGram;
+    cufftComplex* const d_cGramDst = mbChunked ? md_cChunkGram : md_cGram;   // unused with the recurrence
     cufftComplex* const d_cRhsDst  = mbChunked ? md_cChunkRhs  : md_cWeights;
 
     for (uint64_t uChunk = 0; uChunk < muWindows; ++uChunk) {
@@ -490,12 +637,24 @@ bool EcaGpu::buildNormalEquations()
             // and fills only the lower triangle, which is the same halving of
             // the work the CPU version does by hand. beta = 1 after the first
             // slice is what lets a long chunk be summed piece by piece.
-            CUDA_CHECK(cublasCherk(mhCublas,
-                                   CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_C,
-                                   iTaps, static_cast<int>(uRows),
-                                   &fOne, md_cSubspace, static_cast<int>(uRows),
-                                   bFirst ? &fZero : &fOne,
-                                   d_cGramDst + uChunk * muTaps * muTaps, iTaps));
+            if (mbRecurrence) {
+                // Instead of the whole Gram, only its first column
+                // c = R^H r over this slice: the same cgemv as the RHS below
+                // with the reference in place of the surveillance signal.
+                CUDA_CHECK(cublasCgemv(mhCublas, CUBLAS_OP_C,
+                                       static_cast<int>(uRows), iTaps,
+                                       &cOne, md_cSubspace, static_cast<int>(uRows),
+                                       md_cRef + uStart, 1,
+                                       bFirst ? &cZero : &cOne,
+                                       md_cChunkCol + uChunk * muTaps, 1));
+            } else {
+                CUDA_CHECK(cublasCherk(mhCublas,
+                                       CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_C,
+                                       iTaps, static_cast<int>(uRows),
+                                       &fOne, md_cSubspace, static_cast<int>(uRows),
+                                       bFirst ? &fZero : &fOne,
+                                       d_cGramDst + uChunk * muTaps * muTaps, iTaps));
+            }
 
             // v += R^H s over this slice.
             CUDA_CHECK(cublasCgemv(mhCublas, CUBLAS_OP_C,
@@ -511,6 +670,25 @@ bool EcaGpu::buildNormalEquations()
 
 bool EcaGpu::shareChunks()
 {
+    if (mbRecurrence) {
+        // The window's first column: the chunk's own for M == 1, else the sum
+        // of its M chunk columns (the RHS is summed the same way).
+        const cufftComplex* d_cCol = md_cChunkCol;
+        if (mbChunked) {
+            accumulateVectorsKernel<<<blocksFor(muWindows * muTaps, kBlock), kBlock>>>(
+                md_cChunkCol, md_cChunkRhs, md_uFirstChunk, md_cWinCol, md_cWeights,
+                static_cast<uint32_t>(muTaps), static_cast<uint32_t>(muWindows),
+                static_cast<uint32_t>(muSpan));
+            CUDA_CHECK(cudaGetLastError());
+            d_cCol = md_cWinCol;
+        }
+        gramRecurrenceKernel<<<static_cast<unsigned>(muWindows), kBlock>>>(
+            md_cRef, d_cCol, md_uFirstChunk, md_cGram,
+            static_cast<uint32_t>(muTaps), static_cast<uint32_t>(muWindowSamples),
+            static_cast<uint32_t>(moParams.uEstimateSamples));
+        CUDA_CHECK(cudaGetLastError());
+        return true;
+    }
     if (!mbChunked)
         return true;
     accumulateWindowsKernel<<<blocksFor(muWindows * muTaps * muTaps, kBlock), kBlock>>>(

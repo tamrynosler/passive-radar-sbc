@@ -219,6 +219,11 @@ struct DSIParams {
     // the previous CPI instead of from zero. Makes the canceller stateful.
     bool         bCglsPrime     = false;
 
+    // ECA-m, ECA-B, ECA-S on the GPU: build the Gram matrix from its first
+    // column by the exact shift recurrence instead of by cuBLAS cherk. Same
+    // numbers up to FP32 rounding. The CPU canceller ignores it.
+    bool         bEcaGramRecurrence = false;
+
     // FBLMS. N: filter length AND block length; a power of two that divides
     // the CPI. The FFTs are 2N points. Also the reach in range: c/fs per tap.
     uint64_t     uFblmsTaps     = 0;

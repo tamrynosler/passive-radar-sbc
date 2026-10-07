@@ -77,6 +77,7 @@ struct PbrConfig {
     uint64_t    uCglsIterations    = 0;
     double      dCglsBatchSeconds  = 0.0;   // CGLS window, independent of ECA's
     bool        bCglsPrime         = false; // start from the previous CPI's weights
+    bool        bEcaGramRecurrence = true;  // GPU ECA: Gram from its first column, not cherk
     uint64_t    uFblmsTaps         = 0;     // FBLMS filter and block length, samples
     double      dFblmsStep         = 0.0;   // FBLMS mu
     double      dFblmsForget       = 0.0;   // FBLMS lambda
