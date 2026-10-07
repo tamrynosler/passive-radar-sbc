@@ -12,12 +12,11 @@
 // The batches do not depend on each other, so all B of them are processed in
 // the same launches. The three correlations take five batched cuFFT calls
 // (three forward, two inverse) with one gather kernel before and one product
-// kernel between. The Levinson solve is one block per batch: K sequential
-// steps, each with two block reductions, one thread per tap. The solve is
-// sequential in K, but the batches run in parallel. The shared convolve kernel
+// kernel between. The Levinson solve is one thread per batch, the recursion
+// run serially in that thread as on the CPU, the batches in parallel. The shared convolve kernel
 // then applies the weights. Nine launches per CPI, none waiting on the host.
 //
-// The reductions use blockSum, whose tree order is fixed, so a run is
+// The Levinson solve sums in the CPU twin's serial order, so a run is
 // deterministic: the same input gives the same bits every time.
 //
 // ---------------------------------------------------------------------------
@@ -25,8 +24,9 @@
 // ---------------------------------------------------------------------------
 //
 // FP32 throughout, forced by Maxwell's 1/32-rate FP64. The FFTs are cuFFT's,
-// not HostFft's, and the sums run in a tree order, so the result matches the
-// CPU's FP32 mode to rounding, not bit for bit.
+// not HostFft's, and the convolve and the suppression sum run in a different order
+// from the CPU's, so the result matches the CPU's FP32 mode to rounding, not
+// bit for bit.
 
 #include "pbr/DSICanceller.hpp"
 #include "../DsiInternal.hpp"
@@ -86,136 +86,119 @@ __global__ void productKernel(const cufftComplex* d_cA, cufftComplex* d_cDR,
     d_cDS[u] = cOutS;
 }
 
-// Levinson-Durbin for one batch per block, the recursion of EcaLdCpu::levinson.
-// Thread i owns tap i. Every thread holds rr0, beta and the running scalars in
-// registers, computed identically from the block sums. Every __syncthreads
-// and blockSum is reached by every thread: inactive threads add zero.
+// Longest Levinson recursion one thread holds in local arrays.
+const uint32_t kMaxLdTaps = 256;
+
+// Levinson-Durbin, one THREAD per batch, the recursion of EcaLdCpu::levinson
+// in the same serial loops, so the order of every sum equals the CPU twin's.
+// The recursion is only about K^2 complex multiply-adds per batch, far too
+// little to share across a block: the block version spent its time in
+// reductions and barriers. rr, bvec, x, y and yNew live in per-thread local
+// arrays (the batch's rr and bvec are copied there once, already scaled).
 __global__ void levinsonKernel(const cufftComplex* d_cRef, const cufftComplex* d_cCross,
                                cufftComplex* d_cW, uint32_t* d_uDegenerate,
-                               uint32_t uTaps, uint32_t uLength, float fInvM, float fLoad)
+                               uint32_t uTaps, uint32_t uLength, uint32_t uBatches,
+                               float fInvM, float fLoad)
 {
-    __shared__ cufftComplex acRr[kBlock];
-    __shared__ cufftComplex acBvec[kBlock];
-    __shared__ cufftComplex acX[kBlock];
-    __shared__ cufftComplex acY[kBlock];
-    __shared__ cufftComplex acYNew[kBlock];
-    __shared__ float afShared[kBlock];
+    const uint32_t uB = blockIdx.x * blockDim.x + threadIdx.x;
+    if (uB >= uBatches)
+        return;
 
-    const uint32_t uI = threadIdx.x;
-    const bool bTap = uI < uTaps;
-    const size_t uBase = static_cast<size_t>(blockIdx.x) * uLength;
-    cufftComplex* d_cWb = d_cW + static_cast<size_t>(blockIdx.x) * uTaps;
+    cufftComplex acRr[kMaxLdTaps];
+    cufftComplex acBvec[kMaxLdTaps];
+    cufftComplex acX[kMaxLdTaps];
+    cufftComplex acY[kMaxLdTaps];
+    cufftComplex acYNew[kMaxLdTaps];
 
-    if (bTap) {
-        acRr[uI].x   = d_cRef[uBase + uI].x * fInvM;
-        acRr[uI].y   = d_cRef[uBase + uI].y * fInvM;
-        acBvec[uI].x = d_cCross[uBase + uI].x * fInvM;
-        acBvec[uI].y = d_cCross[uBase + uI].y * fInvM;
+    const size_t uBase = static_cast<size_t>(uB) * uLength;
+    cufftComplex* d_cWb = d_cW + static_cast<size_t>(uB) * uTaps;
+
+    for (uint32_t i = 0; i < uTaps; ++i) {
+        acRr[i].x   = d_cRef[uBase + i].x * fInvM;
+        acRr[i].y   = d_cRef[uBase + i].y * fInvM;
+        acBvec[i].x = d_cCross[uBase + i].x * fInvM;
+        acBvec[i].y = d_cCross[uBase + i].y * fInvM;
     }
-    if (uI == 0) {
-        acRr[0].x = acRr[0].x * fLoad;
-        acRr[0].y = 0.0f;
-    }
-    __syncthreads();
+    acRr[0].x = acRr[0].x * fLoad;
+    acRr[0].y = 0.0f;
 
     const float fRr0 = acRr[0].x;
-    if (!(fRr0 > 0.0f)) {
-        if (bTap) {
-            d_cWb[uI].x = 0.0f;
-            d_cWb[uI].y = 0.0f;
-        }
-        if (uI == 0)
-            atomicAdd(d_uDegenerate, 1u);
-        return;
-    }
+    bool bDegenerate = !(fRr0 > 0.0f);
 
-    if (uI == 0) {
+    float fBeta = fRr0;
+    if (!bDegenerate) {
         acX[0].x = acBvec[0].x / fRr0;
         acX[0].y = acBvec[0].y / fRr0;
         if (uTaps > 1) {
             acY[0].x = -acRr[1].x / fRr0;
             acY[0].y = -acRr[1].y / fRr0;
+            fBeta = fRr0 + (acRr[1].x * acY[0].x + acRr[1].y * acY[0].y);   // Re(conj(rr1) y0)
         }
     }
-    __syncthreads();
 
-    float fBeta = fRr0;
-    if (uTaps > 1)
-        fBeta = fRr0 + (acRr[1].x * acY[0].x + acRr[1].y * acY[0].y);   // Re(conj(rr1) y0)
-
-    for (uint32_t uM = 1; uM < uTaps; ++uM) {
-        // fBeta is the same in every thread, so this exit is uniform.
+    for (uint32_t uM = 1; !bDegenerate && uM < uTaps; ++uM) {
         if (!(fBeta > 0.0f)) {
-            if (bTap) {
-                d_cWb[uI].x = 0.0f;
-                d_cWb[uI].y = 0.0f;
-            }
-            if (uI == 0)
-                atomicAdd(d_uDegenerate, 1u);
-            return;
+            bDegenerate = true;
+            break;
         }
 
         // mu = (bvec[m] - sum_{i<m} rr[m-i] x[i]) / beta
-        float fTermRe = 0.0f, fTermIm = 0.0f;
-        if (uI < uM) {
-            const cufftComplex cR = acRr[uM - uI];
-            const cufftComplex cX = acX[uI];
-            fTermRe = cR.x * cX.x - cR.y * cX.y;
-            fTermIm = cR.x * cX.y + cR.y * cX.x;
+        float fSumRe = 0.0f, fSumIm = 0.0f;
+        for (uint32_t i = 0; i < uM; ++i) {
+            const cufftComplex cR = acRr[uM - i];
+            const cufftComplex cX = acX[i];
+            fSumRe += cR.x * cX.x - cR.y * cX.y;
+            fSumIm += cR.x * cX.y + cR.y * cX.x;
         }
-        const float fSumRe = blockSum(fTermRe, afShared);
-        const float fSumIm = blockSum(fTermIm, afShared);
         const float fMuRe = (acBvec[uM].x - fSumRe) / fBeta;
         const float fMuIm = (acBvec[uM].y - fSumIm) / fBeta;
 
         // x[i] += mu conj(y[m-1-i]), old y;  x[m] = mu
-        if (uI < uM) {
-            const cufftComplex cYr = acY[uM - 1 - uI];   // conj: (cYr.x, -cYr.y)
-            acX[uI].x = acX[uI].x + (fMuRe * cYr.x + fMuIm * cYr.y);
-            acX[uI].y = acX[uI].y + (fMuIm * cYr.x - fMuRe * cYr.y);
+        for (uint32_t i = 0; i < uM; ++i) {
+            const cufftComplex cYr = acY[uM - 1 - i];   // conj: (cYr.x, -cYr.y)
+            acX[i].x = acX[i].x + (fMuRe * cYr.x + fMuIm * cYr.y);
+            acX[i].y = acX[i].y + (fMuIm * cYr.x - fMuRe * cYr.y);
         }
-        if (uI == uM) {
-            acX[uM].x = fMuRe;
-            acX[uM].y = fMuIm;
-        }
-        __syncthreads();
+        acX[uM].x = fMuRe;
+        acX[uM].y = fMuIm;
 
         if (uM < uTaps - 1) {
             // alpha = -(rr[m+1] + sum_{i<m} rr[m-i] y[i]) / beta
-            fTermRe = 0.0f;
-            fTermIm = 0.0f;
-            if (uI < uM) {
-                const cufftComplex cR = acRr[uM - uI];
-                const cufftComplex cY = acY[uI];
-                fTermRe = cR.x * cY.x - cR.y * cY.y;
-                fTermIm = cR.x * cY.y + cR.y * cY.x;
+            float fSumYRe = 0.0f, fSumYIm = 0.0f;
+            for (uint32_t i = 0; i < uM; ++i) {
+                const cufftComplex cR = acRr[uM - i];
+                const cufftComplex cY = acY[i];
+                fSumYRe += cR.x * cY.x - cR.y * cY.y;
+                fSumYIm += cR.x * cY.y + cR.y * cY.x;
             }
-            const float fSumYRe = blockSum(fTermRe, afShared);
-            const float fSumYIm = blockSum(fTermIm, afShared);
             const float fAlphaRe = -(acRr[uM + 1].x + fSumYRe) / fBeta;
             const float fAlphaIm = -(acRr[uM + 1].y + fSumYIm) / fBeta;
 
             // ynew[i] = y[i] + alpha conj(y[m-1-i]), from the old y
-            if (uI < uM) {
-                const cufftComplex cYr = acY[uM - 1 - uI];
-                acYNew[uI].x = acY[uI].x + (fAlphaRe * cYr.x + fAlphaIm * cYr.y);
-                acYNew[uI].y = acY[uI].y + (fAlphaIm * cYr.x - fAlphaRe * cYr.y);
+            for (uint32_t i = 0; i < uM; ++i) {
+                const cufftComplex cYr = acY[uM - 1 - i];
+                acYNew[i].x = acY[i].x + (fAlphaRe * cYr.x + fAlphaIm * cYr.y);
+                acYNew[i].y = acY[i].y + (fAlphaIm * cYr.x - fAlphaRe * cYr.y);
             }
-            if (uI == uM) {
-                acYNew[uM].x = fAlphaRe;
-                acYNew[uM].y = fAlphaIm;
-            }
-            __syncthreads();
-            if (uI <= uM)
-                acY[uI] = acYNew[uI];
-            __syncthreads();
+            acYNew[uM].x = fAlphaRe;
+            acYNew[uM].y = fAlphaIm;
+            for (uint32_t i = 0; i <= uM; ++i)
+                acY[i] = acYNew[i];
 
             fBeta = (1.0f - (fAlphaRe * fAlphaRe + fAlphaIm * fAlphaIm)) * fBeta;
         }
     }
 
-    if (bTap)
-        d_cWb[uI] = acX[uI];
+    if (bDegenerate) {
+        for (uint32_t i = 0; i < uTaps; ++i) {
+            d_cWb[i].x = 0.0f;
+            d_cWb[i].y = 0.0f;
+        }
+        atomicAdd(d_uDegenerate, 1u);
+        return;
+    }
+    for (uint32_t i = 0; i < uTaps; ++i)
+        d_cWb[i] = acX[i];
 }
 
 // ---------------------------------------------------------------------------
@@ -299,7 +282,9 @@ bool EcaLdGpu::setUp(const DSIParams& oParams)
     if (!ecaLdParamsOk(oParams))
         return false;
     CHECK(oParams.uClutterTaps <= kBlock,
-          "ECA-LD on the GPU gives one thread to each tap, so the taps cannot exceed the block size");
+          "ECA-LD on the GPU: the taps cannot exceed the block size");
+    CHECK(oParams.uClutterTaps <= kMaxLdTaps,
+          "ECA-LD on the GPU: the Levinson kernel keeps the taps in local arrays of kMaxLdTaps");
     // Kernel arguments are uint32_t; cuFFT and cuBLAS take int.
     CHECK(oParams.uCpiSamples <= INT_MAX,
           "the CPI is longer than the kernels and cuFFT can index");
@@ -383,9 +368,10 @@ bool EcaLdGpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
     CUDA_CHECK(cufftExecC2C(mhPlan, md_cDR, md_cDR, CUFFT_INVERSE));
     CUDA_CHECK(cufftExecC2C(mhPlan, md_cDS, md_cDS, CUFFT_INVERSE));
 
-    // 3-4. loading and the Levinson solve, one block per batch
-    levinsonKernel<<<static_cast<uint32_t>(muBatches), kBlock>>>(
-        md_cDR, md_cDS, md_cW, md_uDegenerate, uTaps, uLength, fInvM, fLoad);
+    // 3-4. loading and the Levinson solve, one thread per batch
+    levinsonKernel<<<blocksFor(muBatches, kBlock), kBlock>>>(
+        md_cDR, md_cDS, md_cW, md_uDegenerate, uTaps, uLength,
+        static_cast<uint32_t>(muBatches), fInvM, fLoad);
     CUDA_CHECK(cudaGetLastError());
 
     // 5. out = sur - sum_k w[k] r[n-k], each batch with its own weights
