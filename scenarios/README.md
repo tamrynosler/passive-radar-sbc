@@ -35,6 +35,7 @@ Change one thing at a time. Every scenario after S0 uses the 600 s waveform.
 | Name | Change from the previous | What it tests |
 |---|---|---|
 | `S0_clean` | (the original scenario: one target, no clutter, 180 s) | baseline; links to every result before 2026-10-01 |
+| `S0_long` | S0 over the full 600 s waveform, the leg flown back and forth | long live sessions with the viewer; not a scored scenario |
 | `S1_clutter` | + static scatterers over range bins 2..60 | the cancellers differ only on clutter: K vs extent, batch length vs conditioning, ECA-CD's delay-spread error |
 | `S2_tangential` | trajectory crossing zero Doppler | the target inside the cancellation notch; ECA-B's 1/T_B ambiguities vs ECA-S |
 | `S3_close` | target in the first range bins | detection beside the direct signal and the clutter ridge |

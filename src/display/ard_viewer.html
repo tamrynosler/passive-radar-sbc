@@ -1174,7 +1174,16 @@ function updateMessage() {
 function onStatus(status) {
   // ard_view relays pbr_run's status datagram verbatim as "stream"; its keys
   // are the telemetry column names plus runName, status, reason and config.
+  //
+  // The chain sends each CPI as the frame, then its spectra, then its status,
+  // and ard_view drops the old status the moment the new frame completes. So
+  // for a few milliseconds per CPI, or for a whole CPI if the status datagram
+  // is lost, there is a frame with no stream status. That is not a new run:
+  // keep the last status, or every history would be wiped at random.
   var stream = status.stream || null;
+  if (stream === null && state.runName !== null) {
+    stream = state.telemetry;
+  }
   var runName = stream ? stream.runName : null;
   if (runName !== state.runName) {
     // A new run: the old running peak and histories belong to different data.
@@ -1214,8 +1223,14 @@ function onStatus(status) {
     state.cpiChangedAt = Date.now();
   }
 
+  // Fetch a new frame only once its own status has arrived. The status is
+  // sent last, so by then its spectra are in too; fetching earlier draws a
+  // black spectrogram row and pairs the frame with the previous CPI's status.
+  // A frame whose status never arrives is skipped; the next one is shown.
+  var statusIsCurrent = status.stream !== null && status.stream !== undefined &&
+                        status.stream.cpi === status.latestCpi;
   if (state.latestCpi !== null && state.latestCpi !== state.shownCpi &&
-      !state.fetching) {
+      statusIsCurrent && !state.fetching) {
     fetchFrame();
   }
   updateHeader();

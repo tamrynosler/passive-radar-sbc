@@ -78,8 +78,8 @@ fprintf('  snippet %g s from %g s: 99%% power within %+.1f .. %+.1f kHz (%.1f kH
 outDir = fileparts(outPath);
 if ~isempty(outDir) && ~exist(outDir, 'dir'), mkdir(outDir); end
 if exist(outPath, 'file'), delete(outPath); end
-h5create(outPath, '/I/value', [n 1], 'Datatype', 'single');
-h5create(outPath, '/Q/value', [n 1], 'Datatype', 'single');
+h5create(outPath, '/I/value', n, 'Datatype', 'single');   % one-dimensional, as FERS reads it
+h5create(outPath, '/Q/value', n, 'Datatype', 'single');
 h5write(outPath, '/I/value', real(ref));
 h5write(outPath, '/Q/value', imag(ref));
 fprintf('  wrote %s (%d samples, %.1f s at %d Hz)\n', outPath, n, n/fsHz, fsHz);
