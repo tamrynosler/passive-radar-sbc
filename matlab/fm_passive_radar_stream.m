@@ -1,21 +1,27 @@
 %% fm_passive_radar_stream
 % The MATLAB reference chain, fed live by FERS over VITA 49.2 UDP instead of
-% from recorded files: ECA-m cancellation, the decimation CAF and 2D CA-CFAR,
-% the same processing as fm_passive_radar_process.m, one CPI at a time, with
+% from recorded files: cancellation, the decimation CAF and 2D CA-CFAR, the
+% same processing as fm_passive_radar_process.m, one CPI at a time, with
 % the range-Doppler map drawn as it goes. The CFAR detections are grouped
 % into plots by group_detections.m, the same rule as the C++ chain's
 % DetectionGrouper: every plot is marked on the map, and the strongest is
 % tracked.
+%
+% The canceller follows DSI_ALGORITHM: FBLMS runs fblms.m (the MATLAB copy of
+% the C++ FBLMS, state carried from CPI to CPI); anything else runs ECA-m, one
+% solve per CPI. The C++ ECA-S, ECA-B, ECA-CD and CGLS have no MATLAB copy in
+% this chain.
 %
 %   fm_passive_radar_stream                      % config/fers.conf
 %   fm_passive_radar_stream('config/fers.conf')
 %
 % Every parameter comes from the chain config, so MATLAB and the C++ chain
 % run with the same settings: sample rate, receiver names, UDP port, full
-% scale, CPI and hop, range bins, clutter taps, Doppler decimation and span,
-% minimum CPI coverage, CFAR. Needs parse_vita49_packet.m, read_prb_conf.m
-% and group_detections.m (all in matlab/) and the Instrument Control Toolbox
-% (udpport). Run from the repository root.
+% scale, CPI and hop, range bins, clutter taps (for FBLMS its taps, step and
+% forgetting factor), Doppler decimation and span, minimum CPI coverage,
+% CFAR. Needs parse_vita49_packet.m, read_prb_conf.m, group_detections.m and
+% fblms.m (all in matlab/) and the Instrument Control Toolbox (udpport). Run
+% from the repository root.
 %
 % Workflow:
 %   1. Run this first; it opens the UDP port and waits.
@@ -49,6 +55,14 @@ function fm_passive_radar_stream(confPath)
     bufCap    = round(cfg.BUFFER_LENGTH_s * fs); % per-channel ring buffer
     nRange    = cfg.N_RANGE_BINS;
     nTaps     = cfg.N_CLUTTER_TAPS;
+    bFblms    = isfield(cfg, 'DSI_ALGORITHM') && strcmpi(cfg.DSI_ALGORITHM, 'FBLMS');
+    if bFblms
+        fprintf('canceller: FBLMS, %d taps, step %g, forget %g\n', ...
+                cfg.FBLMS_TAPS, cfg.FBLMS_STEP, cfg.FBLMS_FORGET);
+    else
+        fprintf('canceller: ECA-m, %d taps\n', nTaps);
+    end
+    fblmsState = [];   % FBLMS weights, carried from CPI to CPI
     dec       = cfg.DOPPLER_DECIMATION;
     fdMax     = cfg.DOPPLER_HALF_SPAN_Hz;
     minCover  = cfg.MIN_CPI_COVERAGE;
@@ -181,7 +195,13 @@ function fm_passive_radar_stream(confPath)
                         fprintf('warning: CPI at %.0f has a gap (ref %d/%d, sur %d/%d non-zero); skipped\n', ...
                                 cpiStart, nnz(refWin), N, nnz(surWin), N);
                     else
-                        rd    = process_cpi(refWin(:), surWin(:), N, nRange, nTaps, dec, nDop);
+                        if bFblms
+                            [clean, fblmsState] = fblms(refWin(:), surWin(:), cfg.FBLMS_TAPS, ...
+                                                        cfg.FBLMS_STEP, cfg.FBLMS_FORGET, fblmsState);
+                        else
+                            clean = eca_m(refWin(:), surWin(:), N, nTaps);
+                        end
+                        rd    = caf_decimation(refWin(:), clean, N, nRange, dec, nDop);
                         mag   = abs(rd(:, keep));
                         magDb = 20*log10(mag + eps);
                         magDb = magDb - max(magDb(:));
@@ -286,9 +306,9 @@ function x = read_samples(s, p0, M)
 end
 
 %% ================= processing, as in fm_passive_radar_process.m =============
-function rd = process_cpi(sref, ssur, N, nRange, nTaps, dec, nDop)
-    % ECA-m (one solve over the CPI, absolute 1e-3 loading) and the
-    % decimation CAF. Returns the complex range-Doppler map, nRange x nDop.
+function clean = eca_m(sref, ssur, N, nTaps)
+    % ECA-m: one solve over the CPI, absolute 1e-3 loading. Returns the
+    % cleaned surveillance.
 
     R = zeros(N, nTaps);
     for k = 0:nTaps-1
@@ -296,8 +316,12 @@ function rd = process_cpi(sref, ssur, N, nRange, nTaps, dec, nDop)
     end
     w = (R'*R + 1e-3*eye(nTaps)) \ (R'*ssur);
     clean = ssur - R*w;
+end
 
-    % Lag product, integrate and dump, FFT, per range bin.
+function rd = caf_decimation(sref, clean, N, nRange, dec, nDop)
+    % The decimation CAF: lag product, integrate and dump, FFT, per range
+    % bin. Returns the complex range-Doppler map, nRange x nDop.
+
     rd   = zeros(nRange, nDop);
     refc = conj(sref);
     for tau = 0:nRange-1

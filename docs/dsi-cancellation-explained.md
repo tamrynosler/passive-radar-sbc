@@ -278,6 +278,15 @@ clocks pinned (`nvpmodel -m 0 && jetson_clocks`) and tegrastats logged.
   with priming keeps the weights from the warm-up's random signal and starts
   the first real CPI from them (17.8 dB instead of 42). Fix pending.
 
+## 8. FBLMS, a different kind of canceller
+
+FBLMS (fast block LMS) is also in the chain, but it is adaptive rather than
+least-squares: it does not solve for the weights, it nudges them a little
+after every block and carries them from one CPI to the next, so the first
+CPI converges from zero. It has CPU (`src/dsi/cpu/FblmsCpu.cpp`), GPU
+(`src/dsi/gpu/FblmsGpu.cu`) and MATLAB (`matlab/fblms.m`) implementations;
+the design note is `docs/design_decisions.md` section 1d.11.
+
 ## References
 
 - Colone, O'Hagan, Lombardo, Baker, TAES 45(2) 2009 — ECA and ECA-B.
@@ -288,3 +297,6 @@ clocks pinned (`nvpmodel -m 0 && jetson_clocks`) and tegrastats logged.
   this thesis reproduces on embedded GPU hardware.
 - Laptev, Konovalov, Vorobev, DSPA 2026 — ECA-B/S/CD comparison; source of
   the target-attenuation metric.
+- Ferrara, IEEE Trans. ASSP 28(4) 1980, pp. 474-475 -- fast block LMS.
+- Shynk, IEEE Signal Processing Magazine 9(1) 1992 -- frequency-domain
+  adaptive filtering, per-bin step normalisation (Table I).

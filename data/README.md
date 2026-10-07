@@ -19,6 +19,9 @@ one exception). Regenerate from FERS.
 > frames unless `ARD_WRITE_FILES = 1`; frames go to the viewer over
 > multicast instead (`docs/ard-stream-design.md`). Golden files here predate
 > the current parameters and are not a trusted gate (PLAN.md).
+>
+> `golden/golden_fblms.bin` comes from `matlab/fblms_golden.m`: cold start,
+> header window = taps, loading field = mu, lambda read from the config.
 
 Every fact below is taken from the MATLAB reference chain in `matlab/`
 (cited per item). Nothing here is guessed. Where FERS behaviour is not

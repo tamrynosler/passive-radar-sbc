@@ -28,6 +28,7 @@ const struct { DSIAlgorithm eValue; const char* pName; } kAlgorithms[] = {
     { DSIAlgorithm::EcaS,  "ECA-S"  },
     { DSIAlgorithm::EcaCd, "ECA-CD" },
     { DSIAlgorithm::Cgls,  "CGLS"   },
+    { DSIAlgorithm::Fblms, "FBLMS"  },
 };
 
 const struct { DSIBackend eValue; const char* pName; } kBackends[] = {
@@ -50,7 +51,7 @@ bool dsiAlgorithmFromString(const char* pName, DSIAlgorithm& eAlgorithm)
         }
     }
     std::fprintf(stderr, "dsi: unknown algorithm \"%s\"; expected one of "
-                         "ECA-m ECA-B ECA-S ECA-CD CGLS\n", pName);
+                         "ECA-m ECA-B ECA-S ECA-CD CGLS FBLMS\n", pName);
     return false;
 }
 
@@ -99,11 +100,13 @@ std::unique_ptr<DSICanceller> makeDSICanceller(DSIAlgorithm eAlgorithm,
         if (bEca)                              return makeEcaCancellerCpu();
         if (eAlgorithm == DSIAlgorithm::EcaCd) return makeEcaCdCancellerCpu();
         if (eAlgorithm == DSIAlgorithm::Cgls)  return makeCglsCancellerCpu();
+        if (eAlgorithm == DSIAlgorithm::Fblms) return makeFblmsCancellerCpu();
     } else {
 #if defined(PBR_WITH_CUDA)
         if (bEca)                              return makeEcaCancellerGpu();
         if (eAlgorithm == DSIAlgorithm::EcaCd) return makeEcaCdCancellerGpu();
         if (eAlgorithm == DSIAlgorithm::Cgls)  return makeCglsCancellerGpu();
+        if (eAlgorithm == DSIAlgorithm::Fblms) return makeFblmsCancellerGpu();
 #else
     // Never silently fall back to the CPU. A benchmark row labelled GPU that
     // was actually measured on the CPU is worse than no row at all, and
@@ -140,6 +143,9 @@ bool dsiParamsFromConfig(const PbrConfig& oConfig, DSIParams& oParams)
     oParams.uMaxIterations   = oConfig.uCglsIterations;
     oParams.uCglsBatchSamples= oConfig.uCglsBatchSamples;
     oParams.bCglsPrime       = oConfig.bCglsPrime;
+    oParams.uFblmsTaps       = oConfig.uFblmsTaps;
+    oParams.dFblmsStep       = oConfig.dFblmsStep;
+    oParams.dFblmsForget     = oConfig.dFblmsForget;
     oParams.uCdBatchSamples  = oConfig.uCdBatchSamples;
     oParams.uCdDopplerTaps   = oConfig.uCdDopplerTaps;
 
@@ -246,6 +252,22 @@ bool cglsParamsOk(const DSIParams& oParams)
           "the CGLS batch must divide the CPI exactly");
     CHECK(oParams.uCglsBatchSamples > oParams.uClutterTaps,
           "the CGLS batch must hold more samples than there are taps to solve for");
+    return true;
+}
+
+bool fblmsParamsOk(const DSIParams& oParams)
+{
+    CHECK(oParams.eAlgorithm == DSIAlgorithm::Fblms, "the FBLMS canceller handles FBLMS only");
+    CHECK(oParams.uCpiSamples > 0, "CPI length must be non-zero");
+    CHECK(oParams.uFblmsTaps > 0, "FBLMS_TAPS must be non-zero");
+    CHECK((oParams.uFblmsTaps & (oParams.uFblmsTaps - 1)) == 0,
+          "FBLMS_TAPS must be a power of two (radix-2 FFT)");
+    CHECK(oParams.uCpiSamples % oParams.uFblmsTaps == 0,
+          "FBLMS_TAPS must divide the CPI exactly");
+    CHECK(oParams.dFblmsStep > 0.0 && oParams.dFblmsStep <= 1.0,
+          "FBLMS_STEP must be in (0, 1]");
+    CHECK(oParams.dFblmsForget >= 0.0 && oParams.dFblmsForget < 1.0,
+          "FBLMS_FORGET must be in [0, 1)");
     return true;
 }
 

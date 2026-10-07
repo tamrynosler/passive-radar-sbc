@@ -53,7 +53,7 @@ void printUsage(const char* pProgram)
     std::printf("usage: %s --cpi FILE [options]\n", pProgram);
     std::printf("  --cpi FILE        CPI written by pbr_run --dump-cpi (required)\n");
     std::printf("  --config FILE     configuration (default %s)\n", kDefaultConfigPath);
-    std::printf("  --algorithm NAME  override DSI_ALGORITHM: ECA-m ECA-B ECA-S ECA-CD CGLS\n");
+    std::printf("  --algorithm NAME  override DSI_ALGORITHM: ECA-m ECA-B ECA-S ECA-CD CGLS FBLMS\n");
     std::printf("  --backend NAME    override DSI_BACKEND: CPU or GPU\n");
     std::printf("  --iters N         timed repetitions after one warm-up (default 10)\n");
     std::printf("  --csv FILE        append one result row\n");
@@ -97,19 +97,22 @@ bool parseArgs(int argc, char* argv[], Options& oOptions)
 }
 
 // The window each algorithm estimates and applies its weights over: ECA's
-// update window, or ECA-CD's and CGLS's own batch.
+// update window, or ECA-CD's, CGLS's and FBLMS's own batch.
 uint64_t windowSamples(const DSIParams& oParams)
 {
     if (oParams.eAlgorithm == DSIAlgorithm::EcaCd) return oParams.uCdBatchSamples;
     if (oParams.eAlgorithm == DSIAlgorithm::Cgls)  return oParams.uCglsBatchSamples;
+    if (oParams.eAlgorithm == DSIAlgorithm::Fblms) return oParams.uFblmsTaps;
     return oParams.uUpdateSamples;
 }
 
-// Primed CGLS starts each call from the weights the previous call reached, so
-// its answer legitimately changes from one identical run to the next.
+// Primed CGLS and FBLMS start each call from the weights the previous call
+// reached, so their answer legitimately changes from one identical run to the
+// next.
 bool isStateful(const DSIParams& oParams)
 {
-    return oParams.eAlgorithm == DSIAlgorithm::Cgls && oParams.bCglsPrime;
+    return (oParams.eAlgorithm == DSIAlgorithm::Cgls && oParams.bCglsPrime) ||
+           oParams.eAlgorithm == DSIAlgorithm::Fblms;
 }
 
 void printSetup(const Options& oOptions, const CpiFileHeader& oHeader,
@@ -136,7 +139,7 @@ void printSetup(const Options& oOptions, const CpiFileHeader& oHeader,
     std::printf("  iterations    %llu after one warm-up\n",
                 (unsigned long long)oOptions.uIterations);
     if (isStateful(oParams))
-        std::printf("  note          CGLS is primed: every run starts from the last\n"
+        std::printf("  note          the canceller is stateful: every run starts from the last\n"
                     "                run's weights, and the timing is of that path\n");
     std::printf("\n");
 }

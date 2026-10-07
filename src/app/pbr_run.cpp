@@ -370,6 +370,10 @@ bool buildChain(const PbrConfig& oCfg, Chain& oChain, double& dMsOut)
         std::fprintf(stderr, "pbr_run: the warm-up pass failed\n");
         return false;
     }
+    // A stateful canceller would otherwise start the first real CPI from the
+    // weights it fitted to the warm-up signal.
+    if (!oChain.pDsi->resetState())
+        return false;
 
     dMsOut = msBetween(tStart, std::chrono::steady_clock::now());
     return true;

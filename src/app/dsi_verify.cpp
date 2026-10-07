@@ -7,7 +7,8 @@
 //   1. pbr_run --dump-cpi freezes one CPI to data/<scenario>/cpi_0000.bin
 //   2. matlab/eca_golden.m reads those exact bytes, cancels in double
 //      precision, writes data/<scenario>/golden/golden_ecam.bin and
-//      golden_ecab.bin
+//      golden_ecab.bin; matlab/fblms_golden.m does the same for FBLMS and
+//      writes golden_fblms.bin
 //   3. this tool runs the same algorithm on the same CPI and reports the
 //      relative L2 error against the golden output, PASS/FAIL by exit code
 //
@@ -66,7 +67,8 @@ void printUsage(const char* pProgram)
 {
     std::printf("usage: %s --cpi FILE --golden FILE [options]\n", pProgram);
     std::printf("  --cpi FILE        CPI written by pbr_run --dump-cpi (required)\n");
-    std::printf("  --golden FILE     golden output from matlab/eca_golden.m (required)\n");
+    std::printf("  --golden FILE     golden output from matlab/eca_golden.m or\n"
+                "                    matlab/fblms_golden.m (required)\n");
     std::printf("  --config FILE     configuration (default %s)\n", kDefaultConfigPath);
     std::printf("  --algorithm NAME  override DSI_ALGORITHM\n");
     std::printf("  --backend NAME    override DSI_BACKEND\n");
@@ -199,6 +201,28 @@ bool loadCpi(const std::string& sPath, uint64_t uCpiSamples, CpiFileHeader& oHea
                        oHeader.uSampleCount);
 }
 
+// The header a golden file should carry for this run's algorithm. FBLMS has
+// no ECA windows, so its taps and block length fill the ECA slots and its
+// step fills the loading. The forgetting factor is not in the header; the
+// generator reads it from the same config.
+GoldenHeader expectedHeader(const DSIParams& oParams)
+{
+    GoldenHeader oHeader;
+    oHeader.uSampleCount = oParams.uCpiSamples;
+    if (oParams.eAlgorithm == DSIAlgorithm::Fblms) {
+        oHeader.uClutterTaps     = oParams.uFblmsTaps;
+        oHeader.uUpdateSamples   = oParams.uFblmsTaps;
+        oHeader.uAbsoluteLoading = 0;
+        oHeader.dLoading         = oParams.dFblmsStep;
+    } else {
+        oHeader.uClutterTaps     = oParams.uClutterTaps;
+        oHeader.uUpdateSamples   = oParams.uUpdateSamples;
+        oHeader.uAbsoluteLoading = oParams.bAbsoluteLoading ? 1 : 0;
+        oHeader.dLoading         = oParams.dDiagonalLoading;
+    }
+    return oHeader;
+}
+
 // The output to compare against: the same algorithm on the --against
 // backend, described by a header made from its parameters.
 //
@@ -227,11 +251,7 @@ bool runOtherBackend(const PbrConfig& oCfg, const std::string& sBackend,
         return false;
 
     sNameOut                 = pOther->name();
-    oHeader.uSampleCount     = oParams.uCpiSamples;
-    oHeader.uClutterTaps     = oParams.uClutterTaps;
-    oHeader.uUpdateSamples   = oParams.uUpdateSamples;
-    oHeader.uAbsoluteLoading = oParams.bAbsoluteLoading ? 1 : 0;
-    oHeader.dLoading         = oParams.dDiagonalLoading;
+    oHeader = expectedHeader(oParams);
     return true;
 }
 
@@ -241,13 +261,14 @@ bool runOtherBackend(const PbrConfig& oCfg, const std::string& sBackend,
 bool goldenMatches(const GoldenHeader& oGolden, const DSIParams& oParams,
                    const std::string& sGoldenName)
 {
+    const GoldenHeader oWant = expectedHeader(oParams);
     const bool bMatch =
-        oGolden.uSampleCount == oParams.uCpiSamples &&
-        oGolden.uClutterTaps == oParams.uClutterTaps &&
-        oGolden.uUpdateSamples == oParams.uUpdateSamples &&
-        (oGolden.uAbsoluteLoading != 0) == oParams.bAbsoluteLoading &&
-        std::fabs(oGolden.dLoading - oParams.dDiagonalLoading) <=
-            1e-12 * std::fabs(oParams.dDiagonalLoading);
+        oGolden.uSampleCount == oWant.uSampleCount &&
+        oGolden.uClutterTaps == oWant.uClutterTaps &&
+        oGolden.uUpdateSamples == oWant.uUpdateSamples &&
+        oGolden.uAbsoluteLoading == oWant.uAbsoluteLoading &&
+        std::fabs(oGolden.dLoading - oWant.dLoading) <=
+            1e-12 * std::fabs(oWant.dLoading);
     if (bMatch)
         return true;
 
@@ -258,17 +279,17 @@ bool goldenMatches(const GoldenHeader& oGolden, const DSIParams& oParams,
         "  samples     %-20llu  %llu\n"
         "  taps        %-20llu  %llu\n"
         "  window      %-20llu  %llu\n"
-        "  loading     %g (%s)   %g (%s)\n"
-        "Re-run matlab/eca_golden.m, or pick the matching --algorithm.\n",
+        "  loading/step %g (%s)   %g (%s)\n"
+        "Re-run matlab/eca_golden.m (matlab/fblms_golden.m for FBLMS), or pick the matching --algorithm.\n",
         sGoldenName.c_str(), dsiAlgorithmName(oParams.eAlgorithm),
         (unsigned long long)oGolden.uSampleCount,
-        (unsigned long long)oParams.uCpiSamples,
+        (unsigned long long)oWant.uSampleCount,
         (unsigned long long)oGolden.uClutterTaps,
-        (unsigned long long)oParams.uClutterTaps,
+        (unsigned long long)oWant.uClutterTaps,
         (unsigned long long)oGolden.uUpdateSamples,
-        (unsigned long long)oParams.uUpdateSamples,
+        (unsigned long long)oWant.uUpdateSamples,
         oGolden.dLoading, oGolden.uAbsoluteLoading ? "absolute" : "relative",
-        oParams.dDiagonalLoading, oParams.bAbsoluteLoading ? "absolute" : "relative");
+        oWant.dLoading, oWant.uAbsoluteLoading ? "absolute" : "relative");
     return false;
 }
 

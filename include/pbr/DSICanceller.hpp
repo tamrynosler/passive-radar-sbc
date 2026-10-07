@@ -37,6 +37,11 @@ namespace pbr {
 //   [4] Schuepbach, Paine, O'Hagan, "Efficient direct signal cancellation
 //       for FM-based passive radar", IEEE RadarConf 2020.  -- the comparison
 //       this thesis reproduces on embedded GPU hardware
+//   [5] Ferrara, "Fast implementation of LMS adaptive filters", IEEE Trans.
+//       ASSP 28(4), 1980.                         -- FBLMS
+//   [6] Shynk, "Frequency-domain and multirate adaptive filtering", IEEE
+//       Signal Processing Magazine 9(1), 1992.    -- the per-bin step
+//                                                    normalisation (Table I)
 
 enum class DSIAlgorithm {
     // One least-squares solve over the whole CPI, with the absolute diagonal
@@ -72,7 +77,15 @@ enum class DSIAlgorithm {
     // fixed memory footprint [4]. Uses its own window, uCglsBatchSamples, and
     // uMaxIterations; ignores the ECA window fields and diagonal loading
     // (stopping early is the regularisation).
-    Cgls
+    Cgls,
+
+    // Fast block LMS [5][6]. Adaptive and frequency-domain: the weights are
+    // updated every block of uFblmsTaps samples, with the convolution and the
+    // gradient done by 2N-point FFTs. Stateful across CPIs: the weights, the
+    // power estimate and the last N reference samples carry over. Uses its
+    // own fields uFblmsTaps, dFblmsStep and dFblmsForget; ignores every
+    // ECA and CGLS field, including uClutterTaps.
+    Fblms
 };
 
 // Which implementation of the chosen algorithm to build.
@@ -93,7 +106,7 @@ enum class DSIBackend { Cpu, Gpu };
 // dsiParamsFromConfig(). No canceller reads the config file itself.
 //
 // Fields that do not apply to the chosen algorithm are ignored, not
-// validated -- one struct serves all five, the same way one .conf file
+// validated -- one struct serves all six, the same way one .conf file
 // serves tools that read different subsets of it.
 struct DSIParams {
     DSIAlgorithm eAlgorithm     = DSIAlgorithm::EcaM;
@@ -192,6 +205,19 @@ struct DSIParams {
     // CGLS: start each window from the weights the same window reached in
     // the previous CPI instead of from zero. Makes the canceller stateful.
     bool         bCglsPrime     = false;
+
+    // FBLMS. N: filter length AND block length; a power of two that divides
+    // the CPI. The FFTs are 2N points. Also the reach in range: c/fs per tap.
+    uint64_t     uFblmsTaps     = 0;
+
+    // FBLMS. mu, Shynk Table I, applied per bin as mu / P_m. In (0, 1]. Sets
+    // convergence speed and the width of the zero-Doppler notch.
+    double       dFblmsStep     = 0.0;
+
+    // FBLMS. lambda of the per-bin power estimate
+    // P_m(k) = lambda P_m(k-1) + (1 - lambda) |X_m(k)|^2. In [0, 1). Its
+    // memory is 1/(1-lambda) blocks.
+    double       dFblmsForget   = 0.0;
 };
 
 // What an algorithm reports about the work it just did. Intrinsic
@@ -258,6 +284,12 @@ public:
     // the next stage reads deviceOutput() directly; the host output buffer is
     // then left untouched. Ignored by backends with no device.
     virtual void setHostOutputEnabled(bool /*bEnabled*/) {}
+
+    // Forget everything learnt from earlier cancel() calls, back to the state
+    // init() left: what a stateful canceller (FBLMS) needs after the chain's
+    // warm-up pass, whose synthetic input must not seed the first real CPI.
+    // Stateless cancellers have nothing to forget. False on a device failure.
+    virtual bool resetState() { return true; }
 };
 
 // Build a canceller. Returns null, having logged the reason, for a

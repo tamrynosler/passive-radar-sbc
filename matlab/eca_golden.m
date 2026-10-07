@@ -50,7 +50,7 @@ ecamPath  = fullfile(goldenDir, 'golden_ecam.bin');
 ecabPath  = fullfile(goldenDir, 'golden_ecab.bin');
 
 % ---- read the frozen CPI ---------------------------------------------------
-[sref, ssur, N, fs, startIdx] = read_cpi(cpiPath);
+[sref, ssur, N, fs, startIdx] = read_cpi_file(cpiPath);
 fprintf('CPI: %d samples at %d Hz, start index %d\n', N, fs, startIdx);
 assert(mod(N, batchSamples) == 0, 'batch length must divide the CPI exactly');
 
@@ -96,45 +96,7 @@ fprintf('ECA-B: cancelled %.2f dB of surveillance power\n', ...
 
 % ---- write the golden files ------------------------------------------------
 % Header parameters ride along so dsi_verify can refuse a mismatched file.
-write_golden(ecamPath, clean_m, N, K, N,            1, loadingAbs);
-write_golden(ecabPath, clean_b, N, K, batchSamples, 0, loadingRel);
+write_golden_file(ecamPath, clean_m, N, K, N,            1, loadingAbs);
+write_golden_file(ecabPath, clean_b, N, K, batchSamples, 0, loadingRel);
 fprintf('wrote %s and %s\n', ecamPath, ecabPath);
-end
-
-% ================= helpers =================
-function [sref, ssur, n, fs, startIdx] = read_cpi(path)
-    % Layout: see include/pbr/CpiFile.hpp. 32-byte header, then the reference
-    % channel, then the surveillance channel, each as interleaved float32 I,Q.
-    fid = fopen(path, 'rb', 'ieee-le');
-    assert(fid >= 0, 'cannot open %s -- run pbr_run --dump-cpi first', path);
-    magic = fread(fid, 8, '*char')';
-    assert(strcmp(magic, 'PBRCPI01'), '%s is not a CPI file', path);
-    n        = fread(fid, 1, 'uint64');
-    fs       = fread(fid, 1, 'uint64');
-    startIdx = fread(fid, 1, 'uint64');
-    sref = read_channel(fid, n);
-    ssur = read_channel(fid, n);
-    fclose(fid);
-end
-
-function x = read_channel(fid, n)
-    raw = fread(fid, 2*n, 'single');
-    assert(numel(raw) == 2*n, 'CPI file is truncated');
-    x = double(raw(1:2:end)) + 1i*double(raw(2:2:end));
-end
-
-function write_golden(path, clean, n, k, updateSamples, absoluteLoading, loading)
-    % Layout: see src/app/dsi_verify.cpp. 48-byte header, then the cleaned
-    % surveillance channel as interleaved float32 I,Q. float32 deliberately:
-    % the C++ output is float32, so both sides carry the same quantisation.
-    fid = fopen(path, 'wb', 'ieee-le');
-    assert(fid >= 0, 'cannot open %s for writing', path);
-    fwrite(fid, 'PBRGLD01', 'char');
-    fwrite(fid, [n k updateSamples absoluteLoading], 'uint64');
-    fwrite(fid, loading, 'double');
-    inter = zeros(2*n, 1);
-    inter(1:2:end) = real(clean);
-    inter(2:2:end) = imag(clean);
-    fwrite(fid, single(inter), 'single');
-    fclose(fid);
 end

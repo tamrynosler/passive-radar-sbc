@@ -64,7 +64,8 @@ hop, and the lag telemetry shows the single bump.
 When a context packet's rate differs from the config, `pbr_run` calls
 `adaptPbrConfigToSampleRate`: the ECA-CD batch snaps to the nearest power
 of two at the new rate, the CPI to the nearest multiple of that and of the
-Doppler decimation, the ECA update and CGLS windows to the nearest
+Doppler decimation (and of FBLMS_TAPS, a sample count, so it does not
+move with the rate), the ECA update and CGLS windows to the nearest
 divisors of the CPI, the ECA estimation window to the nearest multiple of
 the update window, the hop to the CPI if they were equal. The result is
 validated like any other set; the warning lists every value that moved.

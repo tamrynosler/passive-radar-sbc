@@ -53,6 +53,9 @@ const char* const kValidConfig =
     "CGLS_BATCH_s = 0.025\n"
     "CGLS_ITERATIONS = 30\n"
     "CGLS_PRIME = 0\n"
+    "FBLMS_TAPS = 128\n"
+    "FBLMS_STEP = 0.01\n"
+    "FBLMS_FORGET = 0.9\n"
     "\n"
     "CFAR_PFA = 1e-5\n"
     "CFAR_GUARD_RANGE = 2\n"
@@ -325,6 +328,22 @@ void testValidationRules()
         "CGLS_PRIME = 0", "CGLS_PRIME = 1")), oConfig));
     assert(oConfig.bCglsPrime);
 
+    // FBLMS: the taps are a power of two, reach at least the range bins and
+    // divide the CPI; the step is in (0, 1] and the forgetting factor in [0, 1).
+    assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "FBLMS_TAPS = 128", "FBLMS_TAPS = 100")), oConfig));             // not a power of two
+    assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "FBLMS_TAPS = 128", "FBLMS_TAPS = 64")), oConfig));              // 64 < 120 range bins
+    assert(loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "FBLMS_TAPS = 128", "FBLMS_TAPS = 2048")), oConfig));            // divides 204800
+    assert(oConfig.uFblmsTaps == 2048u);
+    assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "FBLMS_STEP = 0.01", "FBLMS_STEP = 0")), oConfig));
+    assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "FBLMS_STEP = 0.01", "FBLMS_STEP = 1.5")), oConfig));
+    assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "FBLMS_FORGET = 0.9", "FBLMS_FORGET = 1")), oConfig));
+
     // ECA-m is the whole CPI in one window, so a short batch length must not
     // stop it loading -- the algorithm ignores those keys.
     assert(loadPbrConfig(writeTemp(replaced(kValidConfig,
@@ -369,6 +388,9 @@ void testWhitespaceAndCommentHandling()
         "CGLS_BATCH_s = 0.025\n"
         "CGLS_ITERATIONS = 30\n"
         "CGLS_PRIME = 0\n"
+        "FBLMS_TAPS = 128\n"
+        "FBLMS_STEP = 0.01\n"
+        "FBLMS_FORGET = 0.9\n"
         "CFAR_PFA = 1e-5\n"
         "CFAR_GUARD_RANGE = 2\n"
         "CFAR_GUARD_DOPPLER = 2\n"
@@ -397,6 +419,8 @@ void testTextRoundTrip()
     assert(oBack.uEcaUpdateSamples == oCfg.uEcaUpdateSamples);
     assert(oBack.uCdBatchSamples == oCfg.uCdBatchSamples);
     assert(oBack.dCfarPfa == oCfg.dCfarPfa);
+    assert(oBack.uFblmsTaps == oCfg.uFblmsTaps);
+    assert(oBack.dFblmsStep == oCfg.dFblmsStep && oBack.dFblmsForget == oCfg.dFblmsForget);
     assert(oBack.sDsiAlgorithm == oCfg.sDsiAlgorithm);
     assert(oBack.uControlPort == 4993);
     assert(oBack.sArdStreamHost == "127.0.0.1" && oBack.uArdStreamPort == 4992);

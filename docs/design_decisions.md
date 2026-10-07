@@ -578,6 +578,89 @@ anything. The guard therefore never fires in legitimate use; it exists to turn
 a config typo into a named error instead of a thrash. ECA-S at the shipped
 settings allocates 114 MB of the 512.
 
+### 1d.11 FBLMS (2026-10-07)
+
+Files: `matlab/fblms.m` (reference), `src/dsi/cpu/FblmsCpu.cpp` (CPU twin),
+`src/dsi/gpu/FblmsGpu.cu` (what the thesis measures),
+`matlab/fblms_golden.m` (writes `golden_fblms.bin`; `dsi_verify` compares).
+
+**Decision.** Add Ferrara's fast block LMS with Shynk's per-bin step
+normalisation as a sixth canceller. Overlap-save, block length = filter
+length N, 2N-point FFTs, five FFTs per block: Ferrara 1980 (IEEE Trans.
+ASSP 28(4), pp. 474-475) eqs. 9-15. Step normalisation
+`mu_m = mu / P_m`, `P_m(k) = lambda P_m(k-1) + (1-lambda)|X_m(k)|^2`:
+Shynk 1992 (IEEE SPM 9(1)) Table I. The output is the error signal.
+
+**Normalisation.** Shynk's per-bin form over Ferrara's plain mu or Garry's
+scalar normalisation. Reason: mu becomes dimensionless and independent of
+signal scale, and Table I is the only complete published procedure. The
+factor 2 in the update is kept as printed in both papers.
+
+**P initialisation.** From the first block's `|X|^2`, so the first update
+is not divided by a near-zero estimate and mu means the same at any level.
+
+**State.** The weights, P and the last N reference samples carry over
+between CPIs (Garry, Baker and Smith 2017 recommend carrying the weights).
+The canceller is therefore stateful: the first CPI converges from zero, and
+output depends on the history of CPIs. Golden files are cold start. Every
+benchmark run is the warm path, as with primed CGLS; the cold CPI is not
+what the timing rows show.
+
+**FBLMS_TAPS is its own key.** It must be a power of two, and
+N_CLUTTER_TAPS (120) is not. 128 divides both CPI lengths. It must also
+divide the CPI and be at least N_RANGE_BINS, the same rule N_CLUTTER_TAPS
+has. FBLMS ignores N_CLUTTER_TAPS and every ECA/CGLS key. The CPI adaptation
+to a new sample rate also snaps to a multiple of FBLMS_TAPS.
+
+**Keys (all required).** FBLMS_TAPS (default 128), FBLMS_STEP mu in (0, 1]
+(0.01), FBLMS_FORGET lambda in [0, 1) (0.9).
+
+**Measured (MATLAB), frozen S0_clean CPI 0,** one target at 67.3 km,
++99 Hz, N = 128, run twice on the same CPI (cold, then warm):
+
+| Canceller | Cold suppression | Warm suppression | Target visibility over map median | Zero-Doppler ridge width |
+|---|---|---|---|---|
+| ECA-m | 40.2 dB | 40.2 dB | 36.8 dB | 46 Hz |
+| FBLMS mu 0.002, lambda 0.9 | 8.4 dB | 35.8 dB | 28.6 dB | 21 Hz |
+| FBLMS mu 0.01, lambda 0.9 | 16.4 dB | 51.1 dB | 46.2 dB | 1 Hz |
+| FBLMS mu 0.05, lambda 0.9 | 25.4 dB | 50.9 dB | 46.0 dB | 1 Hz |
+| FBLMS mu 0.1, lambda 0.9 | 28.7 dB | 50.8 dB | 45.7 dB | 2 Hz |
+| FBLMS mu 0.1, lambda 0.99 | -7.2 dB (unstable) | 50.7 dB | 45.4 dB | 1 Hz |
+
+mu 0.005 to 0.05 with lambda in {0.5, 0.9, 0.99} all gave about 51 dB, 46 dB
+and a 1-3 Hz ridge. Cold-pass suppression rises with mu (16 dB at 0.01,
+25 dB at 0.05). The warm figures are optimistic: the second pass adapts to
+data it has already seen. Defaults: mu 0.01, lambda 0.9. Not yet tested: a
+target at a few Hz of Doppler, where the width of the notch matters.
+
+**GPU structure.** The reference FFTs of all blocks are done in one batched
+cuFFT call; the weight loop is sequential by nature (1600 blocks per 1 s
+CPI at 128 taps), each block four single cuFFT calls and five small kernels,
+queued without a host wait. Measured on the Nano, unpinned clocks,
+`dsi_bench --iters 10` on `cpi_0000.bin`: FBLMS 363 ms per CPI (median),
+ECA-CD 29 ms. About 14,400 launches of 256-point work per CPI: the cost is
+launch overhead, not arithmetic. A fused single-kernel version with a
+shared-memory 256-point FFT is a possible later benchmark row; not done.
+
+**Verified 2026-10-07.** CPU FP64 against the MATLAB golden 1.7e-12,
+CPU FP32 2.2e-6, GPU 2.6e-6 (gate 1e-4); GPU against CPU FP32 2.2e-6;
+15/15 suites on the Jetson. Replay of the S0_clean capture through
+`pbr_run` on the GPU: 16.43 dB on CPI 0 (the golden's figure), 50.8 dB on
+CPIs 1 and 2, 395 ms per CPI including the map.
+
+**Warm-up and `resetState()`.** `buildChain` warms the stages with a
+synthetic pair (surveillance = 0.5 x reference, at a level far above real
+samples). A stateful canceller kept that fit: the first real CPI then
+started from the wrong filter and the output was 14 dB LARGER than the
+input. `DSICanceller::resetState()` (default: nothing to forget) returns
+FBLMS to its init() state, and the chain calls it after the warm-up, as it
+already discards the warm-up output. Primed CGLS has the same exposure in
+principle; it re-solves 30 iterations per window and recovers within the
+first CPI, so it was left as is (proposed, not changed).
+
+**Scaling.** The two 1/M scalings sit in the error and constraint steps on
+all three implementations, so intermediate values can be compared.
+
 ---
 
 ## 1e. Range-Doppler map and CFAR (`pbr::ArdProcessor`)
