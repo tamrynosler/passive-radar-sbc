@@ -15,13 +15,13 @@ const float kSpectrumMinDb = -300.0f;
 // Welch-averaged power spectrum of one CPI, for the viewer's
 // before-processing spectrogram (docs/ard-stream-design.md 4.4).
 //
-// The CPI is cut into consecutive segments of bins() samples, each is
-// Hann-windowed and FFT'd, and |X|^2 is averaged over the segments. The
+// The CPI is cut into consecutive segments of bins() samples; every 10th
+// is Hann-windowed and FFT'd, and |X|^2 is averaged over those. The
 // output is bins() values in dB, fftshifted so bin 0 is -fs/2 and bin
 // bins()/2 is the carrier, the same orientation as the range-Doppler map's
 // Doppler axis. Plain C++ radix-2, so the host build has it too and the
-// GPU is not touched; a CPI of 204800 samples at 512 bins is 400 FFTs of
-// 512 points, about a millisecond on the Nano's A57.
+// GPU is not touched; a CPI of 204800 samples at 512 bins holds 400
+// segments, of which 40 are transformed (see kSegmentStride in Spectrum.cpp).
 class SpectrumEstimator {
 public:
     // uBins must be a power of two, at least 8. May be called again to

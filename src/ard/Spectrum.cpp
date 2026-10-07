@@ -13,6 +13,12 @@ namespace {
 // a large negative number rather than -inf.
 const double kPowerFloor = 1e-30;
 
+// Only every kSegmentStride-th segment is transformed and averaged. The
+// display is 512 bins; 40 averages (400 / 10) already give a dB bin a standard
+// deviation of about 0.7 dB, which a spectrogram cannot show, and it is a tenth
+// of the CPU time on the Jetson.
+const uint64_t kSegmentStride = 10;
+
 // In-place iterative radix-2 forward FFT of uN points, uN a power of two.
 // pcTwiddle holds exp(-j 2 pi k / uN) for k in [0, uN/2).
 void fftInPlace(ComplexF* pc, uint64_t uN, const ComplexF* pcTwiddle)
@@ -35,9 +41,14 @@ void fftInPlace(ComplexF* pc, uint64_t uN, const ComplexF* pcTwiddle)
         for (uint64_t i = 0; i < uN; i += uLen) {
             for (uint64_t k = 0; k < uHalf; ++k) {
                 const ComplexF cTop    = pc[i + k];
-                const ComplexF cBottom = pc[i + k + uHalf] * pcTwiddle[k * uStep];
-                pc[i + k]         = cTop + cBottom;
-                pc[i + k + uHalf] = cTop - cBottom;
+                const ComplexF cW      = pcTwiddle[k * uStep];
+                const ComplexF cLow    = pc[i + k + uHalf];
+                // Real and imaginary parts written out: std::complex operator*
+                // calls a NaN-checking helper without -ffast-math.
+                const float fBotRe = cLow.real() * cW.real() - cLow.imag() * cW.imag();
+                const float fBotIm = cLow.real() * cW.imag() + cLow.imag() * cW.real();
+                pc[i + k]         = ComplexF(cTop.real() + fBotRe, cTop.imag() + fBotIm);
+                pc[i + k + uHalf] = ComplexF(cTop.real() - fBotRe, cTop.imag() - fBotIm);
             }
         }
     }
@@ -74,10 +85,12 @@ bool SpectrumEstimator::compute(const ComplexF* pcSamples, uint64_t uSamples, fl
     CHECK(uSamples >= muBins, "SpectrumEstimator: CPI shorter than one segment");
 
     const uint64_t uSegments = uSamples / muBins;
+    uint64_t       uUsed     = 0;   // segments actually averaged
     const size_t   uN        = static_cast<size_t>(muBins);
     std::fill(mvdPower.begin(), mvdPower.end(), 0.0);
 
-    for (uint64_t uSegment = 0; uSegment < uSegments; ++uSegment) {
+    for (uint64_t uSegment = 0; uSegment < uSegments; uSegment += kSegmentStride) {
+        ++uUsed;
         const ComplexF* pcSegment = pcSamples + uSegment * muBins;
         for (size_t i = 0; i < uN; ++i)
             mvcWork[i] = pcSegment[i] * mvfWindow[i];
@@ -91,7 +104,7 @@ bool SpectrumEstimator::compute(const ComplexF* pcSamples, uint64_t uSamples, fl
 
     // Mean over segments, per bin, then dB, fftshifted: output bin 0 is the
     // transform's bin N/2 (-fs/2), output bin N/2 is the transform's bin 0.
-    const double dScale = 1.0 / (static_cast<double>(uSegments) * static_cast<double>(muBins));
+    const double dScale = 1.0 / (static_cast<double>(uUsed) * static_cast<double>(muBins));
     for (size_t uOut = 0; uOut < uN; ++uOut) {
         const size_t k  = (uOut + uN / 2) % uN;
         const double dP = mvdPower[k] * dScale;
