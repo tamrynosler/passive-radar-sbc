@@ -10,11 +10,12 @@
 //
 //   cuFFT             M batched transforms of length L, forward on both
 //                     channels and inverse on the cleaned one
-//   projectKernel     one block per carrier: accumulate Q^H Q and Q^H y across
-//                     the batches, solve the (2P+1)-square system in thread 0,
-//                     subtract Q a from the carrier
+//   projectKernel     one block per 32 consecutive carriers (32 carriers x 8
+//                     batch lanes): accumulate Q^H Q and Q^H y across the
+//                     batches, solve the (2P+1)-square system, one thread per
+//                     carrier, subtract Q a from the carrier
 //
-// The carriers are independent, so L blocks run with nothing to share. The
+// The carriers are independent, so the blocks run with nothing to share. The
 // 1/L that cuFFT's inverse omits is folded into the subtraction, which
 // touches every element of the spectrum anyway. The suppression figure comes
 // from two cuBLAS norms, as for every GPU canceller.
@@ -93,28 +94,41 @@ __device__ bool solveSmallSystem(cufftComplex acSystem[kMaxCols][kMaxCols],
 }
 
 // ---------------------------------------------------------------------------
-// The projection, one block per carrier k.
+// The projection, one block per tile of kCarriersPerBlock consecutive carriers.
 //
-// Threads stride over the batches accumulating
+// The spectra are stored batch-major, element (m, k) at m * uBatch + k, so
+// consecutive carriers are consecutive in memory. The 256 threads are laid
+// out 32 carriers x 8 batch lanes: thread (c, lane) = (threadIdx.x % 32,
+// threadIdx.x / 32), so the 32 threads of a warp read 32 consecutive carriers
+// of one batch, one coalesced 256-byte line. Each thread accumulates, for its
+// carrier k, over the batches m = lane, lane + 8, ...
 //     g[d] = sum |R_m|^2 e^{+j 2 pi d m / M},        d = 0..2P
 //     v[p] = sum conj(R_m) e^{-j 2 pi p m / M} S_m,  p = -P..P
-// so that (Q^H Q)(a, b) = g[b - a] (Toeplitz Hermitian) and v = Q^H y. After
-// a block reduction thread 0 solves (Q^H Q) a = v; then every thread
-// subtracts Q a from its batches of S and applies the 1/L.
+// so that (Q^H Q)(a, b) = g[b - a] (Toeplitz Hermitian) and v = Q^H y. The
+// 8 lanes of a carrier are added in the fixed order lane 0 .. 7 through shared
+// memory; then one thread per carrier solves (Q^H Q) a = v; then every thread
+// subtracts Q a from its batches of S and applies the 1/L. The twiddle depends
+// only on (Doppler, m), so a warp reads one value: a broadcast.
 // ---------------------------------------------------------------------------
+const uint32_t kCarriersPerBlock = 32;
+const uint32_t kBatchLanes       = kBlock / kCarriersPerBlock;   // 8
+
 __global__ void projectKernel(const cufftComplex* d_cRefSpec, cufftComplex* d_cSpec,
                               const cufftComplex* d_cTwiddle,
                               uint32_t uBatch, uint32_t uBatches, int iP,
                               float fInvL)
 {
-    __shared__ float        afShared[kBlock];
-    __shared__ cufftComplex acG[kMaxCols];
-    __shared__ cufftComplex acV[kMaxCols];
-    __shared__ cufftComplex acWeights[kMaxCols];
-    __shared__ bool         bSolved;
+    __shared__ cufftComplex acPartShared[2][kBatchLanes][kCarriersPerBlock];   // G, V
+    __shared__ cufftComplex acG[kCarriersPerBlock][kMaxCols];
+    __shared__ cufftComplex acV[kCarriersPerBlock][kMaxCols];
+    __shared__ cufftComplex acWeights[kCarriersPerBlock][kMaxCols];
+    __shared__ bool         abSolved[kCarriersPerBlock];
 
-    const uint32_t k     = blockIdx.x;
-    const uint32_t uCols = 2 * static_cast<uint32_t>(iP) + 1;
+    const uint32_t uCarrier = threadIdx.x % kCarriersPerBlock;
+    const uint32_t uLane    = threadIdx.x / kCarriersPerBlock;
+    const uint32_t k        = blockIdx.x * kCarriersPerBlock + uCarrier;
+    const bool     bActive  = (k < uBatch);   // the last tile may run past L
+    const uint32_t uCols    = 2 * static_cast<uint32_t>(iP) + 1;
 
     cufftComplex acPartG[kMaxCols];
     cufftComplex acPartV[kMaxCols];
@@ -123,51 +137,63 @@ __global__ void projectKernel(const cufftComplex* d_cRefSpec, cufftComplex* d_cS
         acPartV[u] = make_cuComplex(0.0f, 0.0f);
     }
 
-    for (uint32_t m = threadIdx.x; m < uBatches; m += kBlock) {
-        const cufftComplex cR = d_cRefSpec[static_cast<size_t>(m) * uBatch + k];
-        const cufftComplex cS = d_cSpec[static_cast<size_t>(m) * uBatch + k];
-        const float fPower = cR.x * cR.x + cR.y * cR.y;
-        const cufftComplex cRS = make_cuComplex(cR.x * cS.x + cR.y * cS.y,
-                                                cR.x * cS.y - cR.y * cS.x);   // conj(R) S
-        for (uint32_t uD = 0; uD < uCols; ++uD) {
-            const cufftComplex cTw = d_cTwiddle[twiddleIndex(static_cast<int>(uD), m, uBatches)];
-            acPartG[uD].x += fPower * cTw.x;
-            acPartG[uD].y += fPower * cTw.y;
-        }
-        for (int iDoppler = -iP; iDoppler <= iP; ++iDoppler) {
-            const cufftComplex cTw = d_cTwiddle[twiddleIndex(-iDoppler, m, uBatches)];
-            acPartV[iDoppler + iP] = cuCaddf(acPartV[iDoppler + iP], cuCmulf(cRS, cTw));
+    if (bActive) {
+        for (uint32_t m = uLane; m < uBatches; m += kBatchLanes) {
+            const cufftComplex cR = d_cRefSpec[static_cast<size_t>(m) * uBatch + k];
+            const cufftComplex cS = d_cSpec[static_cast<size_t>(m) * uBatch + k];
+            const float fPower = cR.x * cR.x + cR.y * cR.y;
+            const cufftComplex cRS = make_cuComplex(cR.x * cS.x + cR.y * cS.y,
+                                                    cR.x * cS.y - cR.y * cS.x);   // conj(R) S
+            for (uint32_t uD = 0; uD < uCols; ++uD) {
+                const cufftComplex cTw = d_cTwiddle[twiddleIndex(static_cast<int>(uD), m, uBatches)];
+                acPartG[uD].x += fPower * cTw.x;
+                acPartG[uD].y += fPower * cTw.y;
+            }
+            for (int iDoppler = -iP; iDoppler <= iP; ++iDoppler) {
+                const cufftComplex cTw = d_cTwiddle[twiddleIndex(-iDoppler, m, uBatches)];
+                acPartV[iDoppler + iP] = cuCaddf(acPartV[iDoppler + iP], cuCmulf(cRS, cTw));
+            }
         }
     }
 
+    // Add the lanes of each carrier in a fixed order, one entry u at a time.
     for (uint32_t u = 0; u < uCols; ++u) {
-        const float fGx = blockSum(acPartG[u].x, afShared);
-        const float fGy = blockSum(acPartG[u].y, afShared);
-        const float fVx = blockSum(acPartV[u].x, afShared);
-        const float fVy = blockSum(acPartV[u].y, afShared);
-        if (threadIdx.x == 0) {
-            acG[u] = make_cuComplex(fGx, fGy);
-            acV[u] = make_cuComplex(fVx, fVy);
+        acPartShared[0][uLane][uCarrier] = acPartG[u];
+        acPartShared[1][uLane][uCarrier] = acPartV[u];
+        __syncthreads();
+        if (uLane == 0) {
+            cufftComplex cG = acPartShared[0][0][uCarrier];
+            cufftComplex cV = acPartShared[1][0][uCarrier];
+            for (uint32_t uL = 1; uL < kBatchLanes; ++uL) {
+                cG = cuCaddf(cG, acPartShared[0][uL][uCarrier]);
+                cV = cuCaddf(cV, acPartShared[1][uL][uCarrier]);
+            }
+            acG[uCarrier][u] = cG;
+            acV[uCarrier][u] = cV;
         }
+        __syncthreads();
     }
-    __syncthreads();
 
-    if (threadIdx.x == 0) {
+    if (uLane == 0) {
         cufftComplex acSystem[kMaxCols][kMaxCols];
         cufftComplex acSolution[kMaxCols];
         for (uint32_t uRow = 0; uRow < uCols; ++uRow) {
             for (uint32_t uCol = 0; uCol < uCols; ++uCol)
-                acSystem[uRow][uCol] = (uCol >= uRow) ? acG[uCol - uRow] : cuConjf(acG[uRow - uCol]);
-            acSolution[uRow] = acV[uRow];
+                acSystem[uRow][uCol] = (uCol >= uRow) ? acG[uCarrier][uCol - uRow]
+                                                      : cuConjf(acG[uCarrier][uRow - uCol]);
+            acSolution[uRow] = acV[uCarrier][uRow];
         }
-        bSolved = solveSmallSystem(acSystem, acSolution, uCols);
-        if (bSolved)
+        abSolved[uCarrier] = bActive && solveSmallSystem(acSystem, acSolution, uCols);
+        if (abSolved[uCarrier])
             for (uint32_t u = 0; u < uCols; ++u)
-                acWeights[u] = acSolution[u];
+                acWeights[uCarrier][u] = acSolution[u];
     }
     __syncthreads();
 
-    for (uint32_t m = threadIdx.x; m < uBatches; m += kBlock) {
+    if (!bActive)
+        return;
+    const bool bSolved = abSolved[uCarrier];
+    for (uint32_t m = uLane; m < uBatches; m += kBatchLanes) {
         const size_t u = static_cast<size_t>(m) * uBatch + k;
         cufftComplex cS = d_cSpec[u];
         if (bSolved) {
@@ -175,7 +201,7 @@ __global__ void projectKernel(const cufftComplex* d_cRefSpec, cufftComplex* d_cS
             cufftComplex cClutter = make_cuComplex(0.0f, 0.0f);
             for (int iDoppler = -iP; iDoppler <= iP; ++iDoppler) {
                 const cufftComplex cTw = d_cTwiddle[twiddleIndex(iDoppler, m, uBatches)];
-                cClutter = cuCaddf(cClutter, cuCmulf(cuCmulf(acWeights[iDoppler + iP], cR), cTw));
+                cClutter = cuCaddf(cClutter, cuCmulf(cuCmulf(acWeights[uCarrier][iDoppler + iP], cR), cTw));
             }
             cS = cuCsubf(cS, cClutter);
         }
@@ -318,7 +344,7 @@ bool EcaCdGpu::cancel(const ComplexF* pcRef, const ComplexF* pcSur,
     CUDA_CHECK(cufftExecC2C(mhPlan, md_cRef, md_cRefSpec, CUFFT_FORWARD));
     CUDA_CHECK(cufftExecC2C(mhPlan, md_cSur, md_cOut, CUFFT_FORWARD));
 
-    projectKernel<<<static_cast<uint32_t>(muBatch), kBlock>>>(
+    projectKernel<<<blocksFor(static_cast<uint32_t>(muBatch), kCarriersPerBlock), kBlock>>>(
         md_cRefSpec, md_cOut, md_cTwiddle,
         static_cast<uint32_t>(muBatch), static_cast<uint32_t>(muBatches),
         static_cast<int>(moParams.uCdDopplerTaps),
