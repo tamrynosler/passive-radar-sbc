@@ -6,32 +6,32 @@
 // on a GPU.
 //
 // ---------------------------------------------------------------------------
-// One batched FFT, then a sequential loop
+// One batched FFT, then one kernel for the whole loop
 // ---------------------------------------------------------------------------
 //
 // The reference FFTs do not depend on the weights, so all B blocks are
 // transformed in one batched cuFFT call. The weight loop cannot be
 // parallelised: each block's error needs the weights the previous block
-// produced. One CPI is therefore B x (4 cuFFT + 5 kernel) launches, queued
-// without a host wait. Each launch works on only M points, so the cost is
-// launch overhead, not arithmetic.
-//
-// The per-bin power recursion is done inside the gradient kernel, which
-// reads X and E and writes G.
+// produced. Each step works on only M = 2N points, so launching a kernel per
+// step was all overhead. Instead one thread block of M threads (M <= 1024) runs all B
+// blocks in turn, with the weights, the power and the work buffers in shared
+// memory, and its own radix-2 FFT (fftBlock) for the four transforms per
+// block. The Nano has one SM, so one thread block loses nothing.
 //
 // ---------------------------------------------------------------------------
 // Precision
 // ---------------------------------------------------------------------------
 //
-// FP32 throughout, forced by Maxwell's 1/32-rate FP64. The FFTs are cuFFT's,
-// not HostFft's, so the result matches the CPU's FP32 mode to rounding, not
-// bit for bit.
+// FP32 throughout, forced by Maxwell's 1/32-rate FP64. The reference FFTs are
+// cuFFT's and the in-loop ones are fftBlock's, not HostFft's, so the result
+// matches the CPU's FP32 mode to rounding, not bit for bit.
 
 #include "pbr/DSICanceller.hpp"
 #include "../DsiInternal.hpp"
 #include "DsiGpu.cuh"
 
 #include <climits>
+#include <cmath>
 
 namespace pbr {
 
@@ -54,97 +54,137 @@ __global__ void gatherKernel(const cufftComplex* d_cRef, const cufftComplex* d_c
         d_cXAll[u] = d_cRef[k * uTaps + m - uTaps];
 }
 
-// Y = X W
-__global__ void multiplyKernel(const cufftComplex* d_cX, const cufftComplex* d_cW,
-                               cufftComplex* d_cY, uint32_t uLength)
-{
-    const uint32_t m = blockIdx.x * blockDim.x + threadIdx.x;
-    if (m >= uLength)
-        return;
-    const cufftComplex cX = d_cX[m];
-    const cufftComplex cW = d_cW[m];
-    cufftComplex cY;
-    cY.x = cX.x * cW.x - cX.y * cW.y;
-    cY.y = cX.x * cW.y + cX.y * cW.x;
-    d_cY[m] = cY;
-}
+// ---------------------------------------------------------------------------
+// The in-block FFT
+// ---------------------------------------------------------------------------
 
-// e = d - y / M on the last N points of the block; writes the output and
-// [0 ; e] for the FFT.
-__global__ void errorKernel(const cufftComplex* d_cY, const cufftComplex* d_cSur,
-                            cufftComplex* d_cOut, cufftComplex* d_cEPad,
-                            uint32_t uBlockStart, uint32_t uTaps, uint32_t uLength,
-                            float fInvM)
+// M = 2N is a power of two, at most kMaxPoints: one thread per point.
+constexpr uint32_t kMaxPoints = 1024;
+
+// exp(-j 2 pi i / M), i = 0 .. M/2-1, computed on the host in double.
+__constant__ float2 c_cTwiddle[kMaxPoints / 2];
+
+// In-place radix-2 FFT of uPoints points in shared memory, called by all
+// uPoints threads of the block. Unnormalised, like cuFFT's; bInverse uses
+// the conjugate twiddles. The first __syncthreads makes the caller's writes
+// visible, the last one makes the result visible to the caller.
+__device__ void fftBlock(cufftComplex* s_cData, uint32_t uPoints, bool bInverse)
 {
-    const uint32_t m = blockIdx.x * blockDim.x + threadIdx.x;
-    if (m >= uLength)
-        return;
-    cufftComplex cE;
-    cE.x = 0.0f;
-    cE.y = 0.0f;
-    if (m >= uTaps) {
-        const uint32_t n = m - uTaps;
-        const cufftComplex cY   = d_cY[m];
-        const cufftComplex cSur = d_cSur[uBlockStart + n];
-        cE.x = cSur.x - cY.x * fInvM;
-        cE.y = cSur.y - cY.y * fInvM;
-        d_cOut[uBlockStart + n] = cE;
+    const uint32_t t = threadIdx.x;
+    const uint32_t uStages = __ffs(uPoints) - 1;   // log2(M)
+
+    // bit-reversal permutation, through a register
+    __syncthreads();
+    const cufftComplex cMoved = s_cData[__brev(t) >> (32 - uStages)];
+    __syncthreads();
+    s_cData[t] = cMoved;
+    __syncthreads();
+
+    // each butterfly stage: thread t < M/2 does one pair, the rest idle
+    for (uint32_t uStage = 0; uStage < uStages; ++uStage) {
+        if (t < uPoints / 2) {
+            const uint32_t uHalf = 1u << uStage;
+            const uint32_t uJ    = t & (uHalf - 1);
+            const uint32_t uLow  = ((t - uJ) << 1) + uJ;
+            const float2   cW    = c_cTwiddle[uJ * (uPoints / 2 / uHalf)];
+            const float    fWi   = bInverse ? -cW.y : cW.y;
+            const cufftComplex cA = s_cData[uLow];
+            const cufftComplex cB = s_cData[uLow + uHalf];
+            cufftComplex cT;
+            cT.x = cB.x * cW.x - cB.y * fWi;
+            cT.y = cB.x * fWi + cB.y * cW.x;
+            cufftComplex cSum, cDiff;
+            cSum.x  = cA.x + cT.x;  cSum.y  = cA.y + cT.y;
+            cDiff.x = cA.x - cT.x;  cDiff.y = cA.y - cT.y;
+            s_cData[uLow]         = cSum;
+            s_cData[uLow + uHalf] = cDiff;
+        }
+        __syncthreads();
     }
-    d_cEPad[m] = cE;
 }
 
-// P = lambda P + (1 - lambda) |X|^2;  G = conj(X) E (mu / P), zero where P = 0.
-// With bInitPower set (the very first block) P starts at |X|^2.
-__global__ void gradientKernel(const cufftComplex* d_cX, const cufftComplex* d_cE,
-                               float* d_fP, cufftComplex* d_cG, uint32_t uLength,
-                               float fMu, float fLambda, float fOneMinus, bool bInitPower)
+// All B blocks of the weight loop in one thread block of M threads, thread m
+// owning bin m. Steps 4-10 of the algorithm (see FblmsCpu.cpp); the arithmetic
+// order is that of the old per-step kernels. d_cXAll holds the FFT of every
+// block's input.
+__global__ void fblmsBlocksKernel(const cufftComplex* d_cXAll, const cufftComplex* d_cSur,
+                                  cufftComplex* d_cOut, cufftComplex* d_cW, float* d_fP,
+                                  uint32_t uBlocks, uint32_t uTaps,
+                                  float fMu, float fLambda, float fOneMinus, float fInvM,
+                                  bool bInitPower)
 {
-    const uint32_t m = blockIdx.x * blockDim.x + threadIdx.x;
-    if (m >= uLength)
-        return;
-    const cufftComplex cX = d_cX[m];
-    const float fX2 = cX.x * cX.x + cX.y * cX.y;
-    float fP = bInitPower ? fX2 : d_fP[m];
-    fP = fLambda * fP + fOneMinus * fX2;
-    d_fP[m] = fP;
+    __shared__ cufftComplex s_cW[kMaxPoints];
+    __shared__ cufftComplex s_cA[kMaxPoints];
+    __shared__ cufftComplex s_cB[kMaxPoints];
+    __shared__ float        s_fP[kMaxPoints];
 
-    cufftComplex cG;
-    cG.x = 0.0f;
-    cG.y = 0.0f;
-    if (fP != 0.0f) {
-        const cufftComplex cE = d_cE[m];
-        const float fScale = fMu / fP;
-        cG.x = (cX.x * cE.x + cX.y * cE.y) * fScale;
-        cG.y = (cX.x * cE.y - cX.y * cE.x) * fScale;
+    const uint32_t m = threadIdx.x;   // launched with M = 2 uTaps threads
+    s_cW[m] = d_cW[m];
+    s_fP[m] = d_fP[m];
+
+    for (uint32_t k = 0; k < uBlocks; ++k) {
+        const cufftComplex cX = d_cXAll[static_cast<size_t>(k) * uTaps * 2 + m];
+
+        // 3-4. P = lambda P + (1 - lambda) |X|^2; the very first block starts at |X|^2
+        const float fX2 = cX.x * cX.x + cX.y * cX.y;
+        float fP = (bInitPower && k == 0) ? fX2 : s_fP[m];
+        fP = fLambda * fP + fOneMinus * fX2;
+        s_fP[m] = fP;
+
+        // 5. Y = X W;  y = IFFT(Y)
+        cufftComplex cY;
+        cY.x = cX.x * s_cW[m].x - cX.y * s_cW[m].y;
+        cY.y = cX.x * s_cW[m].y + cX.y * s_cW[m].x;
+        s_cA[m] = cY;
+        fftBlock(s_cA, 2 * uTaps, true);
+
+        // 6. e = d - y / M on the last N points; B = [0 ; e]
+        cufftComplex cE;
+        cE.x = 0.0f;
+        cE.y = 0.0f;
+        if (m >= uTaps) {
+            const uint32_t uPos = k * uTaps + (m - uTaps);
+            const cufftComplex cSur = d_cSur[uPos];
+            cE.x = cSur.x - s_cA[m].x * fInvM;
+            cE.y = cSur.y - s_cA[m].y * fInvM;
+            d_cOut[uPos] = cE;
+        }
+        s_cB[m] = cE;
+
+        // 7. E = FFT([0 ; e])
+        fftBlock(s_cB, 2 * uTaps, false);
+
+        // 8. G = conj(X) E (mu / P), zero where P = 0
+        cufftComplex cG;
+        cG.x = 0.0f;
+        cG.y = 0.0f;
+        if (fP != 0.0f) {
+            const cufftComplex cEf = s_cB[m];
+            const float fScale = fMu / fP;
+            cG.x = (cX.x * cEf.x + cX.y * cEf.y) * fScale;
+            cG.y = (cX.x * cEf.y - cX.y * cEf.x) * fScale;
+        }
+        s_cA[m] = cG;
+
+        // 9. g = IFFT(G) / M, first N kept
+        fftBlock(s_cA, 2 * uTaps, true);
+        cufftComplex cGc;
+        cGc.x = 0.0f;
+        cGc.y = 0.0f;
+        if (m < uTaps) {
+            cGc.x = s_cA[m].x * fInvM;
+            cGc.y = s_cA[m].y * fInvM;
+        }
+        s_cA[m] = cGc;
+
+        // 10. W += 2 FFT(gc)
+        fftBlock(s_cA, 2 * uTaps, false);
+        s_cW[m].x += 2.0f * s_cA[m].x;
+        s_cW[m].y += 2.0f * s_cA[m].y;
     }
-    d_cG[m] = cG;
-}
 
-// The gradient constraint: gc = g / M on the first N points, zero elsewhere.
-__global__ void constrainKernel(const cufftComplex* d_cG, cufftComplex* d_cGc,
-                                uint32_t uTaps, uint32_t uLength, float fInvM)
-{
-    const uint32_t m = blockIdx.x * blockDim.x + threadIdx.x;
-    if (m >= uLength)
-        return;
-    cufftComplex cGc;
-    cGc.x = 0.0f;
-    cGc.y = 0.0f;
-    if (m < uTaps) {
-        cGc.x = d_cG[m].x * fInvM;
-        cGc.y = d_cG[m].y * fInvM;
-    }
-    d_cGc[m] = cGc;
-}
-
-// W += 2 Gc
-__global__ void updateKernel(cufftComplex* d_cW, const cufftComplex* d_cGc, uint32_t uLength)
-{
-    const uint32_t m = blockIdx.x * blockDim.x + threadIdx.x;
-    if (m >= uLength)
-        return;
-    d_cW[m].x += 2.0f * d_cGc[m].x;
-    d_cW[m].y += 2.0f * d_cGc[m].y;
+    d_cW[m] = s_cW[m];
+    d_fP[m] = s_fP[m];
 }
 
 // ---------------------------------------------------------------------------
@@ -175,19 +215,13 @@ private:
 
     cublasHandle_t  mhCublas     = nullptr;
     cufftHandle     mhPlanBatch  = 0;   // M-point, batch B
-    cufftHandle     mhPlanOne    = 0;   // M-point, single
     bool            mbPlanBatch  = false;
-    bool            mbPlanOne    = false;
 
     // All allocated in setUp(), freed in release().
     cufftComplex*   md_cRef      = nullptr;   // CPI samples, reference
     cufftComplex*   md_cSur      = nullptr;   // CPI samples, surveillance
     cufftComplex*   md_cOut      = nullptr;   // cleaned surveillance
     cufftComplex*   md_cXAll     = nullptr;   // B x M, block inputs, then their FFTs
-    cufftComplex*   md_cY        = nullptr;   // M
-    cufftComplex*   md_cEPad     = nullptr;   // M, [0 ; e], then E
-    cufftComplex*   md_cG        = nullptr;   // M, G, then g
-    cufftComplex*   md_cGc       = nullptr;   // M, gc, then Gc
 
     // State kept across CPIs.
     cufftComplex*   md_cW        = nullptr;   // M, frequency-domain weights
@@ -207,24 +241,17 @@ void FblmsGpu::release()
     cudaFree(md_cSur);
     cudaFree(md_cOut);
     cudaFree(md_cXAll);
-    cudaFree(md_cY);
-    cudaFree(md_cEPad);
-    cudaFree(md_cG);
-    cudaFree(md_cGc);
     cudaFree(md_cW);
     cudaFree(md_fP);
     cudaFree(md_cTail);
     if (mbPlanBatch)
         cufftDestroy(mhPlanBatch);
-    if (mbPlanOne)
-        cufftDestroy(mhPlanOne);
     if (mhCublas)
         cublasDestroy(mhCublas);
 
-    md_cRef = md_cSur = md_cOut = md_cXAll = md_cY = nullptr;
-    md_cEPad = md_cG = md_cGc = md_cW = md_cTail = nullptr;
+    md_cRef = md_cSur = md_cOut = md_cXAll = md_cW = md_cTail = nullptr;
     md_fP = nullptr;
-    mbPlanBatch = mbPlanOne = false;
+    mbPlanBatch = false;
     mhCublas = nullptr;
     mbReady  = false;
 }
@@ -247,6 +274,9 @@ bool FblmsGpu::setUp(const DSIParams& oParams)
           "the CPI is longer than the kernels and cuFFT can index");
 
     moParams = oParams;
+    CHECK(2 * static_cast<uint64_t>(oParams.uFblmsTaps) <= kMaxPoints,
+          "FBLMS on the GPU needs 2 * FBLMS_TAPS <= 1024 (one thread per FFT point)");
+
     muTaps   = oParams.uFblmsTaps;
     muLength = 2 * muTaps;
     muBlocks = oParams.uCpiSamples / muTaps;
@@ -265,10 +295,6 @@ bool FblmsGpu::setUp(const DSIParams& oParams)
     CUDA_CHECK(cudaMalloc(&md_cSur,  uCpiBytes));
     CUDA_CHECK(cudaMalloc(&md_cOut,  uCpiBytes));
     CUDA_CHECK(cudaMalloc(&md_cXAll, static_cast<size_t>(muBlocks) * uMBytes));
-    CUDA_CHECK(cudaMalloc(&md_cY,    uMBytes));
-    CUDA_CHECK(cudaMalloc(&md_cEPad, uMBytes));
-    CUDA_CHECK(cudaMalloc(&md_cG,    uMBytes));
-    CUDA_CHECK(cudaMalloc(&md_cGc,   uMBytes));
     CUDA_CHECK(cudaMalloc(&md_cW,    uMBytes));
     CUDA_CHECK(cudaMalloc(&md_fP,    static_cast<size_t>(muLength) * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&md_cTail, static_cast<size_t>(muTaps) * sizeof(cufftComplex)));
@@ -281,8 +307,16 @@ bool FblmsGpu::setUp(const DSIParams& oParams)
     CUDA_CHECK(cufftPlan1d(&mhPlanBatch, static_cast<int>(muLength), CUFFT_C2C,
                            static_cast<int>(muBlocks)));
     mbPlanBatch = true;
-    CUDA_CHECK(cufftPlan1d(&mhPlanOne, static_cast<int>(muLength), CUFFT_C2C, 1));
-    mbPlanOne = true;
+
+    // Twiddles for fftBlock, in double on the host so they are as accurate as cuFFT's.
+    float2 acTwiddle[kMaxPoints / 2];
+    const double dPi = 3.14159265358979323846;
+    for (uint32_t i = 0; i < muLength / 2; ++i) {
+        const double dAngle = -2.0 * dPi * static_cast<double>(i) / static_cast<double>(muLength);
+        acTwiddle[i].x = static_cast<float>(std::cos(dAngle));
+        acTwiddle[i].y = static_cast<float>(std::sin(dAngle));
+    }
+    CUDA_CHECK(cudaMemcpyToSymbol(c_cTwiddle, acTwiddle, (muLength / 2) * sizeof(float2)));
 
     mbReady = true;
     return true;
@@ -302,7 +336,6 @@ bool FblmsGpu::runBlocks()
 {
     const uint32_t uTaps   = static_cast<uint32_t>(muTaps);
     const uint32_t uLength = static_cast<uint32_t>(muLength);
-    const uint32_t uGrid   = blocksFor(muLength, kBlock);
     const float    fInvM   = 1.0f / static_cast<float>(muLength);
     const float    fMu     = static_cast<float>(moParams.dFblmsStep);
     const float    fLambda = static_cast<float>(moParams.dFblmsForget);
@@ -315,36 +348,12 @@ bool FblmsGpu::runBlocks()
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cufftExecC2C(mhPlanBatch, md_cXAll, md_cXAll, CUFFT_FORWARD));
 
-    for (uint64_t k = 0; k < muBlocks; ++k) {
-        cufftComplex* d_cX = md_cXAll + k * muLength;
-
-        // 5. Y = X W;  y = IFFT(Y)
-        multiplyKernel<<<uGrid, kBlock>>>(d_cX, md_cW, md_cY, uLength);
-        CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cufftExecC2C(mhPlanOne, md_cY, md_cY, CUFFT_INVERSE));
-
-        // 6-7. e = d - y / M;  E = FFT([0 ; e])
-        errorKernel<<<uGrid, kBlock>>>(md_cY, md_cSur, md_cOut, md_cEPad,
-                                       static_cast<uint32_t>(k * muTaps), uTaps, uLength, fInvM);
-        CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cufftExecC2C(mhPlanOne, md_cEPad, md_cEPad, CUFFT_FORWARD));
-
-        // 3-4, 8. power, then G
-        gradientKernel<<<uGrid, kBlock>>>(d_cX, md_cEPad, md_fP, md_cG, uLength,
-                                          fMu, fLambda, fOneMinus, !mbPowerSet);
-        CUDA_CHECK(cudaGetLastError());
-        mbPowerSet = true;
-
-        // 9. g = IFFT(G) / M, first N kept
-        CUDA_CHECK(cufftExecC2C(mhPlanOne, md_cG, md_cG, CUFFT_INVERSE));
-        constrainKernel<<<uGrid, kBlock>>>(md_cG, md_cGc, uTaps, uLength, fInvM);
-        CUDA_CHECK(cudaGetLastError());
-
-        // 10. W += 2 FFT(gc)
-        CUDA_CHECK(cufftExecC2C(mhPlanOne, md_cGc, md_cGc, CUFFT_FORWARD));
-        updateKernel<<<uGrid, kBlock>>>(md_cW, md_cGc, uLength);
-        CUDA_CHECK(cudaGetLastError());
-    }
+    // 4-10. the whole sequential weight loop, one launch
+    fblmsBlocksKernel<<<1, uLength>>>(md_cXAll, md_cSur, md_cOut, md_cW, md_fP,
+                                         static_cast<uint32_t>(muBlocks), uTaps,
+                                         fMu, fLambda, fOneMinus, fInvM, !mbPowerSet);
+    CUDA_CHECK(cudaGetLastError());
+    mbPowerSet = true;
     return true;
 }
 
