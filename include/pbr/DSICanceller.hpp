@@ -42,6 +42,11 @@ namespace pbr {
 //   [6] Shynk, "Frequency-domain and multirate adaptive filtering", IEEE
 //       Signal Processing Magazine 9(1), 1992.    -- the per-bin step
 //                                                    normalisation (Table I)
+//   [7] Lu, Song, Peng, Xiong, "A Levinson-Durbin-based clutter suppression
+//       algorithm for passive radar", Digital Signal Processing 177, 2026.
+//                                                 -- ECA-LD
+//   [8] Golub, Van Loan, Matrix Computations, 4th ed., Sec. 4.7.
+//                                                 -- the Levinson recursion
 
 enum class DSIAlgorithm {
     // One least-squares solve over the whole CPI, with the absolute diagonal
@@ -85,7 +90,15 @@ enum class DSIAlgorithm {
     // power estimate and the last N reference samples carry over. Uses its
     // own fields uFblmsTaps, dFblmsStep and dFblmsForget; ignores every
     // ECA and CGLS field, including uClutterTaps.
-    Fblms
+    Fblms,
+
+    // ECA-B's problem solved per batch on the Toeplitz approximation of the
+    // Gram matrix, by FFT correlations and the Levinson recursion [7][8]: no
+    // K x K Gram is formed and the solve is O(K^2), not O(K^3). Uses
+    // uClutterTaps, dDiagonalLoading (relative, as ECA-B) and its own window
+    // uEcaLdBatchSamples; ignores the ECA estimate/update windows,
+    // uDopplerTaps and every CGLS and FBLMS field. Stateless.
+    EcaLd
 };
 
 // Which implementation of the chosen algorithm to build.
@@ -106,7 +119,7 @@ enum class DSIBackend { Cpu, Gpu };
 // dsiParamsFromConfig(). No canceller reads the config file itself.
 //
 // Fields that do not apply to the chosen algorithm are ignored, not
-// validated -- one struct serves all six, the same way one .conf file
+// validated -- one struct serves all seven, the same way one .conf file
 // serves tools that read different subsets of it.
 struct DSIParams {
     DSIAlgorithm eAlgorithm     = DSIAlgorithm::EcaM;
@@ -218,6 +231,11 @@ struct DSIParams {
     // P_m(k) = lambda P_m(k-1) + (1 - lambda) |X_m(k)|^2. In [0, 1). Its
     // memory is 1/(1-lambda) blocks.
     double       dFblmsForget   = 0.0;
+
+    // ECA-LD window: weights estimated from and applied to batches of this
+    // length, as ECA-B does with uUpdateSamples. Its own field so the two can
+    // be tuned apart; must divide the CPI and exceed uClutterTaps.
+    uint64_t     uEcaLdBatchSamples = 0;
 };
 
 // What an algorithm reports about the work it just did. Intrinsic

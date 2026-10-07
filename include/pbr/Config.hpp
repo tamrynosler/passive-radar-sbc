@@ -57,7 +57,7 @@ struct PbrConfig {
     // Kept as strings here and turned into enums by dsiAlgorithmFromString /
     // dsiBackendFromString, so this struct stays free of DSICanceller.hpp and
     // an ingest-only tool never has to know the algorithm names.
-    std::string sDsiAlgorithm;              // ECA-m, ECA-B, ECA-S, ECA-CD, CGLS, FBLMS
+    std::string sDsiAlgorithm;              // ECA-m, ECA-B, ECA-S, ECA-CD, CGLS, FBLMS, ECA-LD
     std::string sDsiBackend;                // CPU or GPU
     std::string sDsiMathPrecision;          // FP64 or FP32 (CPU only; GPU is
                                             // always FP32 -- see DSICanceller.hpp)
@@ -80,6 +80,7 @@ struct PbrConfig {
     uint64_t    uFblmsTaps         = 0;     // FBLMS filter and block length, samples
     double      dFblmsStep         = 0.0;   // FBLMS mu
     double      dFblmsForget       = 0.0;   // FBLMS lambda
+    double      dEcaLdBatchSeconds = 0.0;   // ECA-LD window, independent of ECA's
 
     // ---- detection -------------------------------------------------------
     double      dCfarPfa           = 0.0;
@@ -97,6 +98,7 @@ struct PbrConfig {
     uint64_t    uEcaUpdateSamples  = 0;   // round(dEcaUpdateSeconds * fs)
     uint64_t    uCdBatchSamples    = 0;   // round(dCdBatchSeconds * fs)
     uint64_t    uCglsBatchSamples  = 0;   // round(dCglsBatchSeconds * fs)
+    uint64_t    uEcaLdBatchSamples = 0;   // round(dEcaLdBatchSeconds * fs)
 };
 
 // Load and validate a config file.

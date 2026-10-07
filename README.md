@@ -19,7 +19,7 @@ which the chain's parameters can be changed while it runs.
 - [x] MATLAB reference chain (FERS → ECA-B → CAF range–Doppler → 2D CA-CFAR)
 - [x] VITA 49.2 ingest, absolute-index circular buffer with packet-based
       validity flags, CPI extraction, config file
-- [x] DSI cancellation, CPU and GPU: ECA-m, ECA-B, ECA-S, ECA-CD, CGLS, FBLMS
+- [x] DSI cancellation, CPU and GPU: ECA-m, ECA-B, ECA-S, ECA-CD, CGLS, FBLMS, ECA-LD
 - [x] CAF range–Doppler map (Direct and Batches) and 2D CA-CFAR on the GPU
 - [x] `uhd_to_vita49`: USRP2/N210 → VITA 49.2 multicast, byte-identical to
       FERS's profile, verified on the Nano and from the Mac
@@ -57,7 +57,7 @@ passive-radar-sbc/
 ├── include/pbr/          public headers for the processing library (flat)
 ├── src/
 │   ├── ingest/           VITA 49.2 UDP receiver, circular buffer, config
-│   ├── dsi/              DSI cancellation: ECA-m, ECA-B, ECA-S, ECA-CD, CGLS, FBLMS
+│   ├── dsi/              DSI cancellation: ECA-m, ECA-B, ECA-S, ECA-CD, CGLS, FBLMS, ECA-LD
 │   ├── ard/              CAF / range–Doppler map, 2D CA-CFAR, map output
 │   ├── display/          HttpServer + ard_viewer.html, served by ard_view
 │   └── app/              pbr_run, uhd_to_vita49, ard_view, dsi_verify, ard_verify

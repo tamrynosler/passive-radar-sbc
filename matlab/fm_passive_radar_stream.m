@@ -8,9 +8,10 @@
 % tracked.
 %
 % The canceller follows DSI_ALGORITHM: FBLMS runs fblms.m (the MATLAB copy of
-% the C++ FBLMS, state carried from CPI to CPI); anything else runs ECA-m, one
-% solve per CPI. The C++ ECA-S, ECA-B, ECA-CD and CGLS have no MATLAB copy in
-% this chain.
+% the C++ FBLMS, state carried from CPI to CPI); ECA-LD runs eca_ld.m (the
+% MATLAB copy of the C++ ECA-LD, batches of ECA_LD_BATCH_s); anything else
+% runs ECA-m, one solve per CPI. The C++ ECA-S, ECA-B, ECA-CD and CGLS have
+% no MATLAB copy in this chain.
 %
 %   fm_passive_radar_stream                      % config/fers.conf
 %   fm_passive_radar_stream('config/fers.conf')
@@ -18,10 +19,11 @@
 % Every parameter comes from the chain config, so MATLAB and the C++ chain
 % run with the same settings: sample rate, receiver names, UDP port, full
 % scale, CPI and hop, range bins, clutter taps (for FBLMS its taps, step and
-% forgetting factor), Doppler decimation and span, minimum CPI coverage,
-% CFAR. Needs parse_vita49_packet.m, read_prb_conf.m, group_detections.m and
-% fblms.m (all in matlab/) and the Instrument Control Toolbox (udpport). Run
-% from the repository root.
+% forgetting factor; for ECA-LD its batch length and diagonal loading),
+% Doppler decimation and span, minimum CPI coverage, CFAR. Needs
+% parse_vita49_packet.m, read_prb_conf.m, group_detections.m, fblms.m,
+% eca_ld.m and levinson_solve.m (all in matlab/) and the Instrument Control
+% Toolbox (udpport). Run from the repository root.
 %
 % Workflow:
 %   1. Run this first; it opens the UDP port and waits.
@@ -56,7 +58,12 @@ function fm_passive_radar_stream(confPath)
     nRange    = cfg.N_RANGE_BINS;
     nTaps     = cfg.N_CLUTTER_TAPS;
     bFblms    = isfield(cfg, 'DSI_ALGORITHM') && strcmpi(cfg.DSI_ALGORITHM, 'FBLMS');
-    if bFblms
+    bEcaLd    = isfield(cfg, 'DSI_ALGORITHM') && strcmpi(cfg.DSI_ALGORITHM, 'ECA-LD');
+    if bEcaLd
+        ldBatch = round(cfg.ECA_LD_BATCH_s * fs);
+        fprintf('canceller: ECA-LD, %d taps, batch %d samples, loading %g\n', ...
+                nTaps, ldBatch, cfg.ECA_DIAGONAL_LOADING);
+    elseif bFblms
         fprintf('canceller: FBLMS, %d taps, step %g, forget %g\n', ...
                 cfg.FBLMS_TAPS, cfg.FBLMS_STEP, cfg.FBLMS_FORGET);
     else
@@ -195,7 +202,10 @@ function fm_passive_radar_stream(confPath)
                         fprintf('warning: CPI at %.0f has a gap (ref %d/%d, sur %d/%d non-zero); skipped\n', ...
                                 cpiStart, nnz(refWin), N, nnz(surWin), N);
                     else
-                        if bFblms
+                        if bEcaLd
+                            clean = eca_ld(refWin(:), surWin(:), nTaps, ldBatch, ...
+                                           cfg.ECA_DIAGONAL_LOADING);
+                        elseif bFblms
                             [clean, fblmsState] = fblms(refWin(:), surWin(:), cfg.FBLMS_TAPS, ...
                                                         cfg.FBLMS_STEP, cfg.FBLMS_FORGET, fblmsState);
                         else

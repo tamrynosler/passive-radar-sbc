@@ -19,11 +19,13 @@ std::unique_ptr<DSICanceller> makeEcaCancellerCpu();
 std::unique_ptr<DSICanceller> makeCglsCancellerCpu();
 std::unique_ptr<DSICanceller> makeEcaCdCancellerCpu();
 std::unique_ptr<DSICanceller> makeFblmsCancellerCpu();
+std::unique_ptr<DSICanceller> makeEcaLdCancellerCpu();
 #if defined(PBR_WITH_CUDA)
 std::unique_ptr<DSICanceller> makeEcaCancellerGpu();
 std::unique_ptr<DSICanceller> makeCglsCancellerGpu();
 std::unique_ptr<DSICanceller> makeEcaCdCancellerGpu();
 std::unique_ptr<DSICanceller> makeFblmsCancellerGpu();
+std::unique_ptr<DSICanceller> makeEcaLdCancellerGpu();
 #endif
 
 // The parameter rules each algorithm's init() enforces, the same on both
@@ -32,6 +34,7 @@ bool ecaParamsOk(const DSIParams& oParams);
 bool cglsParamsOk(const DSIParams& oParams);
 bool ecaCdParamsOk(const DSIParams& oParams);
 bool fblmsParamsOk(const DSIParams& oParams);
+bool ecaLdParamsOk(const DSIParams& oParams);
 
 // Recompute the CGLS residual r = b - R x from scratch this often, in
 // iterations. Ten is a guess that the FP64 versus FP32 comparison in

@@ -477,6 +477,9 @@ later rather than silent optimisations now.
 The exact 60x saving is partly taken up for ECA-S in §1d.9. The Toeplitz/FFT
 route remains unimplemented.
 
+The Toeplitz/Levinson route now exists as the ECA-LD row (§1d.12), for
+ECA-B's windows rather than ECA-S's.
+
 ### 1d.8 Benchmark isolation
 
 Timing the canceller inside the live pipeline would measure the socket, the
@@ -660,6 +663,79 @@ first CPI, so it was left as is (proposed, not changed).
 
 **Scaling.** The two 1/M scalings sit in the error and constraint steps on
 all three implementations, so intermediate values can be compared.
+
+### 1d.12 ECA-LD (2026-10-08)
+
+Files: `matlab/eca_ld.m` and `matlab/levinson_solve.m` (reference),
+`src/dsi/cpu/EcaLdCpu.cpp` (CPU twin), `src/dsi/gpu/EcaLdGpu.cu` (what the
+thesis measures), `matlab/eca_ld_golden.m` (writes `golden_ecald.bin`;
+`dsi_verify` compares).
+
+**Decision.** Add Lu, Song, Peng and Xiong, "A Levinson-Durbin-based
+clutter suppression algorithm for passive radar", Digital Signal Processing
+177 (2026) 106133 (`lu2026`), as a seventh canceller. It solves ECA-B's
+per-batch least-squares problem without forming the K x K Gram: the Gram is
+approximately Hermitian Toeplitz when the batch is much longer than K, so
+only its first column (the reference autocorrelation to K-1 lags) and the
+right-hand side (the reference-surveillance cross-correlation to K-1 lags)
+are computed, by FFT (paper eqs. 18-24). The Toeplitz system is then solved
+by the Levinson recursion in O(K^2) instead of O(K^3). Colone 2016 Sec. VI
+proposed the same shortcut for ECA-S (§1d.7 deferred it); Lu 2026 is the
+published algorithm this row is named after.
+
+**Exact and approximate.** The correlations are exact: summed over the
+batch, the reference zero before the CPI start and continuous within it, the
+same convention as ECA-B. Only the Toeplitz structure is an approximation:
+the first column of the Gram is exact, the rest differ by boundary terms of
+order K/L (L = batch length in samples).
+
+**Zero-Doppler only.** The paper's non-zero-Doppler extension (Sec. 4) builds
+one large Toeplitz matrix from stacked per-Doppler correlations, and the
+paper itself reports a suppression loss for it. Not implemented.
+
+**Levinson source.** Written from Golub and Van Loan, Matrix Computations,
+Sec. 4.7, not from the paper's Table 2, whose initialisation and division
+placement have index slips. Verified against MATLAB backslash on random
+complex Hermitian Toeplitz systems (K = 5, 20, 120) to 7e-16 before any C++
+was written.
+
+**Keys.** ECA_LD_BATCH_s is its own key (seconds; must divide the CPI and
+exceed N_CLUTTER_TAPS; default 0.025, equal to ECA_BATCH_LENGTH_s for a
+like-for-like row). It uses N_CLUTTER_TAPS and ECA_DIAGONAL_LOADING like
+ECA-B. Loading is ECA_DIAGONAL_LOADING times the (constant) Toeplitz
+diagonal, the same meaning as ECA-B's fraction of the mean Gram diagonal.
+It ignores the ECA estimate and update windows, the Doppler taps and every
+CGLS and FBLMS key. Stateless.
+
+**Measured (MATLAB), frozen S0_clean CPI 0,** K = 120, batch 5120, loading
+1e-6:
+
+| Canceller | Suppression | Target visibility over map median |
+|---|---|---|
+| ECA-LD, batch 5120 | 51.62 dB | 46.8 dB |
+| ECA-B (exact), batch 5120 | 51.62 dB | 46.8 dB |
+| ECA-LD, batch = whole CPI | 51.43 dB | 46.8 dB |
+
+Relative L2 between the ECA-LD and ECA-B cleaned signals: 1.17e-2.
+
+**GPU structure.** One gather kernel; batched cuFFT over all batches for the
+three transforms and the two inverses; a product kernel; a Levinson kernel
+with one thread block per batch; then the existing convolve kernel. About
+**Measured on the Nano (2026-10-08, unpinned clocks, `dsi_bench --iters 10`
+on `cpi_0000.bin`, GPU, median per CPI):** ECA-LD 25.8 ms, ECA-S 236 ms,
+ECA-CD 10.8 ms, FBLMS 360 ms. On the Mac CPU (FP64): ECA-LD 23.6 ms, ECA-B
+925 ms, the 39x the O(K^2) solve and FFT correlations buy over the Gram and
+Cholesky at K = 120. Nine launches per CPI.
+
+**Verified 2026-10-08.** CPU FP64 against the MATLAB golden 2.1e-10;
+16/16 suites on the Jetson; GPU against CPU-FP32 on the synthetic test
+signal 1.3e-7 (the structural check). On the real CPI every FP32 pair sits
+at the FP32 floor of a 51 dB cancellation: CPU-FP32 vs golden 6.8e-4, GPU
+vs golden 5.2e-4, GPU vs CPU-FP32 7.9e-4 -- the GPU is nearer the FP64
+answer than the CPU-FP32 run is, and the 1e-4 gate is met by FP64 only, as
+for ECA-B (1d.4). Replay of the S0_clean capture through `pbr_run` on the
+GPU: 51.62 dB on CPI 0 (the golden's figure), 46 ms DSI per CPI after the
+first.
 
 ---
 

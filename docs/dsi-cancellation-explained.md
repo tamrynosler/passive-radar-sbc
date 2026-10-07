@@ -287,6 +287,13 @@ CPI converges from zero. It has CPU (`src/dsi/cpu/FblmsCpu.cpp`), GPU
 (`src/dsi/gpu/FblmsGpu.cu`) and MATLAB (`matlab/fblms.m`) implementations;
 the design note is `docs/design_decisions.md` section 1d.11.
 
+ECA-LD is ECA-B with a cheaper solve. It never forms the Gram matrix: it
+treats it as Toeplitz, computes only its first column and the right-hand
+side by FFT, and solves with the Levinson recursion in O(K^2). The
+implementations are `matlab/eca_ld.m` with `matlab/levinson_solve.m`,
+`src/dsi/cpu/EcaLdCpu.cpp` and `src/dsi/gpu/EcaLdGpu.cu`; the design note is
+`docs/design_decisions.md` section 1d.12.
+
 ## References
 
 - Colone, O'Hagan, Lombardo, Baker, TAES 45(2) 2009 — ECA and ECA-B.
@@ -297,6 +304,9 @@ the design note is `docs/design_decisions.md` section 1d.11.
   this thesis reproduces on embedded GPU hardware.
 - Laptev, Konovalov, Vorobev, DSPA 2026 — ECA-B/S/CD comparison; source of
   the target-attenuation metric.
+- Lu, Song, Peng, Xiong, Digital Signal Processing 177 (2026) 106133 -- a
+  Levinson-Durbin-based clutter suppression algorithm for passive radar
+  (ECA-LD).
 - Ferrara, IEEE Trans. ASSP 28(4) 1980, pp. 474-475 -- fast block LMS.
 - Shynk, IEEE Signal Processing Magazine 9(1) 1992 -- frequency-domain
   adaptive filtering, per-bin step normalisation (Table I).

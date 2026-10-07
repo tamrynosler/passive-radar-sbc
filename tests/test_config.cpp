@@ -56,6 +56,7 @@ const char* const kValidConfig =
     "FBLMS_TAPS = 128\n"
     "FBLMS_STEP = 0.01\n"
     "FBLMS_FORGET = 0.9\n"
+    "ECA_LD_BATCH_s = 0.025\n"
     "\n"
     "CFAR_PFA = 1e-5\n"
     "CFAR_GUARD_RANGE = 2\n"
@@ -344,6 +345,15 @@ void testValidationRules()
     assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
         "FBLMS_FORGET = 0.9", "FBLMS_FORGET = 1")), oConfig));
 
+    // ECA-LD: its own window must divide the CPI and exceed the taps.
+    assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "ECA_LD_BATCH_s = 0.025", "ECA_LD_BATCH_s = 0.03")), oConfig));    // 6144 does not divide 204800
+    assert(!loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "ECA_LD_BATCH_s = 0.025", "ECA_LD_BATCH_s = 0.0005")), oConfig));  // 102 < 120 taps
+    assert(loadPbrConfig(writeTemp(replaced(kValidConfig,
+        "ECA_LD_BATCH_s = 0.025", "ECA_LD_BATCH_s = 0.0625")), oConfig));
+    assert(oConfig.uEcaLdBatchSamples == 12800u);
+
     // ECA-m is the whole CPI in one window, so a short batch length must not
     // stop it loading -- the algorithm ignores those keys.
     assert(loadPbrConfig(writeTemp(replaced(kValidConfig,
@@ -391,6 +401,7 @@ void testWhitespaceAndCommentHandling()
         "FBLMS_TAPS = 128\n"
         "FBLMS_STEP = 0.01\n"
         "FBLMS_FORGET = 0.9\n"
+    "ECA_LD_BATCH_s = 0.025\n"
         "CFAR_PFA = 1e-5\n"
         "CFAR_GUARD_RANGE = 2\n"
         "CFAR_GUARD_DOPPLER = 2\n"
@@ -419,6 +430,8 @@ void testTextRoundTrip()
     assert(oBack.uEcaUpdateSamples == oCfg.uEcaUpdateSamples);
     assert(oBack.uCdBatchSamples == oCfg.uCdBatchSamples);
     assert(oBack.dCfarPfa == oCfg.dCfarPfa);
+    assert(oBack.dEcaLdBatchSeconds == oCfg.dEcaLdBatchSeconds);
+    assert(oBack.uEcaLdBatchSamples == oCfg.uEcaLdBatchSamples);
     assert(oBack.uFblmsTaps == oCfg.uFblmsTaps);
     assert(oBack.dFblmsStep == oCfg.dFblmsStep && oBack.dFblmsForget == oCfg.dFblmsForget);
     assert(oBack.sDsiAlgorithm == oCfg.sDsiAlgorithm);

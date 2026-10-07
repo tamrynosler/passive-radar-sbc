@@ -241,6 +241,7 @@ bool checkValues(const PbrConfig& oConfig)
         { "CGLS_ITERATIONS",      static_cast<double>(oConfig.uCglsIterations) },
         { "FBLMS_TAPS",           static_cast<double>(oConfig.uFblmsTaps) },
         { "FBLMS_STEP",           oConfig.dFblmsStep },
+        { "ECA_LD_BATCH_s",       oConfig.dEcaLdBatchSeconds },
     };
     for (size_t u = 0; u < sizeof(aPositive) / sizeof(aPositive[0]); ++u) {
         if (aPositive[u].dValue <= 0.0) {
@@ -470,6 +471,12 @@ bool deriveWindows(PbrConfig& oConfig)
         !exceedsTaps("CGLS_BATCH_s", oConfig.uCglsBatchSamples, oConfig.uClutterTaps))
         return false;
 
+    // ECA-LD window: the same two rules, on its own key.
+    oConfig.uEcaLdBatchSamples = toSamples(oConfig.dEcaLdBatchSeconds, oConfig.uSampleRateHz);
+    if (!dividesCpi("ECA_LD_BATCH_s", oConfig.uEcaLdBatchSamples, oConfig.uCpiSamples) ||
+        !exceedsTaps("ECA_LD_BATCH_s", oConfig.uEcaLdBatchSamples, oConfig.uClutterTaps))
+        return false;
+
     if (oConfig.uBufferCapacity < 2 * oConfig.uCpiSamples) {
         configMessage(
                      "config: warning -- BUFFER_LENGTH_s (%.3f s) is less than twice "
@@ -575,6 +582,7 @@ bool configFromKeyValues(const KeyValueMap& mValues, const char* pLabel, PbrConf
     getUInt64(mValues, "FBLMS_TAPS",           oConfig.uFblmsTaps,         bOk);
     getDouble(mValues, "FBLMS_STEP",           oConfig.dFblmsStep,         bOk);
     getDouble(mValues, "FBLMS_FORGET",         oConfig.dFblmsForget,       bOk);
+    getDouble(mValues, "ECA_LD_BATCH_s",       oConfig.dEcaLdBatchSeconds, bOk);
 
     getDouble(mValues, "CFAR_PFA",             oConfig.dCfarPfa,           bOk);
     getUInt64(mValues, "CFAR_GUARD_RANGE",     oConfig.uCfarGuardRange,    bOk);
@@ -719,6 +727,7 @@ std::string pbrConfigToText(const PbrConfig& oConfig)
         "FBLMS_TAPS = %llu\n"
         "FBLMS_STEP = %.10g\n"
         "FBLMS_FORGET = %.10g\n"
+        "ECA_LD_BATCH_s = %.10g\n"
         "CFAR_PFA = %.10g\n"
         "CFAR_GUARD_RANGE = %llu\n"
         "CFAR_GUARD_DOPPLER = %llu\n"
@@ -739,6 +748,7 @@ std::string pbrConfigToText(const PbrConfig& oConfig)
         oConfig.sArdStreamHost.c_str(), (unsigned)oConfig.uArdStreamPort,
         (unsigned long long)oConfig.uCglsIterations, oConfig.dCglsBatchSeconds, oConfig.bCglsPrime ? 1 : 0,
         (unsigned long long)oConfig.uFblmsTaps, oConfig.dFblmsStep, oConfig.dFblmsForget,
+        oConfig.dEcaLdBatchSeconds,
         oConfig.dCfarPfa,
         (unsigned long long)oConfig.uCfarGuardRange, (unsigned long long)oConfig.uCfarGuardDoppler,
         (unsigned long long)oConfig.uCfarTrainRange, (unsigned long long)oConfig.uCfarTrainDoppler);
@@ -852,8 +862,8 @@ bool adaptPbrConfigToSampleRate(const PbrConfig& oCurrent, uint64_t uSourceRateH
     // Re-express every window in samples at the new rate, snapping each to
     // what the validator requires, in the order the constraints chain:
     // the ECA-CD batch must be a power of two; the CPI must be a multiple of
-    // it and of the Doppler decimation; the ECA update and CGLS windows must
-    // divide the CPI; the ECA estimation window must be a multiple of the
+    // it and of the Doppler decimation; the ECA update, CGLS and ECA-LD windows
+    // must divide the CPI; the ECA estimation window must be a multiple of the
     // update window. The CPI must also be a multiple of FBLMS_TAPS, which is
     // a sample count and so does not change with the rate.
     const uint64_t uCd   = nearestPowerOfTwo(toSamples(oCurrent.dCdBatchSeconds, uSourceRateHz));
@@ -867,6 +877,7 @@ bool adaptPbrConfigToSampleRate(const PbrConfig& oCurrent, uint64_t uSourceRateH
     uint64_t       uEst  = nearestMultiple(uUpd, toSamples(oCurrent.dEcaBatchSeconds, uSourceRateHz));
     if (uEst > uCpi) uEst = uCpi;
     const uint64_t uCgls = nearestDivisor(uCpi, toSamples(oCurrent.dCglsBatchSeconds, uSourceRateHz), 1);
+    const uint64_t uLd   = nearestDivisor(uCpi, toSamples(oCurrent.dEcaLdBatchSeconds, uSourceRateHz), 1);
 
     KeyValueMap mAll;
     parseKeyValues(pbrConfigToText(oCurrent), "current config", mAll);
@@ -877,6 +888,7 @@ bool adaptPbrConfigToSampleRate(const PbrConfig& oCurrent, uint64_t uSourceRateH
     mAll["ECA_UPDATE_INTERVAL_s"] = secondsText(uUpd,  uSourceRateHz);
     mAll["ECA_BATCH_LENGTH_s"]    = secondsText(uEst,  uSourceRateHz);
     mAll["CGLS_BATCH_s"]          = secondsText(uCgls, uSourceRateHz);
+    mAll["ECA_LD_BATCH_s"]        = secondsText(uLd,   uSourceRateHz);
 
     const struct { const char* pKey; uint64_t uOld; uint64_t uNew; } aWindows[] = {
         { "CPI_LENGTH_s",          oCurrent.uCpiSamples,         uCpi  },
@@ -885,6 +897,7 @@ bool adaptPbrConfigToSampleRate(const PbrConfig& oCurrent, uint64_t uSourceRateH
         { "ECA_UPDATE_INTERVAL_s", oCurrent.uEcaUpdateSamples,   uUpd  },
         { "ECA_BATCH_LENGTH_s",    oCurrent.uEcaEstimateSamples, uEst  },
         { "CGLS_BATCH_s",          oCurrent.uCglsBatchSamples,   uCgls },
+        { "ECA_LD_BATCH_s",        oCurrent.uEcaLdBatchSamples,  uLd   },
     };
     for (size_t u = 0; u < sizeof(aWindows) / sizeof(aWindows[0]); ++u) {
         std::snprintf(ach, sizeof(ach), "  %-22s %s s (%llu samples), was %llu samples at %llu Hz\n",
@@ -981,6 +994,9 @@ void printPbrConfig(const PbrConfig& oConfig)
     std::printf("  FBLMS              %llu taps (block length), step %g, forget %g\n",
                 static_cast<unsigned long long>(oConfig.uFblmsTaps),
                 oConfig.dFblmsStep, oConfig.dFblmsForget);
+    std::printf("  ECA-LD             batch %.4f s (%llu samples)\n",
+                oConfig.dEcaLdBatchSeconds,
+                static_cast<unsigned long long>(oConfig.uEcaLdBatchSamples));
     std::printf("  CFAR               Pfa %g, guard %llux%llu, train %llux%llu\n",
                 oConfig.dCfarPfa,
                 static_cast<unsigned long long>(oConfig.uCfarGuardRange),

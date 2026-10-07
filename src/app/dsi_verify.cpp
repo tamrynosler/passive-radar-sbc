@@ -8,7 +8,8 @@
 //   2. matlab/eca_golden.m reads those exact bytes, cancels in double
 //      precision, writes data/<scenario>/golden/golden_ecam.bin and
 //      golden_ecab.bin; matlab/fblms_golden.m does the same for FBLMS and
-//      writes golden_fblms.bin
+//      writes golden_fblms.bin; matlab/eca_ld_golden.m does the same for ECA-LD
+//      and writes golden_ecald.bin
 //   3. this tool runs the same algorithm on the same CPI and reports the
 //      relative L2 error against the golden output, PASS/FAIL by exit code
 //
@@ -67,8 +68,8 @@ void printUsage(const char* pProgram)
 {
     std::printf("usage: %s --cpi FILE --golden FILE [options]\n", pProgram);
     std::printf("  --cpi FILE        CPI written by pbr_run --dump-cpi (required)\n");
-    std::printf("  --golden FILE     golden output from matlab/eca_golden.m or\n"
-                "                    matlab/fblms_golden.m (required)\n");
+    std::printf("  --golden FILE     golden output from matlab/eca_golden.m,\n"
+                "                    matlab/fblms_golden.m or matlab/eca_ld_golden.m (required)\n");
     std::printf("  --config FILE     configuration (default %s)\n", kDefaultConfigPath);
     std::printf("  --algorithm NAME  override DSI_ALGORITHM\n");
     std::printf("  --backend NAME    override DSI_BACKEND\n");
@@ -214,6 +215,11 @@ GoldenHeader expectedHeader(const DSIParams& oParams)
         oHeader.uUpdateSamples   = oParams.uFblmsTaps;
         oHeader.uAbsoluteLoading = 0;
         oHeader.dLoading         = oParams.dFblmsStep;
+    } else if (oParams.eAlgorithm == DSIAlgorithm::EcaLd) {
+        oHeader.uClutterTaps     = oParams.uClutterTaps;
+        oHeader.uUpdateSamples   = oParams.uEcaLdBatchSamples;
+        oHeader.uAbsoluteLoading = 0;
+        oHeader.dLoading         = oParams.dDiagonalLoading;
     } else {
         oHeader.uClutterTaps     = oParams.uClutterTaps;
         oHeader.uUpdateSamples   = oParams.uUpdateSamples;
@@ -280,7 +286,7 @@ bool goldenMatches(const GoldenHeader& oGolden, const DSIParams& oParams,
         "  taps        %-20llu  %llu\n"
         "  window      %-20llu  %llu\n"
         "  loading/step %g (%s)   %g (%s)\n"
-        "Re-run matlab/eca_golden.m (matlab/fblms_golden.m for FBLMS), or pick the matching --algorithm.\n",
+        "Re-run matlab/eca_golden.m (matlab/fblms_golden.m for FBLMS, matlab/eca_ld_golden.m for ECA-LD), or pick the matching --algorithm.\n",
         sGoldenName.c_str(), dsiAlgorithmName(oParams.eAlgorithm),
         (unsigned long long)oGolden.uSampleCount,
         (unsigned long long)oWant.uSampleCount,

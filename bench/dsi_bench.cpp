@@ -53,7 +53,7 @@ void printUsage(const char* pProgram)
     std::printf("usage: %s --cpi FILE [options]\n", pProgram);
     std::printf("  --cpi FILE        CPI written by pbr_run --dump-cpi (required)\n");
     std::printf("  --config FILE     configuration (default %s)\n", kDefaultConfigPath);
-    std::printf("  --algorithm NAME  override DSI_ALGORITHM: ECA-m ECA-B ECA-S ECA-CD CGLS FBLMS\n");
+    std::printf("  --algorithm NAME  override DSI_ALGORITHM: ECA-m ECA-B ECA-S ECA-CD CGLS FBLMS ECA-LD\n");
     std::printf("  --backend NAME    override DSI_BACKEND: CPU or GPU\n");
     std::printf("  --iters N         timed repetitions after one warm-up (default 10)\n");
     std::printf("  --csv FILE        append one result row\n");
@@ -97,12 +97,13 @@ bool parseArgs(int argc, char* argv[], Options& oOptions)
 }
 
 // The window each algorithm estimates and applies its weights over: ECA's
-// update window, or ECA-CD's, CGLS's and FBLMS's own batch.
+// update window, or ECA-CD's, CGLS's, FBLMS's and ECA-LD's own batch.
 uint64_t windowSamples(const DSIParams& oParams)
 {
     if (oParams.eAlgorithm == DSIAlgorithm::EcaCd) return oParams.uCdBatchSamples;
     if (oParams.eAlgorithm == DSIAlgorithm::Cgls)  return oParams.uCglsBatchSamples;
     if (oParams.eAlgorithm == DSIAlgorithm::Fblms) return oParams.uFblmsTaps;
+    if (oParams.eAlgorithm == DSIAlgorithm::EcaLd) return oParams.uEcaLdBatchSamples;
     return oParams.uUpdateSamples;
 }
 

@@ -22,6 +22,9 @@ one exception). Regenerate from FERS.
 >
 > `golden/golden_fblms.bin` comes from `matlab/fblms_golden.m`: cold start,
 > header window = taps, loading field = mu, lambda read from the config.
+>
+> `golden/golden_ecald.bin` comes from `matlab/eca_ld_golden.m`: header
+> window = batch, loading field = ECA_DIAGONAL_LOADING.
 
 Every fact below is taken from the MATLAB reference chain in `matlab/`
 (cited per item). Nothing here is guessed. Where FERS behaviour is not

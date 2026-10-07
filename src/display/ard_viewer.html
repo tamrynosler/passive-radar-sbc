@@ -187,7 +187,7 @@
 
     <div class="group">
       <h3>DSI cancellation</h3>
-      <div class="prow"><label title="Direct-signal interference canceller. ECA-m: one solve over the whole CPI (MATLAB reference). ECA-B: batches with independent weights. ECA-S: sliding window, long estimation and short update. ECA-CD: per carrier and Doppler in the frequency domain. CGLS: iterative least squares. FBLMS: adaptive frequency-domain block LMS, weights carried between CPIs." for="dsiAlgo">Algorithm</label>
+      <div class="prow"><label title="Direct-signal interference canceller. ECA-m: one solve over the whole CPI (MATLAB reference). ECA-B: batches with independent weights. ECA-S: sliding window, long estimation and short update. ECA-CD: per carrier and Doppler in the frequency domain. CGLS: iterative least squares. FBLMS: adaptive frequency-domain block LMS, weights carried between CPIs. ECA-LD: ECA-B's problem per batch on the Toeplitz approximation of the Gram, solved by Levinson." for="dsiAlgo">Algorithm</label>
         <select id="dsiAlgo" data-key="DSI_ALGORITHM">
           <option value="ECA-m">ECA-m</option>
           <option value="ECA-B">ECA-B</option>
@@ -195,6 +195,7 @@
           <option value="ECA-CD">ECA-CD</option>
           <option value="CGLS">CGLS</option>
           <option value="FBLMS">FBLMS</option>
+          <option value="ECA-LD">ECA-LD</option>
         </select></div>
       <div class="prow"><label title="N_CLUTTER_TAPS: delay taps in the clutter subspace, i.e. how far in range the canceller reaches. Must be at least the number of range bins. Unused by ECA-CD and FBLMS, which have no range limit or their own length.">Clutter taps</label><input type="text" data-key="N_CLUTTER_TAPS"></div>
       <div class="note" data-algo="ECA-m">One solve over the whole CPI, absolute loading 1e-3 (the MATLAB reference).</div>
@@ -203,7 +204,7 @@
       <div class="prow" data-algo="ECA-S"><label title="ECA_BATCH_LENGTH_s: the stretch of signal the weights are estimated from (T_A). Colone et al. found 25 ms optimal for FM with a 1 s CPI.">Estimation window T<sub>A</sub> (s)</label><input type="text" data-key="ECA_BATCH_LENGTH_s" data-algo="ECA-S"></div>
       <div class="prow" data-algo="ECA-S"><label title="ECA_UPDATE_INTERVAL_s: the stretch one set of weights is applied to (T_S). Shorter than the estimation window for ECA-S; must divide the CPI. Sets where the cancellation ambiguities fall: every 1/T_S Hz.">Update interval T<sub>S</sub> (s)</label><input type="text" data-key="ECA_UPDATE_INTERVAL_s"></div>
       <div class="prow" data-algo="ECA-B ECA-S"><label title="ECA_DOPPLER_TAPS: Doppler bins either side of zero in the clutter subspace, which becomes K(2P+1) columns wide. Only 0 is implemented.">Doppler taps P</label><input type="text" data-key="ECA_DOPPLER_TAPS"></div>
-      <div class="prow" data-algo="ECA-B ECA-S"><label title="ECA_DIAGONAL_LOADING: added to the Gram diagonal as a fraction of its mean, to keep the solve well conditioned. Relative, so the signal level does not change its strength.">Diagonal loading</label><input type="text" data-key="ECA_DIAGONAL_LOADING"></div>
+      <div class="prow" data-algo="ECA-B ECA-S ECA-LD"><label title="ECA_DIAGONAL_LOADING: added to the Gram diagonal as a fraction of its mean, to keep the solve well conditioned. Relative, so the signal level does not change its strength.">Diagonal loading</label><input type="text" data-key="ECA_DIAGONAL_LOADING"></div>
       <div class="prow" data-algo="ECA-CD"><label title="ECA_CD_BATCH_s: the CPI is cut into batches of this length, each FFT-ed, and the clutter projected out carrier by carrier. Must be a power of two in samples and divide the CPI. The cancellation ambiguity sits at 1/batch Hz; longer batches reach further in delay.">Batch length (s)</label><input type="text" data-key="ECA_CD_BATCH_s"></div>
       <div class="prow" data-algo="ECA-CD"><label title="ECA_CD_DOPPLER_TAPS: Doppler columns either side of zero per carrier, spaced 1/CPI apart. Cheap here: each per-carrier solve is (2P+1) square. Schuepbach et al. used 1; at most 3.">Doppler taps P</label><input type="text" data-key="ECA_CD_DOPPLER_TAPS"></div>
       <div class="prow" data-algo="CGLS"><label title="CGLS_BATCH_s: weights estimated from and applied to fragments of this length. Must divide the CPI. Longer is better conditioned and puts the ambiguity closer (1/batch Hz).">Batch length (s)</label><input type="text" data-key="CGLS_BATCH_s"></div>
@@ -214,6 +215,8 @@
       <div class="prow" data-algo="FBLMS"><label title="FBLMS_TAPS: filter length, also the block length and half the FFT size. A power of two that divides the CPI and is at least the range bin count. Sets the reach in range (c/fs per tap) and the number of weight updates per CPI.">Taps (block length)</label><input type="text" data-key="FBLMS_TAPS"></div>
       <div class="prow" data-algo="FBLMS"><label title="FBLMS_STEP: Shynk's mu, applied per frequency bin as mu / P_m, so it is independent of signal level. Larger converges faster from cold and widens the zero-Doppler notch; 0.005 to 0.05 measured safe on S0, 0.1 went unstable. In (0, 1].">Step size μ</label><input type="text" data-key="FBLMS_STEP"></div>
       <div class="prow" data-algo="FBLMS"><label title="FBLMS_FORGET: lambda of the per-bin reference power estimate; its memory is 1/(1 - lambda) blocks. In [0, 1).">Power forgetting λ</label><input type="text" data-key="FBLMS_FORGET"></div>
+      <div class="note" data-algo="ECA-LD">Stateless. Correlations exact, the Gram's Toeplitz structure approximate: needs the batch much longer than the clutter taps.</div>
+      <div class="prow" data-algo="ECA-LD"><label title="ECA_LD_BATCH_s: weights estimated from and applied to batches of this length, as ECA-B. Must divide the CPI and exceed the clutter taps. Equal to the ECA batch for a like-for-like row. Its Doppler ambiguities land every 1/batch Hz, as ECA-B's.">Batch length (s)</label><input type="text" data-key="ECA_LD_BATCH_s"></div>
     </div>
 
     <div class="group">
