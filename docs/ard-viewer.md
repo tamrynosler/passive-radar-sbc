@@ -146,6 +146,17 @@ previous one.
       "serverTime": 1758530000.0
     }
 
+The before-processing spectrogram carries two black dots per row, one RMS
+bandwidth either side of the reference channel's power centroid (each on a
+small white square, so it shows on dark cells); the button in the panel's
+corner hides or shows them without discarding the values. The Detections
+panel's Clear button sits in its corner the same way. The number, `refBwHz`
+(telemetry.csv and the status JSON, with `refCentreHz`; header field
+`ref bw`), is computed per CPI by `spectrumRmsBandwidthHz()` from the
+reference spectrum: linear power per bin, the mean of the quietest tenth of
+the bins subtracted as the floor and clipped at zero, then the one-sided RMS
+width about the power centroid. A flat band of width W reads W/sqrt(12).
+
 telemetry.csv is read from the tail (seek to end - 4096, take the last full
 line), never whole. prb.conf is parsed with the rules in its own header:
 `KEY = VALUE`, `#` comments, whitespace stripped.

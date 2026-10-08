@@ -43,6 +43,15 @@ private:
     std::vector<double>   mvdPower;     // |X|^2 accumulated over the segments
 };
 
+// RMS bandwidth of an fftshifted dB spectrum as written by SpectrumEstimator::compute().
+// Linear power per bin; the floor is the mean of the quietest tenth of the bins and is
+// subtracted and clipped at zero. Returns the one-sided RMS width in Hz about the power
+// centroid; *pdCentreHz receives the centroid (signed Hz, 0 = carrier). Returns 0 with
+// centre 0 when nothing is above the floor. A flat band of two-sided width W reads
+// W / sqrt(12).
+double spectrumRmsBandwidthHz(const float* pfDb, uint64_t uBins, double dSampleRateHz,
+                              double* pdCentreHz);
+
 } // namespace pbr
 
 #endif // PBR_SPECTRUM_HPP

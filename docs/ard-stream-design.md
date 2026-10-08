@@ -118,7 +118,7 @@ strip shows, so the page needs no new field names:
 {"runName":"live_20260925_1530","cpi":36,"status":0,"reason":"",
  "signalTimeS":36.864,"lagS":0.012,
  "dsiMs":89.0,"ardMs":31.2,"totalMs":120.2,"suppressionDb":19.8,
- "peakDb":-3.1,"detections":11,"plots":2,"borderDetections":2,"skipped":0,
+ "peakDb":-3.1,"refBwHz":41000,"refCentreHz":-120,"detections":11,"plots":2,"borderDetections":2,"skipped":0,
  "config":{"DSI_ALGORITHM":"ECA-CD","DSI_BACKEND":"GPU",
            "ARD_ALGORITHM":"Direct","CFAR_PFA":"1e-05","CPI_LENGTH_s":"1.024"}}
 ```
@@ -161,6 +161,10 @@ channel. The assembler attaches a spectrum to the frame of the same
 sequence exactly as it attaches the status; `ard_view` serves the two
 datagrams back to back at `GET /api/spectrum/latest`. Levels are relative
 (mean |X|²/N), comparable between CPIs and channels, not absolute.
+
+The reference spectrum is computed once per CPI in `processCpi`, before
+the canceller's timer starts, and also yields `refBwHz` and `refCentreHz`
+in the status (see `docs/ard-viewer.md`). The spectrum datagram is unchanged.
 
 ### 4.3 Reassembly rules (the receiver)
 

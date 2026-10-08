@@ -151,6 +151,68 @@ void testDegenerateInputs()
     assert(!oEst.init(4));
 }
 
+// A synthetic spectrum: 0 dB for bins whose frequency lies in [fLoHz, fHiHz),
+// -60 dB elsewhere.
+std::vector<float> bandSpectrum(double dLoHz, double dHiHz, double dFsHz)
+{
+    std::vector<float> vfDb(static_cast<size_t>(kBins), -60.0f);
+    for (uint64_t i = 0; i < kBins; ++i) {
+        const double dF = (static_cast<double>(i) - static_cast<double>(kBins / 2)) *
+                          dFsHz / static_cast<double>(kBins);
+        if (dF >= dLoHz && dF < dHiHz)
+            vfDb[static_cast<size_t>(i)] = 0.0f;
+    }
+    return vfDb;
+}
+
+// A flat band of two-sided width W reads W / sqrt(12), centred or shifted.
+void testBandwidthOfABand()
+{
+    const double dFs  = 204800.0;
+    const double dBin = dFs / static_cast<double>(kBins);
+    const double dExpect = 80000.0 / std::sqrt(12.0);
+    double dCentre = 0.0;
+
+    std::vector<float> vfDb = bandSpectrum(-40000.0, 40000.0, dFs);
+    double dBw = spectrumRmsBandwidthHz(vfDb.data(), kBins, dFs, &dCentre);
+    std::printf("  band +-40 kHz: bw %.0f Hz (expect %.0f), centre %.1f Hz\n", dBw, dExpect, dCentre);
+    assert(std::fabs(dBw - dExpect) < 0.03 * dExpect);
+    assert(std::fabs(dCentre) < dBin);
+
+    vfDb = bandSpectrum(20000.0, 60000.0, dFs);
+    dBw = spectrumRmsBandwidthHz(vfDb.data(), kBins, dFs, &dCentre);
+    std::printf("  band 20..60 kHz: bw %.0f Hz, centre %.1f Hz\n", dBw, dCentre);
+    assert(std::fabs(dCentre - 40000.0) < dBin);
+    assert(std::fabs(dBw - 40000.0 / std::sqrt(12.0)) < 0.03 * 40000.0 / std::sqrt(12.0));
+}
+
+// Nothing above the floor: no bandwidth, no centre.
+void testBandwidthOfAFlatSpectrum()
+{
+    std::vector<float> vfDb(static_cast<size_t>(kBins), -20.0f);
+    double dCentre = 123.0;
+    const double dBw = spectrumRmsBandwidthHz(vfDb.data(), kBins, 204800.0, &dCentre);
+    assert(dBw == 0.0);
+    assert(dCentre == 0.0);
+}
+
+// A tone through the estimator reads as its frequency, with only the Hann
+// leakage as width.
+void testBandwidthOfATone()
+{
+    const double dFs = 204800.0;
+    SpectrumEstimator oEst;
+    assert(oEst.init(kBins));
+    std::vector<float> vfDb(static_cast<size_t>(kBins));
+    std::vector<ComplexF> vc = tone(10000.0 / dFs, 1.0f);
+    assert(oEst.compute(vc.data(), kSamples, vfDb.data()));
+    double dCentre = 0.0;
+    const double dBw = spectrumRmsBandwidthHz(vfDb.data(), kBins, dFs, &dCentre);
+    std::printf("  tone +10 kHz: centre %.1f Hz, bw %.1f Hz\n", dCentre, dBw);
+    assert(std::fabs(dCentre - 10000.0) < 400.0);
+    assert(dBw < 800.0);
+}
+
 } // namespace
 
 int main()
@@ -159,6 +221,9 @@ int main()
     testLevelsAreDecibels();
     testWhiteNoiseIsFlat();
     testDegenerateInputs();
+    testBandwidthOfABand();
+    testBandwidthOfAFlatSpectrum();
+    testBandwidthOfATone();
     std::printf("test_spectrum: all tests passed\n");
     return 0;
 }

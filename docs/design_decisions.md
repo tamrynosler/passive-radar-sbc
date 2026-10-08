@@ -664,7 +664,7 @@ first CPI, so it was left as is (proposed, not changed).
 **Scaling.** The two 1/M scalings sit in the error and constraint steps on
 all three implementations, so intermediate values can be compared.
 
-### 1d.12 ECA-LD (2026-10-08)
+### 1d.12 ECA-LD (2026-10-07)
 
 Files: `matlab/eca_ld.m` and `matlab/levinson_solve.m` (reference),
 `src/dsi/cpu/EcaLdCpu.cpp` (CPU twin), `src/dsi/gpu/EcaLdGpu.cu` (what the
@@ -721,13 +721,13 @@ Relative L2 between the ECA-LD and ECA-B cleaned signals: 1.17e-2.
 **GPU structure.** One gather kernel; batched cuFFT over all batches for the
 three transforms and the two inverses; a product kernel; a Levinson kernel
 with one thread block per batch; then the existing convolve kernel. About
-**Measured on the Nano (2026-10-08, unpinned clocks, `dsi_bench --iters 10`
+**Measured on the Nano (2026-10-07, unpinned clocks, `dsi_bench --iters 10`
 on `cpi_0000.bin`, GPU, median per CPI):** ECA-LD 25.8 ms, ECA-S 236 ms,
 ECA-CD 10.8 ms, FBLMS 360 ms. On the Mac CPU (FP64): ECA-LD 23.6 ms, ECA-B
 925 ms, the 39x the O(K^2) solve and FFT correlations buy over the Gram and
 Cholesky at K = 120. Nine launches per CPI.
 
-**Verified 2026-10-08.** CPU FP64 against the MATLAB golden 2.1e-10;
+**Verified 2026-10-07.** CPU FP64 against the MATLAB golden 2.1e-10;
 16/16 suites on the Jetson; GPU against CPU-FP32 on the synthetic test
 signal 1.3e-7 (the structural check). On the real CPI every FP32 pair sits
 at the FP32 floor of a 51 dB cancellation: CPU-FP32 vs golden 6.8e-4, GPU
@@ -737,7 +737,7 @@ for ECA-B (1d.4). Replay of the S0_clean capture through `pbr_run` on the
 GPU: 51.62 dB on CPI 0 (the golden's figure), 46 ms DSI per CPI after the
 first.
 
-### 1d.13 Speed work, 2026-10-09 (branch `speed-improvements`)
+### 1d.13 Speed work, 2026-10-07 (branch `speed-improvements`)
 
 Measured first (nvprof per kernel, `results/performance_improvements/
 baseline/`), then one change per item, each verified against the goldens

@@ -116,4 +116,48 @@ bool SpectrumEstimator::compute(const ComplexF* pcSamples, uint64_t uSamples, fl
     return true;
 }
 
+double spectrumRmsBandwidthHz(const float* pfDb, uint64_t uBins, double dSampleRateHz,
+                              double* pdCentreHz)
+{
+    *pdCentreHz = 0.0;
+    if (pfDb == nullptr || uBins == 0)
+        return 0.0;
+    const size_t uN = static_cast<size_t>(uBins);
+
+    std::vector<double> vdPower(uN);
+    for (size_t i = 0; i < uN; ++i)
+        vdPower[i] = std::pow(10.0, static_cast<double>(pfDb[i]) / 10.0);
+
+    // The floor: mean of the quietest tenth of the bins.
+    std::vector<double> vdSorted(vdPower);
+    std::sort(vdSorted.begin(), vdSorted.end());
+    const size_t uQuiet = std::max<size_t>(1, uN / 10);
+    double dFloor = 0.0;
+    for (size_t i = 0; i < uQuiet; ++i)
+        dFloor += vdSorted[i];
+    dFloor /= static_cast<double>(uQuiet);
+
+    double dSumW = 0.0, dSumWF = 0.0;
+    std::vector<double> vdWeight(uN);
+    for (size_t i = 0; i < uN; ++i) {
+        const double dF = (static_cast<double>(i) - static_cast<double>(uN / 2)) *
+                          dSampleRateHz / static_cast<double>(uN);
+        vdWeight[i] = std::max(vdPower[i] - dFloor, 0.0);
+        dSumW  += vdWeight[i];
+        dSumWF += vdWeight[i] * dF;
+    }
+    if (!(dSumW > 0.0))
+        return 0.0;
+
+    const double dCentre = dSumWF / dSumW;
+    double dSumVar = 0.0;
+    for (size_t i = 0; i < uN; ++i) {
+        const double dF = (static_cast<double>(i) - static_cast<double>(uN / 2)) *
+                          dSampleRateHz / static_cast<double>(uN) - dCentre;
+        dSumVar += vdWeight[i] * dF * dF;
+    }
+    *pdCentreHz = dCentre;
+    return std::sqrt(dSumVar / dSumW);
+}
+
 } // namespace pbr

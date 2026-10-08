@@ -172,7 +172,9 @@ fers-cli <scenario>.fersxml --out-dir=/tmp/out \
 `--capture` writes every datagram to a `.pbrcap` file for `--file` replay;
 `--dump-cpi` writes the first CPI's input, both channels, as the fixed input
 of `dsi_verify`, `dsi_bench` and `matlab/eca_golden.m`.
-`--out DIR` writes `telemetry.csv`, `detections.csv` (every CFAR cell, for
+`--out DIR` writes `telemetry.csv` (its last two columns, `refBwHz` and
+`refCentreHz`, are the reference channel's RMS bandwidth and centroid),
+`detections.csv` (every CFAR cell, for
 checking the detector), `plots.csv` (one plot per group of touching
 detections, at its power-weighted centroid; the frames and the viewer show
 these) and `changes.log`. `--save-config` keeps a copy of the config beside

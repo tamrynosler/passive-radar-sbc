@@ -278,7 +278,8 @@ struct Chain {
     // The two channels' spectra before any processing, streamed with each
     // frame for the viewer's before-processing spectrogram.
     SpectrumEstimator      oSpectrum;
-    std::vector<float>     vfSpectrum;  // kSpectrumBins dB values, reused per channel
+    std::vector<float>     vfSpectrum;     // kSpectrumBins dB values, surveillance
+    std::vector<float>     vfRefSpectrum;  // the same for the reference, from processCpi
 };
 
 // Build (or rebuild) the chain for a config, warm-up included. Releases the
@@ -316,6 +317,7 @@ bool buildChain(const PbrConfig& oCfg, Chain& oChain, double& dMsOut)
     if (!oChain.oSpectrum.init(kSpectrumBins))
         return false;
     oChain.vfSpectrum.assign(kSpectrumBins, 0.0f);
+    oChain.vfRefSpectrum.assign(kSpectrumBins, 0.0f);
     oChain.vcCleaned.assign(oChain.bDeviceCoupled ? 0 : static_cast<size_t>(oCfg.uCpiSamples),
                             ComplexF(0.0f, 0.0f));
     oChain.vcMap.assign(static_cast<size_t>(uCells), ComplexF(0.0f, 0.0f));
@@ -593,7 +595,8 @@ bool openOutputFiles(const Options& oOptions, Outputs& oOut)
     std::fprintf(oOut.pTelCsv, "cpi,cpiStartIndex,signalTimeS,wallTimeS,lagS,"
                                "dsiMs,ardMs,totalMs,suppressionDb,peakDb,"
                                "detections,borderDetections,skipped,datagrams,"
-                               "waitMs,printMs,detCsvMs,ardWriteMs,status,plots\n");
+                               "waitMs,printMs,detCsvMs,ardWriteMs,status,plots,"
+                               "refBwHz,refCentreHz\n");
 
     if (oOptions.bSaveConfig &&
         !copyFile(oOptions.sConfigPath, oOptions.sOutDir + "/config.conf"))
@@ -794,6 +797,8 @@ struct CpiResult {
     double      dSignalS  = 0.0;
     double      dWallS    = 0.0;
     double      dLagS     = 0.0;
+    double      dRefBwHz     = 0.0;   // RMS bandwidth of the reference spectrum
+    double      dRefCentreHz = 0.0;   // and its power centroid, 0 = carrier
 };
 
 // Cancel, then map and detect. A CPI the chain cannot process is not a crash
@@ -803,10 +808,21 @@ struct CpiResult {
 // break it.
 void processCpi(Chain& oChain, ComplexF* pMap, CpiResult& oResult)
 {
+    bool bCancelOk = false;
+    const bool bProcessable = inputIsProcessable(oChain.vcRef, oChain.vcSur, oResult.pReason);
+
+    // The reference's bandwidth, from its spectrum before processing. Outside
+    // the DSI timer: it is a measurement, not part of the chain's cost.
+    if (bProcessable &&
+        oChain.oSpectrum.compute(oChain.vcRef.data(), oChain.vcRef.size(),
+                                 oChain.vfRefSpectrum.data()))
+        oResult.dRefBwHz = spectrumRmsBandwidthHz(oChain.vfRefSpectrum.data(), kSpectrumBins,
+                                                  static_cast<double>(oChain.oArdParams.uSampleRateHz),
+                                                  &oResult.dRefCentreHz);
+
     const TimePoint tStart = std::chrono::steady_clock::now();
 
-    bool bCancelOk = false;
-    if (!inputIsProcessable(oChain.vcRef, oChain.vcSur, oResult.pReason))
+    if (!bProcessable)
         oResult.uStatus = kArdStatusNullInput;
     else
         bCancelOk = oChain.pDsi->cancel(oChain.vcRef.data(), oChain.vcSur.data(),
@@ -910,12 +926,12 @@ void printCpiLine(uint64_t uCpiIndex, const CpiResult& oResult)
 {
     if (oResult.uStatus == kArdStatusOk) {
         std::printf("CPI %4llu  t=%7.3f s  dsi %6.1f  ard %5.1f  "
-                    "total %6.1f ms  %5.2f dB  %3llu det  %3llu plots  lag %6.3f s\n",
+                    "total %6.1f ms  %5.2f dB  %3llu det  %3llu plots  bw %.1fk  lag %6.3f s\n",
                     (unsigned long long)uCpiIndex, oResult.dSignalS,
                     oResult.dDsiMs, oResult.dArdMs, oResult.dDsiMs + oResult.dArdMs,
                     oResult.oDsiStats.dSuppressionDb,
                     (unsigned long long)oResult.oArdStats.uDetections,
-                    (unsigned long long)oResult.uPlots, oResult.dLagS);
+                    (unsigned long long)oResult.uPlots, oResult.dRefBwHz / 1000.0, oResult.dLagS);
     } else {
         std::printf("CPI %4llu  t=%7.3f s  %s: %s -- blank frame  lag %6.3f s\n",
                     (unsigned long long)uCpiIndex, oResult.dSignalS,
@@ -968,10 +984,17 @@ void streamFrame(Run& oRun, size_t uFrameBytes, const CpiResult& oResult)
 
     oSender.sendFrame(oChain.vFrame.data(), uFrameBytes, uSequence);
 
+    // The reference spectrum was computed in processCpi, unless the CPI was
+    // not processable: then it is computed here, as a dead input is exactly
+    // what the panel is for. The surveillance spectrum is only needed here.
     const ComplexF* apChannel[2] = { oChain.vcRef.data(), oChain.vcSur.data() };
+    float* apSpectrum[2] = { oChain.vfRefSpectrum.data(), oChain.vfSpectrum.data() };
     for (uint32_t c = 0; c < 2; ++c) {
-        if (oChain.oSpectrum.compute(apChannel[c], oCfg.uCpiSamples, oChain.vfSpectrum.data()))
-            oSender.sendSpectrum(oChain.vfSpectrum.data(), kSpectrumBins, c,
+        bool bHaveSpectrum = (c == 0 && oResult.uStatus != kArdStatusNullInput);
+        if (!bHaveSpectrum)
+            bHaveSpectrum = oChain.oSpectrum.compute(apChannel[c], oCfg.uCpiSamples, apSpectrum[c]);
+        if (bHaveSpectrum)
+            oSender.sendSpectrum(apSpectrum[c], kSpectrumBins, c,
                                  static_cast<uint32_t>(oCfg.uSampleRateHz), uSequence);
     }
 
@@ -981,7 +1004,7 @@ void streamFrame(Run& oRun, size_t uFrameBytes, const CpiResult& oResult)
         "{\"runName\":\"%s\",\"cpi\":%llu,\"status\":%llu,"
         "\"reason\":\"%s\",\"signalTimeS\":%.3f,\"lagS\":%.3f,"
         "\"dsiMs\":%.1f,\"ardMs\":%.1f,\"totalMs\":%.1f,"
-        "\"suppressionDb\":%.2f,\"peakDb\":%.2f,"
+        "\"suppressionDb\":%.2f,\"peakDb\":%.2f,\"refBwHz\":%.0f,\"refCentreHz\":%.0f,"
         "\"detections\":%llu,\"plots\":%llu,\"borderDetections\":%llu,\"skipped\":%llu,"
         "\"controlPort\":%u,\"liveChanges\":%llu,"
         "\"config\":{\"DSI_ALGORITHM\":\"%s\",\"DSI_BACKEND\":\"%s\","
@@ -991,6 +1014,7 @@ void streamFrame(Run& oRun, size_t uFrameBytes, const CpiResult& oResult)
         (unsigned long long)oResult.uStatus, oResult.pReason, oResult.dSignalS, oResult.dLagS,
         oResult.dDsiMs, oResult.dArdMs, oResult.dDsiMs + oResult.dArdMs,
         oResult.oDsiStats.dSuppressionDb, oResult.oArdStats.dPeakDb,
+        oResult.dRefBwHz, oResult.dRefCentreHz,
         (unsigned long long)oResult.oArdStats.uDetections,
         (unsigned long long)oResult.uPlots,
         (unsigned long long)oResult.oArdStats.uDetectionsInBorder,
@@ -1041,7 +1065,7 @@ void writeTelemetry(const Run& oRun, const CpiResult& oResult,
         return;
     std::fprintf(oRun.oOut.pTelCsv,
         "%llu,%llu,%.6f,%.6f,%.6f,%.4f,%.4f,%.4f,%.4f,%.4f,"
-        "%llu,%llu,%llu,%llu,%.4f,%.4f,%.4f,%.4f,%llu,%llu\n",
+        "%llu,%llu,%llu,%llu,%.4f,%.4f,%.4f,%.4f,%llu,%llu,%.0f,%.0f\n",
         (unsigned long long)oRun.uCpiIndex,
         (unsigned long long)oResult.uCpiStart,
         oResult.dSignalS, oResult.dWallS, oResult.dLagS,
@@ -1052,7 +1076,8 @@ void writeTelemetry(const Run& oRun, const CpiResult& oResult,
         (unsigned long long)oRun.pIngest->stats().uCpisOvertaken,
         (unsigned long long)oRun.uDatagrams,
         oResult.dWaitMs, dPrintMs, dDetCsvMs, dArdWriteMs,
-        (unsigned long long)oResult.uStatus, (unsigned long long)oResult.uPlots);
+        (unsigned long long)oResult.uStatus, (unsigned long long)oResult.uPlots,
+        oResult.dRefBwHz, oResult.dRefCentreHz);
 }
 
 // The first CPI's input, once, if --dump-cpi asked for it.

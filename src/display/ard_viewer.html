@@ -54,6 +54,11 @@
   .cell.shown { display: block; }
   .cell.wide { grid-column: 1 / -1; }
   .cell canvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; background: #101014; }
+  /* A button in the panel's title row, its right edge on the plot's right
+     border: the right margins are plotBox()'s (84 with a colour bar, 16 without). */
+  .cell .overlay { position: absolute; top: 2px; padding: 1px 7px; font-size: 11px; }
+  #cellDet .overlay { right: 16px; }
+  #cellRf .overlay { right: 84px; }
   #plots.empty::after {
     content: "no display selected";
     color: #7d7d8c;
@@ -144,6 +149,7 @@
     <span class="field"><span class="label">ard</span><span class="value" id="fArd">&mdash;</span></span>
     <span class="field"><span class="label">total</span><span class="value" id="fTotal">&mdash;</span></span>
     <span class="field"><span class="label">supp</span><span class="value" id="fSupp">&mdash;</span></span>
+    <span class="field"><span class="label" title="RMS bandwidth of the reference channel before processing">ref bw</span><span class="value" id="fBw">&mdash;</span></span>
     <span class="field"><span class="label">peak</span><span class="value" id="fPeak">&mdash;</span></span>
     <span class="field"><span class="label" title="plots / raw CFAR cells [cells in the CFAR border]">plots</span><span class="value" id="fDet">&mdash;</span></span>
     <span class="field"><span class="label">config</span><span class="value" id="fConfig">&mdash;</span></span>
@@ -157,9 +163,11 @@
 <div id="main">
   <div id="plots">
     <div class="cell" id="cellArd"><canvas id="cvArd"></canvas></div>
-    <div class="cell" id="cellDet"><canvas id="cvDet"></canvas></div>
+    <div class="cell" id="cellDet"><canvas id="cvDet"></canvas>
+      <button id="clearDet" class="small overlay" title="Forget every previous detection; the grey dots start again from the next frame.">Clear</button></div>
     <div class="cell" id="cellHold"><canvas id="cvHold"></canvas></div>
-    <div class="cell" id="cellRf"><canvas id="cvRf"></canvas></div>
+    <div class="cell" id="cellRf"><canvas id="cvRf"></canvas>
+      <button id="toggleBw" class="small overlay" title="Show or hide the reference bandwidth markers. The values are kept either way.">Hide bandwidth</button></div>
     <div class="cell" id="cellWf"><canvas id="cvWf"></canvas></div>
   </div>
 
@@ -167,10 +175,9 @@
     <div class="group">
       <h3>Display type</h3>
       <div class="prow"><label title="Show the newest frame: bistatic range against bistatic Doppler, in dB below the running peak."><input type="checkbox" id="showArd" checked>Range-Doppler map</label></div>
-      <div class="prow"><label title="Show the plots (each a group of touching CFAR detections, at its power-weighted centroid) as dots: the newest frame in red, the previous frames in grey."><input type="checkbox" id="showDet">Detections</label>
-        <button id="clearDet" class="small" title="Forget every previous detection; the grey dots start again from the next frame.">Clear</button></div>
+      <div class="prow"><label title="Show the plots (each a group of touching CFAR detections, at its power-weighted centroid) as dots: the newest frame in red, the previous frames in grey."><input type="checkbox" id="showDet">Detections</label></div>
       <div class="prow"><label title="Show, for every cell, the highest dB seen over the last N frames. Slow or intermittent targets stand out."><input type="checkbox" id="showHold">Max hold</label></div>
-      <div class="prow"><label title="Before any processing: the power spectrum of the raw CPI, as the canceller received it, one row per CPI, newest at the bottom. Frequency offset from the carrier on x. Shows the station, neighbours, interference and a dead front end. A CPI without data is a black row."><input type="checkbox" id="showRf">Spectrogram before processing</label></div>
+      <div class="prow"><label title="Before any processing: the power spectrum of the raw CPI, as the canceller received it, one row per CPI, newest at the bottom. Frequency offset from the carrier on x. Shows the station, neighbours, interference and a dead front end. A CPI without data is a black row. Dots: the reference channel's RMS bandwidth either side of its centroid."><input type="checkbox" id="showRf">Spectrogram before processing</label></div>
       <div class="prow"><label title="After DSI cancellation and the CAF: one row per CPI, newest at the bottom, the strongest cell over range for every Doppler bin (or over Doppler for every range bin). Shows cancellation residue and target Doppler tracks over time. A CPI without data is a black row."><input type="checkbox" id="showWf">Spectrogram after processing</label></div>
       <div class="prow"><label title="Doppler window shown on every panel, symmetric about zero. Display only; the chain computes the full span." for="fdMax">Doppler span (&plusmn;Hz)</label><input type="text" id="fdMax"></div>
       <div class="prow"><label title="Bottom of the colour scale, in dB below the 0 dB reference. Everything weaker is drawn in the darkest colour." for="floorDb">Floor (dB)</label><input type="text" id="floorDb"></div>
@@ -315,7 +322,9 @@ var state = {
   wfLastCpi: null,       // the CPI of the newest waterfall row, to spot gaps
   rfRows: [],            // [{cpi, spectra: [Float32Array|null x2], bins, sampleRateHz}], newest last
   rfLastCpi: null,
-  rfRefDb: [null, null]  // running maximum per channel, the 0 dB of that panel
+  rfRefDb: [null, null], // running maximum per channel, the 0 dB of that panel
+  bwByCpi: {},           // cpi -> {bw, centre} in Hz: the reference RMS bandwidth, from the status
+  showBw: true           // draw the bandwidth markers (the values are kept either way)
 };
 
 // The display settings, read from the panel fields by readDisplayFields (with
@@ -577,7 +586,9 @@ function blankWaterfallRow(cpi) {
 
 // The before-processing spectra for a CPI (null spectra: none arrived).
 function pushSpectrumRow(cpi, timeS, parsed) {
-  var row = {cpi: cpi, timeS: timeS, spectra: null, bins: 0, sampleRateHz: 0};
+  var row = {cpi: cpi, timeS: timeS, spectra: null, bins: 0, sampleRateHz: 0, bw: null, centre: null};
+  var known = state.bwByCpi[cpi];
+  if (known) { row.bw = known.bw; row.centre = known.centre; }
   if (parsed !== null) {
     row.spectra = parsed.spectra;
     row.bins = parsed.bins;
@@ -856,10 +867,29 @@ function drawRfPanel(canvas) {
     c.ctx.imageSmoothingEnabled = false;
     c.ctx.drawImage(offscreen, box.left, box.top, box.w, box.h);
   }
+  if (state.showBw) { drawBandwidthDots(c.ctx, rows, box, N); }
   frameBox(c.ctx, box);
   drawFrequencyAxis(c.ctx, fs, box);
   drawTimeAxis(c.ctx, rows, box);
   drawColorBar(c.ctx, display.floorDb, box.left + box.w + 16, box.top, 14, box.h);
+}
+
+// Two black dots per row, one RMS bandwidth either side of the row's centroid.
+// A white square under each keeps it visible on the dark end of the palette.
+function drawBandwidthDots(ctx, rows, box, N) {
+  for (var i = 0; i < rows.length && i < N; i++) {
+    var row = rows[rows.length - 1 - i];
+    if (row.bw === null || !(row.sampleRateHz > 0)) { continue; }
+    var y = box.top + (N - 1 - i + 0.5) * box.h / N;
+    for (var side = -1; side <= 1; side += 2) {
+      var x = box.left + box.w * (0.5 + (row.centre + side * row.bw) / row.sampleRateHz);
+      if (x < box.left || x > box.left + box.w) { continue; }
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(x - 2.5, y - 2.5, 5, 5);
+      ctx.fillStyle = "#000";
+      ctx.fillRect(x - 1, y - 1, 3, 3);
+    }
+  }
 }
 
 // Frequency offset from the carrier on x, in kHz: bin 0 is -fs/2.
@@ -1129,6 +1159,7 @@ function updateHeader() {
   el("fArd").textContent = fixed(pick(tel, "ardMs"), 1, " ms");
   el("fTotal").textContent = fixed(pick(tel, "totalMs"), 1, " ms");
   el("fSupp").textContent = fixed(pick(tel, "suppressionDb"), 1, " dB");
+  el("fBw").textContent = (pick(tel, "refBwHz") === null) ? "—" : fixed(pick(tel, "refBwHz") / 1000, 1, " kHz");
   el("fPeak").textContent = fixed(pick(tel, "peakDb"), 1, " dB");
 
   var plots = pick(tel, "plots");
@@ -1218,10 +1249,21 @@ function onStatus(status) {
     state.rfRows = [];
     state.rfLastCpi = null;
     state.rfRefDb = [null, null];
+    state.bwByCpi = {};
     state.liveChanges = null;
     if (runName !== null) { loadConfig(); }
   }
   state.telemetry = stream;
+  if (stream && typeof stream.refBwHz === "number" && typeof stream.cpi === "number") {
+    var oBw = {bw: stream.refBwHz, centre: stream.refCentreHz || 0};
+    state.bwByCpi[stream.cpi] = oBw;
+    for (var r = 0; r < state.rfRows.length; r++) {
+      if (state.rfRows[r].cpi === stream.cpi) { state.rfRows[r].bw = oBw.bw; state.rfRows[r].centre = oBw.centre; }
+    }
+    for (var key in state.bwByCpi) {
+      if (Number(key) < stream.cpi - 2 * display.wfDepth) { delete state.bwByCpi[key]; }
+    }
+  }
   state.config = stream ? (stream.config || null) : null;
   state.streamStatus = stream ? (stream.status || 0) : 0;
   state.reason = stream ? (stream.reason || "") : "";
@@ -1490,6 +1532,11 @@ for (var di = 0; di < displayIds.length; di++) {
 }
 el("clearDet").addEventListener("click", function () {
   state.detHistory = [];
+  render();
+});
+el("toggleBw").addEventListener("click", function () {
+  state.showBw = !state.showBw;
+  el("toggleBw").textContent = state.showBw ? "Hide bandwidth" : "Show bandwidth";
   render();
 });
 el("resetRef").addEventListener("click", function () {
