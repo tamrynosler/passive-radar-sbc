@@ -61,6 +61,16 @@ failures against `refBwHz` over the S0_long run. If they line up, the
 explanation above becomes a measured result for the report, and the
 thresholds for Option 1 can be read off the plot.
 
+**Result (2026-10-08, `results/bandwidth_detections_tests/README.md`):**
+they do not line up the expected way. False plots grow with bandwidth
+(correlation 0.36 to 0.45 for every canceller), and the whole effect is in
+the off-ridge sidelobe plots; the ridge plots do not track bandwidth. ECA-B
+at 1e-6 had no Cholesky failure in 600 CPIs once the Gram came from the
+shift recurrence (the study's 106 failures were cherk's FP32 accumulation).
+So on this capture the conditioning problem is not what makes the maps
+messy; the target's sidelobes are, and they widen with bandwidth. That
+favours Option 4 (and the CLEAN step) over Option 1.
+
 ## 1. Adaptive diagonal loading (ECA-B, ECA-S, ECA-LD)
 
 ### What loading does
@@ -311,15 +321,16 @@ comparison and a reading pass for the citations.
 | 3. CGLS adaptive stop | CGLS over/under-fitting per second; time on easy seconds | Sidelobe false plots | A tolerance to tune | 3-4 h |
 | 4. Reciprocal filter | The conditioning itself, for every canceller; sidelobe false plots | Nothing structural | A few dB SNR on bad seconds; 5-8 ms | ~1 day + 12 runs |
 
-Suggested order:
+Suggested order, revised after the first data (Section 0, Result):
 
-1. Plot the study's results against the new `refBwHz` (an hour, no code).
-   This decides whether the bandwidth story is the right one and gives
-   the thresholds.
-2. Option 1 Design A, because it removes the blank CPIs and settles the
-   loading question in `docs/canceller-comparison-plan.md` Section 3.1.
-3. Option 4 if the report wants a chapter section on content dependence
-   and its mitigation. It is the result an FM passive radar thesis is
-   expected to show, and the ECA-LD outcome alone would justify it.
-4. Option 3 as the CGLS counterpart of Option 1, so the comparison has one
-   adaptive rule per algorithm family.
+1. Done: the bandwidth measure and seven runs against it
+   (`results/bandwidth_detections_tests/`). The bandwidth story is not
+   the one expected: false plots grow with bandwidth and are sidelobe
+   plots; the ECA-B blank CPIs were cherk's accumulation and are gone.
+2. Option 4 (or the CLEAN step) is now the option that addresses the
+   measured problem, since it is the only one that lowers the sidelobes.
+   It still needs the reading pass before design. The ECA-LD outcome at
+   25 ms remains a reason on its own.
+3. Option 1 Design A only as a safety net (a retry costs nothing when it
+   never triggers); no longer a priority.
+4. Option 3 as a thesis point on regularisation, not as a fix.

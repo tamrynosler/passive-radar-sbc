@@ -757,6 +757,30 @@ spectrum averages every tenth segment. None of these changes what an
 algorithm computes; the measured rounding differences are recorded per
 item.
 
+One consequence found afterwards (2026-10-08): the ECA-B "not positive
+definite" failures of the 2026-10-07 study (106 of 600 CPIs at loading
+1e-6) do not occur with the recurrence Gram. They were cherk's FP32
+accumulation order, not the Gram's conditioning, and ECA-S never showed
+them because its Gram is summed from chunks. One loading (1e-6) now
+serves the whole ECA family.
+
+### 1d.14 Reference bandwidth per CPI (2026-10-08)
+
+`spectrumRmsBandwidthHz()` (`src/ard/Spectrum.cpp`) gives the reference
+channel's one-sided RMS bandwidth about its power centroid from the
+display spectrum, floor-subtracted (mean of the quietest tenth of the
+bins). It is telemetry (`refBwHz`, `refCentreHz`), status JSON, a viewer
+header field and two dots per row on the before-processing spectrogram;
+it is computed in `processCpi` outside the DSI timer. Why RMS: it is the
+curvature of the autocorrelation at zero lag, the quantity the Gram's
+conditioning depends on. Why it exists: to test whether narrowband
+seconds make the messy maps (`docs/bandwidth-adaptive-cancellation.md`).
+First result (`results/bandwidth_detections_tests/README.md`): false
+plots grow WITH bandwidth, about one plot per kHz for every canceller,
+and entirely in the off-ridge (target sidelobe) plots; the ridge plots
+do not track bandwidth. So on this capture the sidelobes, not the
+canceller's conditioning, set the false-plot count.
+
 ---
 
 ## 1e. Range-Doppler map and CFAR (`pbr::ArdProcessor`)

@@ -37,11 +37,15 @@ run; scored on the plots the viewer shows, against the truth.
    - CGLS primed: the widest notch of the working cancellers (low-Doppler
      Pd 0.67-0.75), second-most ridge residue, slowest (486 ms). Unprimed
      it leaves 15.6 ridge plots per CPI: priming is not optional.
-   - ECA-B: fails the GPU's FP32 Cholesky ("not positive definite") on
-     106 of 600 CPIs at the config's relative loading 1e-6; clean at 1e-4,
-     but 1e-4 costs about one ridge plot per CPI (and does the same to
-     ECA-S). ECA-S's estimation Grams are the same 25 ms matrices and
-     never fail, which is not yet explained (Section 3).
+   - ECA-B: failed the GPU's FP32 Cholesky ("not positive definite") on
+     106 of 600 CPIs at the config's relative loading 1e-6 in this study;
+     clean at 1e-4, at about one ridge plot per CPI. **Resolved
+     2026-10-08:** with the Gram built by the exact shift recurrence
+     (`ECA_GRAM_RECURRENCE = 1`, now the default) ECA-B at 1e-6 had no
+     failure in 600 CPIs (`results/bandwidth_detections_tests/`). The
+     failures were cherk's FP32 accumulation order, not the problem's
+     conditioning, which also explains why ECA-S (chunk-summed Grams)
+     never failed. One loading, 1e-6, for the whole ECA family.
    - ECA-LD: at a 25 ms batch the Toeplitz approximation of a Gram with
      condition number 1.8e5 is not positive definite (the approximation
      error, ~K/L = 2.3% of the entries, is a hundred times the smallest
@@ -96,21 +100,24 @@ S0_long capture, with `results/automated_tests/run_test.sh`.
 
 ## 3. Two fairness problems to settle first
 
-1. **ECA-B's Cholesky failures against ECA-S's none.** The two estimate
-   the same 25 ms Grams; ECA-S never reports a non-positive-definite
-   window, ECA-B does on 18% of CPIs. Either FP32 accumulation order
-   differs enough (ECA-S sums partial chunk Grams) or the ECA-B path has a
-   defect. Check: the CPU twin in FP32, ECA-B, on the capture
-   (`pbr_run --file` on the Mac, `DSI_BACKEND = CPU`,
-   `DSI_MATH_PRECISION = FP32`, about 2 min per 100 CPIs). If it fails
-   the same way it is rounding, and the fair comparison uses ONE loading
-   for the whole ECA family (1e-4, with its ridge cost stated); if it
-   does not, the GPU ECA-B is to be fixed before anything is cited.
-   Central code: report, then the author decides.
+1. **ECA-B's Cholesky failures against ECA-S's none. Settled
+   2026-10-08.** It was FP32 accumulation order: the recurrence Gram
+   (default since the speed work) gives zero failures at 1e-6 over the
+   600 CPIs. The comparison uses one loading, 1e-6, for every ECA
+   variant, with the cherk Gram kept selectable only for the
+   like-for-like timing row. No CPU-twin check was needed.
 2. **Sidelobe plots.** Either implement the CLEAN step before the final
    comparison, or state that sidelobe plots are a constant of the
    illuminator and compare cancellers on the canceller-specific metrics.
-   Proposal: the latter now, CLEAN later (PLAN.md).
+   Proposal: the latter now, CLEAN later (PLAN.md). Supporting data
+   (2026-10-08, `results/bandwidth_detections_tests/README.md`): the
+   false plots grow with the broadcast's bandwidth (correlation 0.36 to
+   0.45, every canceller, about +1 plot per kHz), and the whole effect is
+   in the off-ridge plots; ridge plots do not track bandwidth. So the
+   false-plot count is a property of the illuminator's ambiguity function
+   on that second, not of the canceller, and the report should say so
+   when it quotes false plots per CPI. `refBwHz` in the telemetry is the
+   covariate to show alongside.
 
 ## 4. The notch profile: the figure to build, no new runs
 
@@ -147,7 +154,7 @@ path as a variable to add).
 
 ## 7. Order of work for 2026-10-09
 
-1. Section 3.1, the ECA-B check (15 min). Decides the loading rule.
+1. Section 3.1: done, loading 1e-6 throughout.
 2. Section 4, the notch-profile figure from existing runs (1 h).
 3. Section 2, the batch-length pair ECA-B / ECA-LD on the GPU (8 runs,
    about 20 min of board time) and the ECA-S / ECA-CD / CGLS knob points
