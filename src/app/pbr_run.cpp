@@ -1296,7 +1296,11 @@ bool handleCpi(Run& oRun, uint64_t uCpiStart)
 
     const bool bWantMap = (oRun.oOut.bWriteFrames || oRun.oOut.bStreamFrames) &&
                           (oRun.uCpiIndex % oRun.oCfg.uArdSnapshotEvery == 0);
-    processCpi(oRun.oChain, bWantMap ? oRun.oChain.vcMap.data() : nullptr, oResult);
+    // The bearings are read from channel 1's map on the host, so with a
+    // second surveillance channel the map is copied back every CPI whether
+    // or not a frame goes out (about a millisecond for 1.5 MB).
+    const bool bNeedMap = bWantMap || (oRun.oChain.pDsi2 != nullptr);
+    processCpi(oRun.oChain, bNeedMap ? oRun.oChain.vcMap.data() : nullptr, oResult);
     if (!countStatus(oRun, oResult.uStatus))
         return false;
     updateTimeline(oRun, oResult);

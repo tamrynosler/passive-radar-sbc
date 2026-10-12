@@ -30,3 +30,10 @@ A number in the thesis cites one of these files by path and column; nothing
 is typed from memory.
 
 A rerun gets a new stamp; the report names the stamp it used.
+
+## cpi_sweeps/ (2026-10-12)
+
+The CPI length sweep, 0.5 s to 4 s by 0.5 s, every canceller, three
+channels, clocks pinned, on the 600 s S0_aoa capture: `docs/cpi-sweep-plan.md`
+is the plan, `cpi_sweeps/README.md` the findings and table, `sweep.csv`
+every number, `figures/` the plots. 7.0 GB with the ECA-CD frames.
