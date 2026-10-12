@@ -152,6 +152,9 @@
     <span class="field"><span class="label" title="RMS bandwidth of the reference channel before processing">ref bw</span><span class="value" id="fBw">&mdash;</span></span>
     <span class="field"><span class="label">peak</span><span class="value" id="fPeak">&mdash;</span></span>
     <span class="field"><span class="label" title="plots / raw CFAR cells [cells in the CFAR border]">plots</span><span class="value" id="fDet">&mdash;</span></span>
+    <span class="field"><span class="label" title="Angle of arrival of the strongest plot, compass degrees, from the phase difference between the two surveillance channels' maps at its peak; the coherence of that phase in brackets. Only with a second surveillance channel.">aoa</span><span class="value" id="fAoa">&mdash;</span></span>
+    <span class="field"><span class="label" title="Phase of surveillance 2 against surveillance 1 over the raw CPI: the direct path, so a check of the array calibration against the transmitter's known bearing.">direct &phi;</span><span class="value" id="fDirect">&mdash;</span></span>
+    <span class="field"><span class="label" title="The second surveillance channel's cancellation and map formation, ms, and its suppression.">ch2</span><span class="value" id="fCh2">&mdash;</span></span>
     <span class="field"><span class="label">config</span><span class="value" id="fConfig">&mdash;</span></span>
     <span class="field"><span class="label">dropped</span><span class="value" id="fDropped">&mdash;</span></span>
     <button id="panelToggle" class="small" title="Hide or show the control panel; the plots take the space.">Hide controls &rsaquo;</button>
@@ -1161,6 +1164,18 @@ function updateHeader() {
   el("fSupp").textContent = fixed(pick(tel, "suppressionDb"), 1, " dB");
   el("fBw").textContent = (pick(tel, "refBwHz") === null) ? "—" : fixed(pick(tel, "refBwHz") / 1000, 1, " kHz");
   el("fPeak").textContent = fixed(pick(tel, "peakDb"), 1, " dB");
+
+  // Angle of arrival: null from the chain when there is no second channel
+  // or no bearing this CPI.
+  var aoa = pick(tel, "aoaDeg");
+  var coh = pick(tel, "aoaCoherence");
+  el("fAoa").textContent = (aoa === null) ? "—" :
+      aoa.toFixed(1) + "°" + (coh === null ? "" : " (" + coh.toFixed(2) + ")");
+  el("fDirect").textContent = fixed(pick(tel, "directPhaseDeg"), 1, "°");
+  var dsi2 = pick(tel, "dsi2Ms");
+  el("fCh2").textContent = (dsi2 === null) ? "—" :
+      dsi2.toFixed(1) + " + " + fixed(pick(tel, "ard2Ms"), 1, " ms") + ", " +
+      fixed(pick(tel, "suppression2Db"), 1, " dB");
 
   var plots = pick(tel, "plots");
   var det = pick(tel, "detections");

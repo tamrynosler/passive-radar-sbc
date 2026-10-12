@@ -62,6 +62,7 @@
 #include "pbr/ArdFile.hpp"
 #include "pbr/ArdProcessor.hpp"
 #include "pbr/ArdStream.hpp"
+#include "pbr/Bearing.hpp"
 #include "pbr/CaptureFile.hpp"
 #include "pbr/ChannelIngest.hpp"
 #include "pbr/Config.hpp"
@@ -197,10 +198,12 @@ bool channelPower(const std::vector<ComplexF>& vc, double& dPowerOut)
 // The typical trigger is a front end with nothing connected.
 bool inputIsProcessable(const std::vector<ComplexF>& vcRef,
                         const std::vector<ComplexF>& vcSur,
+                        const std::vector<ComplexF>& vcSur2,   // empty in a two-channel chain
                         const char*& pReasonOut)
 {
-    double dRefPower = 0.0;
-    double dSurPower = 0.0;
+    double dRefPower  = 0.0;
+    double dSurPower  = 0.0;
+    double dSur2Power = 0.0;
     if (!channelPower(vcRef, dRefPower)) {
         pReasonOut = "non-finite sample in the reference";
         return false;
@@ -209,12 +212,20 @@ bool inputIsProcessable(const std::vector<ComplexF>& vcRef,
         pReasonOut = "non-finite sample in the surveillance";
         return false;
     }
+    if (!channelPower(vcSur2, dSur2Power)) {
+        pReasonOut = "non-finite sample in surveillance 2";
+        return false;
+    }
     if (dRefPower == 0.0) {
         pReasonOut = "reference channel is all zeros";
         return false;
     }
     if (dSurPower == 0.0) {
         pReasonOut = "surveillance channel is all zeros";
+        return false;
+    }
+    if (!vcSur2.empty() && dSur2Power == 0.0) {
+        pReasonOut = "surveillance 2 channel is all zeros";
         return false;
     }
     return true;
@@ -262,6 +273,18 @@ struct Chain {
     std::unique_ptr<ArdProcessor> pArd;
     bool bDeviceCoupled = false;
 
+    // The second surveillance channel, when configured: its own canceller
+    // and map former on the same parameters, run after the first channel's
+    // (docs/third-channel-aoa-design.md). Its map always comes to the host,
+    // since the bearing is read from it there; its CFAR output is ignored.
+    std::unique_ptr<DSICanceller> pDsi2;
+    std::unique_ptr<ArdProcessor> pArd2;
+    ArrayGeometry          oArray;
+    std::vector<ComplexF>  vcSur2;         // empty in a two-channel chain
+    std::vector<ComplexF>  vcCleaned2;
+    std::vector<ComplexF>  vcMap2;
+    std::vector<Detection> vDet2;          // channel 2's CFAR output, unused
+
     std::vector<ComplexF>  vcRef;
     std::vector<ComplexF>  vcSur;
     std::vector<ComplexF>  vcCleaned;
@@ -282,6 +305,23 @@ struct Chain {
     std::vector<float>     vfRefSpectrum;  // the same for the reference, from processCpi
 };
 
+// One surveillance channel through its canceller and map former, against
+// the chain's reference. Device-coupled when both stages are on the GPU, so
+// the cleaned samples never move through the host.
+bool cancelAndMap(Chain& oChain, DSICanceller& oDsi, ArdProcessor& oArd,
+                  std::vector<ComplexF>& vcSur, std::vector<ComplexF>& vcCleaned,
+                  ComplexF* pMap, Detection* pDet, DSIStats& oDsiStats, ArdStats& oArdStats)
+{
+    if (!oDsi.cancel(oChain.vcRef.data(), vcSur.data(),
+                     oChain.bDeviceCoupled ? nullptr : vcCleaned.data(), oDsiStats))
+        return false;
+    return oChain.bDeviceCoupled
+         ? oArd.processDevice(oDsi.deviceReference(), oDsi.deviceOutput(),
+                              pMap, pDet, kMaxArdDetections, oArdStats)
+         : oArd.process(oChain.vcRef.data(), vcCleaned.data(),
+                        pMap, pDet, kMaxArdDetections, oArdStats);
+}
+
 // Build (or rebuild) the chain for a config, warm-up included. Releases the
 // stages it held first: the Nano's 4 GB is shared with the GPU and two sets
 // of stages would not fit side by side. On failure oChain must not be run.
@@ -291,6 +331,8 @@ bool buildChain(const PbrConfig& oCfg, Chain& oChain, double& dMsOut)
 
     oChain.pDsi.reset();
     oChain.pArd.reset();
+    oChain.pDsi2.reset();
+    oChain.pArd2.reset();
 
     if (!dsiParamsFromConfig(oCfg, oChain.oDsiParams) ||
         !ardParamsFromConfig(oCfg, oChain.oArdParams))
@@ -304,12 +346,24 @@ bool buildChain(const PbrConfig& oCfg, Chain& oChain, double& dMsOut)
     if (!oChain.pArd || !oChain.pArd->init(oChain.oArdParams))
         return false;
 
+    if (oCfg.bHaveSurveillance2) {
+        oChain.pDsi2 = makeDSICanceller(oChain.oDsiParams.eAlgorithm, oChain.oDsiParams.eBackend);
+        if (!oChain.pDsi2 || !oChain.pDsi2->init(oChain.oDsiParams))
+            return false;
+        oChain.pArd2 = makeArdProcessor(oChain.oArdParams.eBackend);
+        if (!oChain.pArd2 || !oChain.pArd2->init(oChain.oArdParams))
+            return false;
+    }
+    oChain.oArray = arrayGeometryFromConfig(oCfg);
+
     // Chain the two stages through device memory when both are on the GPU, so
     // the cleaned samples never move through the host. Falls back cleanly
     // otherwise, and says which it did -- a GPU run must never quietly be a
     // host run.
     oChain.bDeviceCoupled = (oChain.pDsi->deviceOutput() != nullptr);
     oChain.pDsi->setHostOutputEnabled(!oChain.bDeviceCoupled);
+    if (oChain.pDsi2)
+        oChain.pDsi2->setHostOutputEnabled(!oChain.bDeviceCoupled);
 
     const uint64_t uCells = oChain.oArdParams.uRangeBins * oChain.oArdParams.uDopplerBins;
     oChain.vcRef.assign(static_cast<size_t>(oCfg.uCpiSamples), ComplexF(0.0f, 0.0f));
@@ -322,6 +376,13 @@ bool buildChain(const PbrConfig& oCfg, Chain& oChain, double& dMsOut)
                             ComplexF(0.0f, 0.0f));
     oChain.vcMap.assign(static_cast<size_t>(uCells), ComplexF(0.0f, 0.0f));
     oChain.vDet.assign(static_cast<size_t>(kMaxArdDetections), Detection());
+    const size_t uSur2Samples = oCfg.bHaveSurveillance2 ? static_cast<size_t>(oCfg.uCpiSamples) : 0;
+    oChain.vcSur2.assign(uSur2Samples, ComplexF(0.0f, 0.0f));
+    oChain.vcCleaned2.assign(oChain.bDeviceCoupled ? 0 : uSur2Samples, ComplexF(0.0f, 0.0f));
+    oChain.vcMap2.assign(oCfg.bHaveSurveillance2 ? static_cast<size_t>(uCells) : 0,
+                         ComplexF(0.0f, 0.0f));
+    oChain.vDet2.assign(oCfg.bHaveSurveillance2 ? static_cast<size_t>(kMaxArdDetections) : 0,
+                        Detection());
     if (!oChain.oGrouper.init(oChain.oArdParams.uRangeBins, oChain.oArdParams.uDopplerBins))
         return false;
     oChain.vPlots.assign(static_cast<size_t>(kMaxArdDetections), Plot());
@@ -353,28 +414,22 @@ bool buildChain(const PbrConfig& oCfg, Chain& oChain, double& dMsOut)
         oChain.vcRef[n] = ComplexF(fI, fQ);
         oChain.vcSur[n] = ComplexF(0.5f * fI, 0.5f * fQ);
     }
+    if (!oChain.vcSur2.empty())
+        oChain.vcSur2 = oChain.vcSur;
     DSIStats oWarmDsi;
     ArdStats oWarmArd;
-    bool bWarm = oChain.pDsi->cancel(oChain.vcRef.data(), oChain.vcSur.data(),
-                                     oChain.bDeviceCoupled ? nullptr : oChain.vcCleaned.data(),
-                                     oWarmDsi);
-    if (bWarm) {
-        bWarm = oChain.bDeviceCoupled
-              ? oChain.pArd->processDevice(oChain.pDsi->deviceReference(),
-                                           oChain.pDsi->deviceOutput(),
-                                           oChain.vcMap.data(), oChain.vDet.data(),
-                                           kMaxArdDetections, oWarmArd)
-              : oChain.pArd->process(oChain.vcRef.data(), oChain.vcCleaned.data(),
-                                     oChain.vcMap.data(), oChain.vDet.data(),
-                                     kMaxArdDetections, oWarmArd);
-    }
+    bool bWarm = cancelAndMap(oChain, *oChain.pDsi, *oChain.pArd, oChain.vcSur, oChain.vcCleaned,
+                              oChain.vcMap.data(), oChain.vDet.data(), oWarmDsi, oWarmArd);
+    if (bWarm && oChain.pDsi2)
+        bWarm = cancelAndMap(oChain, *oChain.pDsi2, *oChain.pArd2, oChain.vcSur2, oChain.vcCleaned2,
+                             oChain.vcMap2.data(), oChain.vDet2.data(), oWarmDsi, oWarmArd);
     if (!bWarm) {
         std::fprintf(stderr, "pbr_run: the warm-up pass failed\n");
         return false;
     }
     // A stateful canceller would otherwise start the first real CPI from the
     // weights it fitted to the warm-up signal.
-    if (!oChain.pDsi->resetState())
+    if (!oChain.pDsi->resetState() || (oChain.pDsi2 && !oChain.pDsi2->resetState()))
         return false;
 
     dMsOut = msBetween(tStart, std::chrono::steady_clock::now());
@@ -389,6 +444,8 @@ bool buildIngest(const PbrConfig& oCfg, std::unique_ptr<ChannelIngest>& pIngest)
     oIngestConfig.uBufferCapacity   = oCfg.uBufferCapacity;
     oIngestConfig.sReferenceName    = oCfg.sReferenceName;
     oIngestConfig.sSurveillanceName = oCfg.sSurveillanceName;
+    if (oCfg.bHaveSurveillance2)
+        oIngestConfig.sSurveillance2Name = oCfg.sSurveillance2Name;
     oIngestConfig.uCpiSamples       = oCfg.uCpiSamples;
     oIngestConfig.uHopSamples       = oCfg.uHopSamples;
     oIngestConfig.dMinCpiCoverage   = oCfg.dMinCpiCoverage;
@@ -587,7 +644,8 @@ bool openOutputFiles(const Options& oOptions, Outputs& oOut)
     if (oOut.pPlotCsv == nullptr)
         return false;
     std::fprintf(oOut.pPlotCsv, "cpi,signalTimeS,rangeKm,dopplerHz,peakRangeBin,"
-                                "peakDopplerBin,peakPowerDb,peakSnrDb,cells\n");
+                                "peakDopplerBin,peakPowerDb,peakSnrDb,cells,"
+                                "bearingDeg,phaseDeg,coherence\n");
 
     oOut.pTelCsv = openForWriting(oOptions.sOutDir + "/telemetry.csv");
     if (oOut.pTelCsv == nullptr)
@@ -596,7 +654,9 @@ bool openOutputFiles(const Options& oOptions, Outputs& oOut)
                                "dsiMs,ardMs,totalMs,suppressionDb,peakDb,"
                                "detections,borderDetections,skipped,datagrams,"
                                "waitMs,printMs,detCsvMs,ardWriteMs,status,plots,"
-                               "refBwHz,refCentreHz\n");
+                               "refBwHz,refCentreHz,"
+                               "dsi2Ms,ard2Ms,aoaMs,suppression2Db,directPhaseDeg,"
+                               "aoaDeg,aoaCoherence\n");
 
     if (oOptions.bSaveConfig &&
         !copyFile(oOptions.sConfigPath, oOptions.sOutDir + "/config.conf"))
@@ -775,9 +835,12 @@ void noteUnresolvedRoles(Run& oRun)
     std::fprintf(stderr,
         "pbr_run: %llu datagrams received but the channels are not identified yet.\n"
         "         seen: %s\n"
-        "         config expects \"%s\" (reference) and \"%s\" (surveillance)\n",
+        "         config expects \"%s\" (reference), \"%s\" (surveillance)%s%s%s\n",
         (unsigned long long)oRun.uDatagrams, oRun.pIngest->streamSummary().c_str(),
-        oRun.oCfg.sReferenceName.c_str(), oRun.oCfg.sSurveillanceName.c_str());
+        oRun.oCfg.sReferenceName.c_str(), oRun.oCfg.sSurveillanceName.c_str(),
+        oRun.oCfg.bHaveSurveillance2 ? " and \"" : "",
+        oRun.oCfg.bHaveSurveillance2 ? oRun.oCfg.sSurveillance2Name.c_str() : "",
+        oRun.oCfg.bHaveSurveillance2 ? "\" (surveillance 2)" : "");
 }
 
 // ---------------------------------------------------------------------------
@@ -799,7 +862,22 @@ struct CpiResult {
     double      dLagS     = 0.0;
     double      dRefBwHz     = 0.0;   // RMS bandwidth of the reference spectrum
     double      dRefCentreHz = 0.0;   // and its power centroid, 0 = carrier
+
+    // The second surveillance channel (zero or invalid without one).
+    DSIStats    oDsi2Stats;
+    double      dDsi2Ms      = 0.0;
+    double      dArd2Ms      = 0.0;
+    double      dAoaMs       = 0.0;   // the direct-path phase and the plots' bearings
+    double      dDirectPhaseDeg = 0.0;   // sur 2 minus sur 1 over the raw CPI
+    Bearing     oAoa;                 // the strongest plot's bearing: the frame's AoA
 };
+
+// Every timed stage of one CPI: both channels' cancellation and map
+// formation, and the bearing arithmetic.
+double totalMs(const CpiResult& oResult)
+{
+    return oResult.dDsiMs + oResult.dArdMs + oResult.dDsi2Ms + oResult.dArd2Ms + oResult.dAoaMs;
+}
 
 // Cancel, then map and detect. A CPI the chain cannot process is not a crash
 // and not a stop: it goes out as a BLANK frame carrying a status word, so a
@@ -809,7 +887,9 @@ struct CpiResult {
 void processCpi(Chain& oChain, ComplexF* pMap, CpiResult& oResult)
 {
     bool bCancelOk = false;
-    const bool bProcessable = inputIsProcessable(oChain.vcRef, oChain.vcSur, oResult.pReason);
+    const bool bProcessable = inputIsProcessable(oChain.vcRef, oChain.vcSur, oChain.vcSur2,
+                                                 oResult.pReason);
+    const bool bTwoSur = (oChain.pDsi2 != nullptr);
 
     // The reference's bandwidth, from its spectrum before processing. Outside
     // the DSI timer: it is a measurement, not part of the chain's cost.
@@ -851,12 +931,38 @@ void processCpi(Chain& oChain, ComplexF* pMap, CpiResult& oResult)
     }
     const TimePoint tMapped = std::chrono::steady_clock::now();
 
+    // The second surveillance channel, after the first, timed on its own.
+    // Its map comes to the host every CPI: the bearings are read from it.
+    TimePoint tCancelled2 = tMapped;
+    TimePoint tMapped2    = tMapped;
+    if (oResult.uStatus == kArdStatusOk && bTwoSur) {
+        ArdStats oArd2Stats;
+        const bool bCancel2Ok = oChain.pDsi2->cancel(
+            oChain.vcRef.data(), oChain.vcSur2.data(),
+            oChain.bDeviceCoupled ? nullptr : oChain.vcCleaned2.data(), oResult.oDsi2Stats);
+        tCancelled2 = std::chrono::steady_clock::now();
+        const bool bArd2Ok = bCancel2Ok && (oChain.bDeviceCoupled
+            ? oChain.pArd2->processDevice(oChain.pDsi2->deviceReference(),
+                                          oChain.pDsi2->deviceOutput(),
+                                          oChain.vcMap2.data(), oChain.vDet2.data(),
+                                          kMaxArdDetections, oArd2Stats)
+            : oChain.pArd2->process(oChain.vcRef.data(), oChain.vcCleaned2.data(),
+                                    oChain.vcMap2.data(), oChain.vDet2.data(),
+                                    kMaxArdDetections, oArd2Stats));
+        tMapped2 = std::chrono::steady_clock::now();
+        if (!bArd2Ok) {
+            oResult.uStatus = kArdStatusFailed;
+            oResult.pReason = "surveillance 2: cancellation or map formation returned an error";
+        }
+    }
+
     if (oResult.uStatus != kArdStatusOk) {
         // The blank frame: zero map, no detections, zero statistics.
         if (pMap != nullptr)
             std::fill(oChain.vcMap.begin(), oChain.vcMap.end(), ComplexF(0.0f, 0.0f));
-        oResult.oDsiStats = DSIStats();
-        oResult.oArdStats = ArdStats();
+        oResult.oDsiStats  = DSIStats();
+        oResult.oArdStats  = ArdStats();
+        oResult.oDsi2Stats = DSIStats();
     } else {
         // One plot per group of touching detections. Microseconds, and
         // deliberately outside ardMs, which times the processor alone. No
@@ -869,9 +975,41 @@ void processCpi(Chain& oChain, ComplexF* pMap, CpiResult& oResult)
             oChain.vPlotRecords[static_cast<size_t>(u)] =
                 plotAsDetection(oChain.vPlots[static_cast<size_t>(u)]);
     }
+    const TimePoint tGrouped = std::chrono::steady_clock::now();
 
-    oResult.dDsiMs = msBetween(tStart, tCancelled);
-    oResult.dArdMs = msBetween(tCancelled, tMapped);
+    // Angle of arrival: the direct-path phase between the two surveillance
+    // channels, and each plot's bearing from the two maps at its peak. The
+    // frame's AoA is the strongest plot's bearing. The map pointer only
+    // matters for channel 1: without a frame wanted, pMap is null and the
+    // bearing cannot be read, so it is skipped on those CPIs.
+    if (oResult.uStatus == kArdStatusOk && bTwoSur) {
+        oResult.dDirectPhaseDeg = directPathPhaseDeg(oChain.vcSur.data(), oChain.vcSur2.data(),
+                                                     oChain.vcSur.size());
+        uint64_t uStrongest = oResult.uPlots;   // none yet
+        for (uint64_t u = 0; pMap != nullptr && u < oResult.uPlots; ++u) {
+            Plot& oPlot = oChain.vPlots[static_cast<size_t>(u)];
+            const Bearing oB = bearingAtCell(pMap, oChain.vcMap2.data(),
+                                             oChain.oArdParams.uRangeBins,
+                                             oChain.oArdParams.uDopplerBins,
+                                             oPlot.uPeakRangeBin, oPlot.uPeakDopplerBin,
+                                             oChain.oArray);
+            oPlot.bHaveBearing = oB.bValid;
+            oPlot.dBearingDeg  = oB.dBearingDeg;
+            oPlot.dPhaseDeg    = oB.dPhaseDeg;
+            oPlot.dCoherence   = oB.dCoherence;
+            if (uStrongest == oResult.uPlots ||
+                oPlot.dPeakPowerDb > oChain.vPlots[static_cast<size_t>(uStrongest)].dPeakPowerDb) {
+                uStrongest   = u;
+                oResult.oAoa = oB;
+            }
+        }
+    }
+
+    oResult.dDsiMs  = msBetween(tStart, tCancelled);
+    oResult.dArdMs  = msBetween(tCancelled, tMapped);
+    oResult.dDsi2Ms = msBetween(tMapped, tCancelled2);
+    oResult.dArd2Ms = msBetween(tCancelled2, tMapped2);
+    oResult.dAoaMs  = msBetween(tGrouped, std::chrono::steady_clock::now());
 }
 
 // Count a blank frame. False when stage failures have run on long enough
@@ -919,19 +1057,28 @@ void updateTimeline(Run& oRun, CpiResult& oResult)
     oResult.dLagS = (oResult.dWallS - oRun.dWallAtFirstCpi) - oResult.dSignalS;
     if (oResult.dLagS > oRun.dMaxLag)
         oRun.dMaxLag = oResult.dLagS;
-    oRun.vdTotalMs.push_back(oResult.dDsiMs + oResult.dArdMs);
+    oRun.vdTotalMs.push_back(totalMs(oResult));
 }
 
-void printCpiLine(uint64_t uCpiIndex, const CpiResult& oResult)
+void printCpiLine(uint64_t uCpiIndex, const CpiResult& oResult, bool bTwoSur)
 {
     if (oResult.uStatus == kArdStatusOk) {
         std::printf("CPI %4llu  t=%7.3f s  dsi %6.1f  ard %5.1f  "
-                    "total %6.1f ms  %5.2f dB  %3llu det  %3llu plots  bw %.1fk  lag %6.3f s\n",
+                    "total %6.1f ms  %5.2f dB  %3llu det  %3llu plots  bw %.1fk  lag %6.3f s",
                     (unsigned long long)uCpiIndex, oResult.dSignalS,
-                    oResult.dDsiMs, oResult.dArdMs, oResult.dDsiMs + oResult.dArdMs,
+                    oResult.dDsiMs, oResult.dArdMs, totalMs(oResult),
                     oResult.oDsiStats.dSuppressionDb,
                     (unsigned long long)oResult.oArdStats.uDetections,
                     (unsigned long long)oResult.uPlots, oResult.dRefBwHz / 1000.0, oResult.dLagS);
+        if (bTwoSur) {
+            std::printf("  direct %+7.1f deg", oResult.dDirectPhaseDeg);
+            if (oResult.oAoa.bValid)
+                std::printf("  aoa %5.1f deg (coh %.2f)", oResult.oAoa.dBearingDeg,
+                            oResult.oAoa.dCoherence);
+            else
+                std::printf("  aoa   --");
+        }
+        std::printf("\n");
     } else {
         std::printf("CPI %4llu  t=%7.3f s  %s: %s -- blank frame  lag %6.3f s\n",
                     (unsigned long long)uCpiIndex, oResult.dSignalS,
@@ -959,13 +1106,17 @@ void writeDetections(const Outputs& oOut, uint64_t uCpiIndex, const Chain& oChai
     if (oOut.pPlotCsv != nullptr) {
         for (uint64_t u = 0; u < oResult.uPlots; ++u) {
             const Plot& oPlot = oChain.vPlots[static_cast<size_t>(u)];
-            std::fprintf(oOut.pPlotCsv, "%llu,%.6f,%.4f,%.4f,%llu,%llu,%.4f,%.4f,%llu\n",
+            // The bearing is written as nan when there is none: no second
+            // channel, no frame this CPI, or a phase outside the arcsine.
+            std::fprintf(oOut.pPlotCsv, "%llu,%.6f,%.4f,%.4f,%llu,%llu,%.4f,%.4f,%llu,%.2f,%.2f,%.4f\n",
                          (unsigned long long)uCpiIndex, oResult.dSignalS,
                          oPlot.dRangeKm, oPlot.dDopplerHz,
                          (unsigned long long)oPlot.uPeakRangeBin,
                          (unsigned long long)oPlot.uPeakDopplerBin,
                          oPlot.dPeakPowerDb, oPlot.dPeakSnrDb,
-                         (unsigned long long)oPlot.uCells);
+                         (unsigned long long)oPlot.uCells,
+                         oPlot.bHaveBearing ? oPlot.dBearingDeg : std::nan(""),
+                         oPlot.dPhaseDeg, oPlot.dCoherence);
         }
     }
 }
@@ -998,13 +1149,33 @@ void streamFrame(Run& oRun, size_t uFrameBytes, const CpiResult& oResult)
                                  static_cast<uint32_t>(oCfg.uSampleRateHz), uSequence);
     }
 
-    char achStatus[1200];
+    // The AoA fields are JSON null when there is no second channel or no
+    // bearing this CPI; JSON has no NaN.
+    char achAoa[160];
+    if (oChain.pDsi2) {
+        char achBearing[32];
+        if (oResult.oAoa.bValid)
+            std::snprintf(achBearing, sizeof(achBearing), "%.1f", oResult.oAoa.dBearingDeg);
+        else
+            std::snprintf(achBearing, sizeof(achBearing), "null");
+        std::snprintf(achAoa, sizeof(achAoa),
+                      "\"dsi2Ms\":%.1f,\"ard2Ms\":%.1f,\"aoaMs\":%.2f,\"suppression2Db\":%.2f,"
+                      "\"directPhaseDeg\":%.1f,\"aoaDeg\":%s,\"aoaCoherence\":%.2f,",
+                      oResult.dDsi2Ms, oResult.dArd2Ms, oResult.dAoaMs,
+                      oResult.oDsi2Stats.dSuppressionDb, oResult.dDirectPhaseDeg,
+                      achBearing, oResult.oAoa.dCoherence);
+    } else {
+        std::snprintf(achAoa, sizeof(achAoa), "\"aoaDeg\":null,");
+    }
+
+    char achStatus[kArdStatusMaxJsonBytes];
     const int iLen = std::snprintf(
         achStatus, sizeof(achStatus),
         "{\"runName\":\"%s\",\"cpi\":%llu,\"status\":%llu,"
         "\"reason\":\"%s\",\"signalTimeS\":%.3f,\"lagS\":%.3f,"
         "\"dsiMs\":%.1f,\"ardMs\":%.1f,\"totalMs\":%.1f,"
         "\"suppressionDb\":%.2f,\"peakDb\":%.2f,\"refBwHz\":%.0f,\"refCentreHz\":%.0f,"
+        "%s"
         "\"detections\":%llu,\"plots\":%llu,\"borderDetections\":%llu,\"skipped\":%llu,"
         "\"controlPort\":%u,\"liveChanges\":%llu,"
         "\"config\":{\"DSI_ALGORITHM\":\"%s\",\"DSI_BACKEND\":\"%s\","
@@ -1012,9 +1183,10 @@ void streamFrame(Run& oRun, size_t uFrameBytes, const CpiResult& oResult)
         "\"SAMPLE_RATE_Hz\":\"%llu\"}}",
         oRun.oOut.sRunName.c_str(), (unsigned long long)oRun.uCpiIndex,
         (unsigned long long)oResult.uStatus, oResult.pReason, oResult.dSignalS, oResult.dLagS,
-        oResult.dDsiMs, oResult.dArdMs, oResult.dDsiMs + oResult.dArdMs,
+        oResult.dDsiMs, oResult.dArdMs, totalMs(oResult),
         oResult.oDsiStats.dSuppressionDb, oResult.oArdStats.dPeakDb,
         oResult.dRefBwHz, oResult.dRefCentreHz,
+        achAoa,
         (unsigned long long)oResult.oArdStats.uDetections,
         (unsigned long long)oResult.uPlots,
         (unsigned long long)oResult.oArdStats.uDetectionsInBorder,
@@ -1065,11 +1237,12 @@ void writeTelemetry(const Run& oRun, const CpiResult& oResult,
         return;
     std::fprintf(oRun.oOut.pTelCsv,
         "%llu,%llu,%.6f,%.6f,%.6f,%.4f,%.4f,%.4f,%.4f,%.4f,"
-        "%llu,%llu,%llu,%llu,%.4f,%.4f,%.4f,%.4f,%llu,%llu,%.0f,%.0f\n",
+        "%llu,%llu,%llu,%llu,%.4f,%.4f,%.4f,%.4f,%llu,%llu,%.0f,%.0f,"
+        "%.4f,%.4f,%.4f,%.4f,%.2f,%.2f,%.4f\n",
         (unsigned long long)oRun.uCpiIndex,
         (unsigned long long)oResult.uCpiStart,
         oResult.dSignalS, oResult.dWallS, oResult.dLagS,
-        oResult.dDsiMs, oResult.dArdMs, oResult.dDsiMs + oResult.dArdMs,
+        oResult.dDsiMs, oResult.dArdMs, totalMs(oResult),
         oResult.oDsiStats.dSuppressionDb, oResult.oArdStats.dPeakDb,
         (unsigned long long)oResult.oArdStats.uDetections,
         (unsigned long long)oResult.oArdStats.uDetectionsInBorder,
@@ -1077,7 +1250,11 @@ void writeTelemetry(const Run& oRun, const CpiResult& oResult,
         (unsigned long long)oRun.uDatagrams,
         oResult.dWaitMs, dPrintMs, dDetCsvMs, dArdWriteMs,
         (unsigned long long)oResult.uStatus, (unsigned long long)oResult.uPlots,
-        oResult.dRefBwHz, oResult.dRefCentreHz);
+        oResult.dRefBwHz, oResult.dRefCentreHz,
+        oResult.dDsi2Ms, oResult.dArd2Ms, oResult.dAoaMs, oResult.oDsi2Stats.dSuppressionDb,
+        oResult.dDirectPhaseDeg,
+        oResult.oAoa.bValid ? oResult.oAoa.dBearingDeg : std::nan(""),
+        oResult.oAoa.dCoherence);
 }
 
 // The first CPI's input, once, if --dump-cpi asked for it.
@@ -1129,7 +1306,7 @@ bool handleCpi(Run& oRun, uint64_t uCpiStart)
     // and blocks if that backs up), writing the CSV, and writing or
     // streaming the frame.
     const TimePoint tPrintStart = std::chrono::steady_clock::now();
-    printCpiLine(oRun.uCpiIndex, oResult);
+    printCpiLine(oRun.uCpiIndex, oResult, oRun.oChain.pDsi2 != nullptr);
     const TimePoint tPrinted = std::chrono::steady_clock::now();
     writeDetections(oRun.oOut, oRun.uCpiIndex, oRun.oChain, oResult);
     const TimePoint tDetectionsWritten = std::chrono::steady_clock::now();
@@ -1167,7 +1344,8 @@ void printStartup(const Run& oRun, double dBuildMs)
                 oOut.bWriteFrames ? "written to disk" : "",
                 (oOut.bWriteFrames && oOut.bStreamFrames) ? " and " : "",
                 oOut.bStreamFrames ? "streamed" : (oOut.bWriteFrames ? "" : "neither written nor streamed"));
-    std::printf("  chain         %s -> %s\n", oRun.oChain.pDsi->name(), oRun.oChain.pArd->name());
+    std::printf("  chain         %s -> %s%s\n", oRun.oChain.pDsi->name(), oRun.oChain.pArd->name(),
+                oRun.oChain.pDsi2 ? ", twice: one surveillance channel after the other, then AoA" : "");
     std::printf("  coupling      %s\n",
                 oRun.oChain.bDeviceCoupled ? "device-coupled: samples stay on the GPU"
                                            : "via host: the cleaned CPI round-trips");
@@ -1195,9 +1373,10 @@ bool openSource(const Run& oRun, UdpReceiver& oReceiver, CaptureReader& oReader)
     }
     // The single-threaded design rests on this buffer absorbing what arrives
     // while a CPI is being processed, so report what the kernel actually
-    // granted rather than what was asked for. Two channels of int16 I and Q;
+    // granted rather than what was asked for. Each channel is int16 I and Q;
     // the packet headers add about 2% and are left out.
-    const double dBytesPerSecond = 2.0 * 4.0 * double(oCfg.uSampleRateHz);
+    const double dBytesPerSecond = double(oRun.pIngest->channelCount()) * 4.0 *
+                                   double(oCfg.uSampleRateHz);
     const double dSlackSeconds   = double(oReceiver.actualRcvBufBytes()) / dBytesPerSecond;
     std::printf("socket buffer %d bytes (%.2f s of slack)\n",
                 oReceiver.actualRcvBufBytes(), dSlackSeconds);
@@ -1431,7 +1610,9 @@ int main(int argc, char* argv[])
         for (;;) {
             uint64_t uCpiStart = 0;
             const CpiStatus eCpi = oRun.pIngest->tryExtractCpi(
-                oRun.oChain.vcRef.data(), oRun.oChain.vcSur.data(), oRun.oCfg.uCpiSamples, uCpiStart);
+                oRun.oChain.vcRef.data(), oRun.oChain.vcSur.data(),
+                oRun.oChain.vcSur2.empty() ? nullptr : oRun.oChain.vcSur2.data(),
+                oRun.oCfg.uCpiSamples, uCpiStart);
             if (eCpi == CpiStatus::NotYet)
                 break;
             if (eCpi == CpiStatus::Skipped)

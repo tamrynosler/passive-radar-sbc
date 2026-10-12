@@ -26,6 +26,16 @@ bool isJsonSpace(char ch)
     return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r';
 }
 
+const char* roleName(ChannelRole eRole)
+{
+    switch (eRole) {
+    case ChannelRole::Reference:     return "reference";
+    case ChannelRole::Surveillance:  return "surveillance";
+    case ChannelRole::Surveillance2: return "surveillance 2";
+    default:                         return "NOT ASSIGNED";
+    }
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -104,17 +114,22 @@ ChannelIngest::ChannelIngest(const ChannelIngestConfig& oConfig)
       mdSourceSampleRateHz(0.0),
       mRefBuffer(oConfig.uBufferCapacity),
       mSurBuffer(oConfig.uBufferCapacity),
-      mbRefSeen(false),
-      muRefFirstIndex(0),
-      mbSurSeen(false),
-      muSurFirstIndex(0),
+      mSur2Buffer(oConfig.uBufferCapacity),
+      muChannels(oConfig.sSurveillance2Name.empty() ? 2 : 3),
       mbCpiAnchored(false),
       muCpiStart(0),
       mbValid(false)
 {
     std::memset(&mStats, 0, sizeof(mStats));
+    mapBuffer[0] = &mRefBuffer;
+    mapBuffer[1] = &mSurBuffer;
+    mapBuffer[2] = &mSur2Buffer;
+    for (size_t u = 0; u < kMaxChannels; ++u) {
+        mabSeen[u]       = false;
+        mauFirstIndex[u] = 0;
+    }
 
-    if (!mRefBuffer.isValid() || !mSurBuffer.isValid()) {
+    if (!mRefBuffer.isValid() || !mSurBuffer.isValid() || !mSur2Buffer.isValid()) {
         std::fprintf(stderr, "ChannelIngest: channel buffer allocation failed\n");
         return;
     }
@@ -126,8 +141,10 @@ ChannelIngest::ChannelIngest(const ChannelIngestConfig& oConfig)
         std::fprintf(stderr, "ChannelIngest: receiver names must be configured\n");
         return;
     }
-    if (oConfig.sReferenceName == oConfig.sSurveillanceName) {
-        std::fprintf(stderr, "ChannelIngest: reference and surveillance names are identical\n");
+    if (oConfig.sReferenceName == oConfig.sSurveillanceName ||
+        oConfig.sSurveillance2Name == oConfig.sReferenceName ||
+        oConfig.sSurveillance2Name == oConfig.sSurveillanceName) {
+        std::fprintf(stderr, "ChannelIngest: two receiver names are identical\n");
         return;
     }
     if (oConfig.uCpiSamples == 0 || oConfig.uHopSamples == 0) {
@@ -205,12 +222,10 @@ std::string ChannelIngest::streamSummary() const
     char achLine[160];
     for (size_t u = 0; u < mvStreams.size(); ++u) {
         const StreamState& oStream = mvStreams[u];
-        const char* pRole = (oStream.eRole == ChannelRole::Reference)    ? "reference" :
-                            (oStream.eRole == ChannelRole::Surveillance) ? "surveillance" :
-                                                                           "NOT ASSIGNED";
         std::snprintf(achLine, sizeof(achLine), "%sstream 0x%08X \"%s\" (%s)",
                       u == 0 ? "" : ", ", oStream.uStreamId,
-                      oStream.sName.empty() ? "no context yet" : oStream.sName.c_str(), pRole);
+                      oStream.sName.empty() ? "no context yet" : oStream.sName.c_str(),
+                      roleName(oStream.eRole));
         sOut += achLine;
     }
     return sOut;
@@ -218,25 +233,38 @@ std::string ChannelIngest::streamSummary() const
 
 void ChannelIngest::resetTimeline()
 {
-    mRefBuffer.reset();
-    mSurBuffer.reset();
-    mbRefSeen       = false;
-    muRefFirstIndex = 0;
-    mbSurSeen       = false;
-    muSurFirstIndex = 0;
-    mbCpiAnchored   = false;
-    muCpiStart      = 0;
+    for (size_t u = 0; u < kMaxChannels; ++u) {
+        mapBuffer[u]->reset();
+        mabSeen[u]       = false;
+        mauFirstIndex[u] = 0;
+    }
+    mbCpiAnchored = false;
+    muCpiStart    = 0;
+}
+
+size_t ChannelIngest::channelOf(ChannelRole eRole)
+{
+    switch (eRole) {
+    case ChannelRole::Reference:     return 0;
+    case ChannelRole::Surveillance:  return 1;
+    case ChannelRole::Surveillance2: return 2;
+    default:                         return kMaxChannels;   // never a buffer
+    }
 }
 
 bool ChannelIngest::rolesResolved() const
 {
-    bool bHaveRef = false;
-    bool bHaveSur = false;
+    bool abHave[kMaxChannels] = { false, false, false };
     for (size_t u = 0; u < mvStreams.size(); ++u) {
-        if (mvStreams[u].eRole == ChannelRole::Reference)    bHaveRef = true;
-        if (mvStreams[u].eRole == ChannelRole::Surveillance) bHaveSur = true;
+        const size_t uChannel = channelOf(mvStreams[u].eRole);
+        if (uChannel < kMaxChannels)
+            abHave[uChannel] = true;
     }
-    return bHaveRef && bHaveSur;
+    for (size_t u = 0; u < muChannels; ++u) {
+        if (!abHave[u])
+            return false;
+    }
+    return true;
 }
 
 uint64_t ChannelIngest::absoluteIndex(uint64_t uSeconds, uint64_t uPicoseconds) const
@@ -328,12 +356,13 @@ bool ChannelIngest::handleContext(const Vita49Packet& oPacket)
             eRole = ChannelRole::Reference;
         else if (sName == mConfig.sSurveillanceName)
             eRole = ChannelRole::Surveillance;
+        else if (muChannels == 3 && sName == mConfig.sSurveillance2Name)
+            eRole = ChannelRole::Surveillance2;
 
         if (eRole != ChannelRole::Unknown && oStream.eRole != eRole) {
             oStream.eRole = eRole;
             std::fprintf(stderr, "ChannelIngest: stream 0x%08X is \"%s\" (%s)\n",
-                         oPacket.uStreamId, sName.c_str(),
-                         (eRole == ChannelRole::Reference) ? "reference" : "surveillance");
+                         oPacket.uStreamId, sName.c_str(), roleName(eRole));
         }
     }
 
@@ -414,8 +443,8 @@ bool ChannelIngest::handleData(const Vita49Packet& oPacket)
     if (oPacket.uSampleCount == 0)
         return true;
 
-    const bool bIsSurveillance = (oStream.eRole == ChannelRole::Surveillance);
-    CircularBuffer& oBuffer = bIsSurveillance ? mSurBuffer : mRefBuffer;
+    const size_t    uChannel = channelOf(oStream.eRole);
+    CircularBuffer& oBuffer  = *mapBuffer[uChannel];
 
     ComplexF acStaging[kMaxSamplesPerPacket];
     decodeSamples(oPacket, acStaging);
@@ -429,7 +458,7 @@ bool ChannelIngest::handleData(const Vita49Packet& oPacket)
         return true;   // already logged by the buffer; not a fault here
     }
 
-    noteFirstIndex(bIsSurveillance, uAbsIndex);
+    noteFirstIndex(uChannel, uAbsIndex);
     mStats.uSamplesWritten += oPacket.uSampleCount;
     return true;
 }
@@ -473,22 +502,24 @@ void ChannelIngest::reanchorIfJumpedBack(const CircularBuffer& oBuffer, uint64_t
 
 // Remember the lowest index seen on a channel, for the CPI anchor. Minimum
 // rather than first-written, since packets can arrive reordered.
-void ChannelIngest::noteFirstIndex(bool bSurveillance, uint64_t uAbsIndex)
+void ChannelIngest::noteFirstIndex(size_t uChannel, uint64_t uAbsIndex)
 {
-    bool&     bSeen  = bSurveillance ? mbSurSeen       : mbRefSeen;
-    uint64_t& uFirst = bSurveillance ? muSurFirstIndex : muRefFirstIndex;
-    if (!bSeen || uAbsIndex < uFirst) {
-        bSeen  = true;
-        uFirst = uAbsIndex;
+    if (!mabSeen[uChannel] || uAbsIndex < mauFirstIndex[uChannel]) {
+        mabSeen[uChannel]       = true;
+        mauFirstIndex[uChannel] = uAbsIndex;
     }
 }
 
-CpiStatus ChannelIngest::tryExtractCpi(ComplexF* pcRef, ComplexF* pcSur,
+CpiStatus ChannelIngest::tryExtractCpi(ComplexF* pcRef, ComplexF* pcSur, ComplexF* pcSur2,
                                        uint64_t uCount, uint64_t& uCpiStartOut)
 {
     uCpiStartOut = 0;
 
-    if (!mbValid || pcRef == nullptr || pcSur == nullptr) {
+    ComplexF* apcOut[kMaxChannels] = { pcRef, pcSur, pcSur2 };
+    bool bNullOut = !mbValid;
+    for (size_t u = 0; u < muChannels; ++u)
+        bNullOut = bNullOut || (apcOut[u] == nullptr);
+    if (bNullOut) {
         std::fprintf(stderr, "tryExtractCpi: invalid ingest or null destination\n");
         return CpiStatus::NotYet;
     }
@@ -500,24 +531,31 @@ CpiStatus ChannelIngest::tryExtractCpi(ComplexF* pcRef, ComplexF* pcSur,
         return CpiStatus::NotYet;
     }
 
-    // Nothing to anchor to until both channels have delivered something.
-    if (!mbRefSeen || !mbSurSeen)
-        return CpiStatus::NotYet;
+    // Nothing to anchor to until every channel has delivered something.
+    for (size_t u = 0; u < muChannels; ++u) {
+        if (!mabSeen[u])
+            return CpiStatus::NotYet;
+    }
 
-    // Anchor on the earliest index both channels can cover. Both live on one
-    // absolute timeline, so a single start pointer serves both.
+    // Anchor on the earliest index every channel can cover. All live on one
+    // absolute timeline, so a single start pointer serves them all.
     if (!mbCpiAnchored) {
-        muCpiStart = (muRefFirstIndex > muSurFirstIndex) ? muRefFirstIndex
-                                                         : muSurFirstIndex;
+        muCpiStart = mauFirstIndex[0];
+        for (size_t u = 1; u < muChannels; ++u) {
+            if (mauFirstIndex[u] > muCpiStart)
+                muCpiStart = mauFirstIndex[u];
+        }
         mbCpiAnchored = true;
     }
 
     // Has the window we wanted already been overwritten? Step forward by whole
     // hops rather than snapping, so CPI starts stay on the same lattice and an
     // index still maps predictably back to a time.
-    const uint64_t uRefOldest = mRefBuffer.oldestValid();
-    const uint64_t uSurOldest = mSurBuffer.oldestValid();
-    const uint64_t uOldest    = (uRefOldest > uSurOldest) ? uRefOldest : uSurOldest;
+    uint64_t uOldest = 0;
+    for (size_t u = 0; u < muChannels; ++u) {
+        if (mapBuffer[u]->oldestValid() > uOldest)
+            uOldest = mapBuffer[u]->oldestValid();
+    }
 
     if (muCpiStart < uOldest) {
         const uint64_t uBehind = uOldest - muCpiStart;
@@ -527,13 +565,16 @@ CpiStatus ChannelIngest::tryExtractCpi(ComplexF* pcRef, ComplexF* pcSur,
         return CpiStatus::Skipped;
     }
 
-    // Both channels must have written past the end of the window.
+    // Every channel must have written past the end of the window.
     const uint64_t uNeededEnd = muCpiStart + uCount;
-    if (mRefBuffer.writeEnd() < uNeededEnd || mSurBuffer.writeEnd() < uNeededEnd)
-        return CpiStatus::NotYet;
+    for (size_t u = 0; u < muChannels; ++u) {
+        if (mapBuffer[u]->writeEnd() < uNeededEnd)
+            return CpiStatus::NotYet;
+    }
 
-    if (!mRefBuffer.read(muCpiStart, pcRef, uCount) ||
-        !mSurBuffer.read(muCpiStart, pcSur, uCount)) {
+    for (size_t u = 0; u < muChannels; ++u) {
+        if (mapBuffer[u]->read(muCpiStart, apcOut[u], uCount))
+            continue;
         // The window passed the tests above, so a refusal here means the
         // buffer's view of what is resident disagrees with ours.
         std::fprintf(stderr, "tryExtractCpi: buffer refused a window at %llu that "
@@ -549,16 +590,18 @@ CpiStatus ChannelIngest::tryExtractCpi(ComplexF* pcRef, ComplexF* pcSur,
     // exactly zero) is as valid as a loud one, while a zero-filled gap is
     // not, whatever the samples around it look like. Read before the start
     // advances, on the same window the reads above used.
-    const double dRefCoverage = static_cast<double>(mRefBuffer.validCount(muCpiStart, uCount)) /
-                                static_cast<double>(uCount);
-    const double dSurCoverage = static_cast<double>(mSurBuffer.validCount(muCpiStart, uCount)) /
-                                static_cast<double>(uCount);
+    bool bCovered = true;
+    for (size_t u = 0; u < muChannels; ++u) {
+        const double dCoverage = static_cast<double>(mapBuffer[u]->validCount(muCpiStart, uCount)) /
+                                 static_cast<double>(uCount);
+        if (dCoverage < mConfig.dMinCpiCoverage)
+            bCovered = false;
+    }
 
     const uint64_t uStart = muCpiStart;
     muCpiStart += mConfig.uHopSamples;
 
-    if (dRefCoverage < mConfig.dMinCpiCoverage ||
-        dSurCoverage < mConfig.dMinCpiCoverage) {
+    if (!bCovered) {
         ++mStats.uCpisSkippedCoverage;
         return CpiStatus::Skipped;
     }

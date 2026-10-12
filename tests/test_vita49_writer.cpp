@@ -465,7 +465,7 @@ void testIngestEndToEnd()
     uint64_t uCpiStart = 0;
 
     // First CPI: anchored at the first sample, every value in place.
-    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uCpiStart) == CpiStatus::Ready);
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), nullptr, kCpi, uCpiStart) == CpiStatus::Ready);
     assert(uCpiStart == uI0);
     for (uint64_t u = 0; u < kCpi; ++u) {
         const float fExpected = float(codeAt(uI0 + u));
@@ -476,7 +476,7 @@ void testIngestEndToEnd()
     // Second CPI: the gap is 0.5% of the window, under the 1% coverage limit,
     // so it is handed over; the missing stretch is zero and what follows it
     // is at the index its timestamp says, not shifted back by the gap.
-    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uCpiStart) == CpiStatus::Ready);
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), nullptr, kCpi, uCpiStart) == CpiStatus::Ready);
     assert(uCpiStart == uI0 + kCpi);
 
     // The gap begins at the first index the driver never sent: the packet
@@ -491,7 +491,7 @@ void testIngestEndToEnd()
         assert(vcSur[size_t(u)] == ComplexF(fExpected, -fExpected));
     }
 
-    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uCpiStart) == CpiStatus::NotYet);
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), nullptr, kCpi, uCpiStart) == CpiStatus::NotYet);
     assert(oIngest.stats().uCpisEmitted == 2);
     assert(oIngest.stats().uCpisSkippedCoverage == 0);
 }

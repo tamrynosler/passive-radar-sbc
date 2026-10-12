@@ -31,6 +31,15 @@ struct PbrConfig {
     uint64_t    uSampleRateHz      = 0;
     std::string sReferenceName;
     std::string sSurveillanceName;
+    std::string sSurveillance2Name;         // the second surveillance antenna;
+                                            // "none" = a two-channel chain
+
+    // ---- the two-element surveillance array (docs/third-channel-aoa-design.md)
+    double      dCarrierFreqHz      = 0.0;  // sets the wavelength
+    double      dArraySpacingM      = 0.0;  // element 2 from element 1
+    double      dArrayBaselineAzDeg = 0.0;  // compass bearing, element 1 to 2;
+                                            // the array looks 90 deg clockwise of it
+    double      dPhaseCalDeg        = 0.0;  // added to the measured phase difference
 
     // ---- ingest ----------------------------------------------------------
     uint16_t    uUdpPort           = 0;
@@ -100,6 +109,7 @@ struct PbrConfig {
     uint64_t    uCdBatchSamples    = 0;   // round(dCdBatchSeconds * fs)
     uint64_t    uCglsBatchSamples  = 0;   // round(dCglsBatchSeconds * fs)
     uint64_t    uEcaLdBatchSamples = 0;   // round(dEcaLdBatchSeconds * fs)
+    bool        bHaveSurveillance2 = false; // sSurveillance2Name is not "none"
 };
 
 // Load and validate a config file.

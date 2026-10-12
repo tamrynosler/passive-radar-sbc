@@ -1,0 +1,154 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<simulation name="Basic1TargetAoa">
+    <parameters>
+        <starttime>0</starttime>
+        <endtime>600</endtime>
+        <rate>204800</rate>
+        <c>299792458</c>
+        <simSamplingRate>1000</simSamplingRate>
+        <adc_bits>16</adc_bits>
+        <oversample>1</oversample>
+    </parameters>
+    <waveform name="TxWaveform">
+        <power>16400</power>
+        <carrier_frequency>89e6</carrier_frequency>
+        <cw_from_file filename="../../data/waveforms/Malmesbury_360s_600s.h5" />
+    </waveform>
+    <timing name="TxClock" synconpulse="true">
+        <frequency>204800</frequency>
+    </timing>
+    <timing name="RxClock" synconpulse="true">
+        <frequency>204800</frequency>
+        <random_freq_offset_stdev>0.01</random_freq_offset_stdev>
+    </timing>
+    <timing name="JammerClock" synconpulse="true">
+        <frequency>204800</frequency>
+    </timing>
+    <antenna name="RxYagiAntenna" pattern="sinc">
+        <alpha>5.2481</alpha>
+        <beta>2</beta>
+        <gamma>3.6</gamma>
+        <efficiency>1</efficiency>
+    </antenna>
+    <antenna name="TxIsoAntenna" pattern="isotropic">
+        <efficiency>1</efficiency>
+    </antenna>
+    <antenna name="JammingIsoAntenna" pattern="isotropic">
+        <efficiency>1</efficiency>
+    </antenna>
+    <platform name="ContantiabergTxPlatform">
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>258804.41</x>
+                <y>6228720.84</y>
+                <altitude>397</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0</startazimuth>
+            <startelevation>0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <transmitter name="ConstantiabergTx" antenna="TxIsoAntenna" waveform="TxWaveform" timing="TxClock">
+            <cw_mode/>
+        </transmitter>
+    </platform>
+    <platform name="ArmasuisseRefRxPlatform">
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>287942.01</x>
+                <y>6297267.09</y>
+                <altitude>241</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>204.2</startazimuth>
+            <startelevation>0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <receiver name="ArmasuisseRefRxClean" antenna="RxYagiAntenna" timing="RxClock">
+            <cw_mode/>
+            <noise_temp>438.4</noise_temp>
+        </receiver>
+    </platform>
+    <platform name="ArmasuisseSurRxPlatform">
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>287946.01</x>
+                <y>6297267.09</y>
+                <altitude>241</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>125</startazimuth>
+            <startelevation>10</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <receiver name="ArmasuisseSurRxClean" antenna="RxYagiAntenna" timing="RxClock">
+            <cw_mode/>
+            <noise_temp>438.4</noise_temp>
+        </receiver>
+    </platform>
+    <platform name="ArmasuisseSur2RxPlatform">
+        <!-- The second surveillance element: half a wavelength (1.6842 m at
+             89 MHz) from the first along compass bearing 35 deg, which is
+             perpendicular to the 125 deg boresight. Same antenna, pointing,
+             clock and noise as the first, so only the carrier phase differs.
+             See docs/third-channel-aoa-design.md. -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>287946.976</x>
+                <y>6297268.470</y>
+                <altitude>241</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>125</startazimuth>
+            <startelevation>10</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <receiver name="ArmasuisseSur2RxClean" antenna="RxYagiAntenna" timing="RxClock">
+            <cw_mode/>
+            <noise_temp>438.4</noise_temp>
+        </receiver>
+    </platform>
+    <platform name="target1Platform">
+        <!-- A straight fly-by, tangent at t = 300 s to the 40 km bistatic
+             range ellipse, so the Doppler passes smoothly through zero there.
+             150 m/s at 8000 m, laid near the surveillance antenna's boresight
+             so the target never fades. See README.md for range and Doppler. -->
+        <motionpath interpolation="linear">
+            <positionwaypoint>
+                <x>305136.05</x>
+                <y>6213168.07</y>
+                <altitude>8000.00</altitude>
+                <time>0</time>
+            </positionwaypoint>
+            <positionwaypoint>
+                <x>327484.66</x>
+                <y>6300349.14</y>
+                <altitude>8000.00</altitude>
+                <time>600</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="Target1">
+            <rcs type="isotropic">
+                <value>200</value>
+            </rcs>
+        </target>
+    </platform>
+</simulation>

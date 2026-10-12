@@ -18,6 +18,13 @@ struct Plot {
     double   dPeakPowerDb    = 0.0;   // that cell's Detection::dPowerDb
     double   dPeakSnrDb      = 0.0;   // that cell's Detection::dSnrDb
     uint64_t uCells          = 0;     // detections merged into this plot
+
+    // Filled by the chain from the second surveillance channel's map, when
+    // there is one (Bearing.hpp); otherwise left at these values.
+    bool     bHaveBearing    = false;
+    double   dBearingDeg     = 0.0;   // compass
+    double   dPhaseDeg       = 0.0;   // channel 2 minus channel 1 at the peak
+    double   dCoherence      = 0.0;
 };
 
 // Groups CFAR detections into plots (Tong 2014, UCT PhD: 8-connected

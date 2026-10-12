@@ -13,8 +13,12 @@ namespace pbr {
 enum class ChannelRole {
     Unknown,        // stream seen, but no context packet has named it yet
     Reference,
-    Surveillance
+    Surveillance,
+    Surveillance2   // the second surveillance antenna, when configured
 };
+
+// The channels in buffer order: reference, surveillance, surveillance 2.
+constexpr size_t kMaxChannels = 3;
 
 struct ChannelIngestConfig {
     uint64_t    uSampleRateHz;        // must match the source's declared rate
@@ -22,6 +26,7 @@ struct ChannelIngestConfig {
     uint64_t    uBufferCapacity;      // samples per channel (bufSeconds * fs)
     std::string sReferenceName;       // must match <receiver name="..."> exactly
     std::string sSurveillanceName;
+    std::string sSurveillance2Name;   // empty: a two-channel chain
 
     // CPI extraction. Deliberately a narrow interface rather than taking the
     // whole PbrConfig, so ChannelIngest stays testable without a config file.
@@ -47,7 +52,8 @@ constexpr uint64_t kMaxSamplesPerPacket = 512;
 // Turns decoded VITA 49 packets into samples in the right channel's buffer.
 //
 // Responsibilities:
-//   * learn which stream ID is reference and which is surveillance, from the
+//   * learn which stream ID is reference and which is surveillance (and
+//     which the second surveillance, when one is configured), from the
 //     receiver name in context-packet JSON
 //   * convert big-endian int16 ADC codes to physical units
 //   * work out each packet's absolute sample index from its timestamp
@@ -71,17 +77,19 @@ public:
 
     // Try to hand over the next coherent processing interval.
     //
-    // On Ready, pcRef and pcSur each hold uCount samples covering the same
-    // absolute index range, starting at uCpiStartOut, and the internal start
-    // pointer has advanced by one hop. On NotYet nothing was written. On
-    // Skipped the buffers MAY have been written but must not be used: either
-    // the window fell out of the buffer before both channels completed it, or
-    // it contained too many gaps to trust.
+    // On Ready, pcRef, pcSur and (when a second surveillance channel is
+    // configured) pcSur2 each hold uCount samples covering the same absolute
+    // index range, starting at uCpiStartOut, and the internal start pointer
+    // has advanced by one hop. On NotYet nothing was written. On Skipped the
+    // buffers MAY have been written but must not be used: either the window
+    // fell out of the buffer before every channel completed it, or it
+    // contained too many gaps to trust.
     //
-    // uCount must equal uCpiSamples from the config. The caller owns both
-    // buffers. Drain in a loop until NotYet.
-    CpiStatus tryExtractCpi(ComplexF* pcRef, ComplexF* pcSur, uint64_t uCount,
-                            uint64_t& uCpiStartOut);
+    // uCount must equal uCpiSamples from the config. The caller owns the
+    // buffers; pcSur2 may be null only in a two-channel chain. Drain in a
+    // loop until NotYet.
+    CpiStatus tryExtractCpi(ComplexF* pcRef, ComplexF* pcSur, ComplexF* pcSur2,
+                            uint64_t uCount, uint64_t& uCpiStartOut);
 
     // Change the window length and hop for every CPI from the next one on,
     // keeping the buffered samples and the current start pointer. For a live
@@ -89,8 +97,11 @@ public:
     // window would not fit the buffer or either value is zero.
     bool setCpi(uint64_t uCpiSamples, uint64_t uHopSamples);
 
-    // True once both reference and surveillance stream IDs are known.
+    // True once every configured channel's stream ID is known.
     bool rolesResolved() const;
+
+    // 2, or 3 with a second surveillance channel.
+    size_t channelCount() const { return muChannels; }
 
     ChannelRole roleOf(uint32_t uStreamId) const;
 
@@ -131,7 +142,11 @@ private:
     void decodeSamples(const Vita49Packet& oPacket, ComplexF* pcOut) const;
     void reanchorIfJumpedBack(const CircularBuffer& oBuffer, uint64_t uAbsIndex,
                               uint64_t uCount);
-    void noteFirstIndex(bool bSurveillance, uint64_t uAbsIndex);
+    void noteFirstIndex(size_t uChannel, uint64_t uAbsIndex);
+
+    // Buffer index of a resolved role: 0 reference, 1 surveillance, 2
+    // surveillance 2.
+    static size_t channelOf(ChannelRole eRole);
 
     // Absolute sample index of a packet's first sample, from its VRT
     // timestamp. See docs/design_decisions.md.
@@ -160,18 +175,21 @@ private:
     double              mdCodeToVolts;   // dFullScale / kFullScaleCode
     double              mdSourceSampleRateHz;
 
-    CircularBuffer mRefBuffer;
-    CircularBuffer mSurBuffer;
+    // One buffer per channel, always allocated; mapBuffer indexes them in
+    // channel order so the extraction loops over the muChannels in use.
+    CircularBuffer  mRefBuffer;
+    CircularBuffer  mSurBuffer;
+    CircularBuffer  mSur2Buffer;
+    CircularBuffer* mapBuffer[kMaxChannels];
+    size_t          muChannels;
 
     std::vector<StreamState> mvStreams;
 
     // Lowest absolute index ever written on each channel. The CPI anchor needs
     // this, and it must be the MINIMUM rather than the first one written,
     // because packets can arrive out of order.
-    bool     mbRefSeen;
-    uint64_t muRefFirstIndex;
-    bool     mbSurSeen;
-    uint64_t muSurFirstIndex;
+    bool     mabSeen[kMaxChannels];
+    uint64_t mauFirstIndex[kMaxChannels];
 
     // Absolute index of the next CPI to hand over.
     bool     mbCpiAnchored;

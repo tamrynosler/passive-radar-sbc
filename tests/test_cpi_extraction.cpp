@@ -169,17 +169,17 @@ void testNotYetBeforeData()
     uint64_t uStart = 0;
 
     // No packets at all.
-    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uStart)
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), nullptr, kCpi, uStart)
            == CpiStatus::NotYet);
 
     // Context only: roles known, no samples.
     resolveRoles(oIngest);
-    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uStart)
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), nullptr, kCpi, uStart)
            == CpiStatus::NotYet);
 
     // One channel only, so there is nothing both can cover.
     feed(oIngest, makeData(kRefId, 5000, kPacket));
-    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uStart)
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), nullptr, kCpi, uStart)
            == CpiStatus::NotYet);
 }
 
@@ -193,13 +193,13 @@ void testPartialWindowIsNotYet()
 
     // One sample short of a whole CPI.
     feedRange(oIngest, 5000, kCpi - kPacket);
-    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uStart)
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), nullptr, kCpi, uStart)
            == CpiStatus::NotYet);
 
     // The packet that completes it makes the window available.
     feed(oIngest, makeData(kRefId, 5000 + kCpi - kPacket, kPacket));
     feed(oIngest, makeData(kSurId, 5000 + kCpi - kPacket, kPacket));
-    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uStart)
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), nullptr, kCpi, uStart)
            == CpiStatus::Ready);
     assert(uStart == 5000);
 }
@@ -220,7 +220,7 @@ void testSequentialCpisOnTheHopLattice()
     for (;;) {
         uint64_t uStart = 0;
         const CpiStatus eStatus =
-            oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uStart);
+            oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), nullptr, kCpi, uStart);
         if (eStatus == CpiStatus::NotYet)
             break;
         assert(eStatus == CpiStatus::Ready);
@@ -258,7 +258,7 @@ void testAnchorUsesTheLaterChannel()
 
     std::vector<ComplexF> vcRef(kCpi), vcSur(kCpi);
     uint64_t uStart = 0;
-    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uStart)
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), nullptr, kCpi, uStart)
            == CpiStatus::Ready);
     assert(uStart == uSurBase);
     expectWindow(vcRef, uStart);
@@ -280,11 +280,11 @@ void testGapSkippedForCoverage()
     std::vector<ComplexF> vcRef(kCpi), vcSur(kCpi);
     uint64_t uStart = 0;
 
-    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uStart)
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), nullptr, kCpi, uStart)
            == CpiStatus::Skipped);
 
     // The next window is intact and must come through normally.
-    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uStart)
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), nullptr, kCpi, uStart)
            == CpiStatus::Ready);
     assert(uStart == uBase + kCpi);
     expectWindow(vcRef, uStart);
@@ -314,7 +314,7 @@ void testAllZeroSamplesWithFullCoverageIsReady()
 
     std::vector<ComplexF> vcRef(kCpi), vcSur(kCpi);
     uint64_t uStart = 0;
-    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uStart)
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), nullptr, kCpi, uStart)
            == CpiStatus::Ready);
     assert(uStart == 1000);
     for (uint64_t u = 0; u < kCpi; ++u)
@@ -336,9 +336,9 @@ void testBackwardsJumpReanchors()
     feedRange(oIngest, 100000, 2 * kCpi);
     std::vector<ComplexF> vcRef(kCpi), vcSur(kCpi);
     uint64_t uStart = 0;
-    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uStart) == CpiStatus::Ready);
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), nullptr, kCpi, uStart) == CpiStatus::Ready);
     assert(uStart == 100000);
-    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uStart) == CpiStatus::Ready);
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), nullptr, kCpi, uStart) == CpiStatus::Ready);
     assert(oIngest.stats().uReanchors == 0);
 
     // A packet slightly late (inside one buffer length) is still just a
@@ -350,7 +350,7 @@ void testBackwardsJumpReanchors()
     // the next CPI comes out at the new start with correct samples.
     feedRange(oIngest, 5000, kCpi + kPacket);
     assert(oIngest.stats().uReanchors >= 1);
-    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uStart) == CpiStatus::Ready);
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), nullptr, kCpi, uStart) == CpiStatus::Ready);
     assert(uStart == 5000);
     expectWindow(vcRef, 5000);
     expectWindow(vcSur, 5000);
@@ -393,7 +393,7 @@ void testOvertakenWindowIsSkipped()
     uint64_t uStart = 0;
 
     // The first attempt reports the loss rather than returning stale samples.
-    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uStart)
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), nullptr, kCpi, uStart)
            == CpiStatus::Skipped);
     assert(oIngest.stats().uCpisOvertaken > 0);
 
@@ -405,7 +405,7 @@ void testOvertakenWindowIsSkipped()
 
     for (;;) {
         const CpiStatus eStatus =
-            oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uStart);
+            oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), nullptr, kCpi, uStart);
         if (eStatus == CpiStatus::NotYet)
             break;
         if (eStatus == CpiStatus::Ready) {
@@ -442,7 +442,7 @@ void testOverlappingHop()
     for (;;) {
         uint64_t uStart = 0;
         const CpiStatus eStatus =
-            oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uStart);
+            oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), nullptr, kCpi, uStart);
         if (eStatus == CpiStatus::NotYet)
             break;
         assert(eStatus == CpiStatus::Ready);
@@ -466,18 +466,68 @@ void testRejectsBadArguments()
     uint64_t uStart = 0;
 
     // Wrong window length.
-    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi - 1, uStart)
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), nullptr, kCpi - 1, uStart)
            == CpiStatus::NotYet);
     // Null destinations.
-    assert(oIngest.tryExtractCpi(nullptr, vcSur.data(), kCpi, uStart)
+    assert(oIngest.tryExtractCpi(nullptr, vcSur.data(), nullptr, kCpi, uStart)
            == CpiStatus::NotYet);
-    assert(oIngest.tryExtractCpi(vcRef.data(), nullptr, kCpi, uStart)
+    assert(oIngest.tryExtractCpi(vcRef.data(), nullptr, nullptr, kCpi, uStart)
            == CpiStatus::NotYet);
 
     // None of that may have consumed the window.
-    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), kCpi, uStart)
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), nullptr, kCpi, uStart)
            == CpiStatus::Ready);
     assert(uStart == 500);
+}
+
+// A third channel: the window waits for all three, lands on the latest
+// first index, and every channel's samples are its own.
+void testThreeChannels()
+{
+    const uint32_t    kSur2Id   = 0x3000;
+    const char* const kSur2Name = "Sur2Rx";
+
+    ChannelIngestConfig oConfig = makeConfig();
+    oConfig.sSurveillance2Name = kSur2Name;
+    ChannelIngest oIngest(oConfig);
+    assert(oIngest.isValid());
+    assert(oIngest.channelCount() == 3);
+
+    feed(oIngest, makeContext(kRefId, kRefName));
+    feed(oIngest, makeContext(kSurId, kSurName));
+    assert(!oIngest.rolesResolved());              // the third is still owed
+    feed(oIngest, makeContext(kSur2Id, kSur2Name));
+    assert(oIngest.rolesResolved());
+    assert(oIngest.roleOf(kSur2Id) == ChannelRole::Surveillance2);
+
+    std::vector<ComplexF> vcRef(kCpi), vcSur(kCpi), vcSur2(kCpi);
+    uint64_t uStart = 0;
+
+    // Two channels complete, the third silent: nothing comes out.
+    const uint64_t uBase = 1234;
+    feedRange(oIngest, uBase, 2 * kCpi);
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), vcSur2.data(), kCpi, uStart)
+           == CpiStatus::NotYet);
+
+    // The third channel starts later, so the anchor moves to its first index.
+    const uint64_t uLate = uBase + 30;
+    for (uint64_t u = uLate; u < uBase + 2 * kCpi; u += kPacket)
+        feed(oIngest, makeData(kSur2Id, u, kPacket));
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), vcSur2.data(), kCpi, uStart)
+           == CpiStatus::Ready);
+    assert(uStart == uLate);
+    expectWindow(vcRef, uStart);
+    expectWindow(vcSur, uStart);
+    expectWindow(vcSur2, uStart);
+
+    // A null third destination is refused in a three-channel chain.
+    assert(oIngest.tryExtractCpi(vcRef.data(), vcSur.data(), nullptr, kCpi, uStart)
+           == CpiStatus::NotYet);
+
+    // The same name twice is refused.
+    oConfig.sSurveillance2Name = kSurName;
+    ChannelIngest oBad(oConfig);
+    assert(!oBad.isValid());
 }
 
 void testInvalidConfigRejected()
@@ -510,6 +560,7 @@ int main()
     testOvertakenWindowIsSkipped();
     testOverlappingHop();
     testRejectsBadArguments();
+    testThreeChannels();
     testInvalidConfigRejected();
 
     std::printf("test_cpi_extraction: all tests passed\n");

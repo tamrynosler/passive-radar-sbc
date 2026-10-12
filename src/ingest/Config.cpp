@@ -226,6 +226,8 @@ bool checkValues(const PbrConfig& oConfig)
 
     const struct { const char* pName; double dValue; } aPositive[] = {
         { "SAMPLE_RATE_Hz",       static_cast<double>(oConfig.uSampleRateHz) },
+        { "CARRIER_FREQ_Hz",      oConfig.dCarrierFreqHz },
+        { "ARRAY_SPACING_m",      oConfig.dArraySpacingM },
         { "VITA49_FULLSCALE",     oConfig.dFullScale },
         { "BUFFER_LENGTH_s",      oConfig.dBufferSeconds },
         { "CPI_LENGTH_s",         oConfig.dCpiSeconds },
@@ -262,6 +264,15 @@ bool checkValues(const PbrConfig& oConfig)
     if (oConfig.sReferenceName == oConfig.sSurveillanceName) {
         configMessage("config: reference and surveillance receiver names "
                              "are identical (%s)\n", oConfig.sReferenceName.c_str());
+        bOk = false;
+    }
+    if (oConfig.sSurveillance2Name.empty()) {
+        configMessage("config: SURVEILLANCE2_RECEIVER_NAME must be a receiver name or none\n");
+        bOk = false;
+    } else if (oConfig.sSurveillance2Name == oConfig.sReferenceName ||
+               oConfig.sSurveillance2Name == oConfig.sSurveillanceName) {
+        configMessage("config: SURVEILLANCE2_RECEIVER_NAME (%s) repeats another receiver name\n",
+                      oConfig.sSurveillance2Name.c_str());
         bOk = false;
     }
     if (oConfig.dCfarPfa <= 0.0 || oConfig.dCfarPfa >= 1.0) {
@@ -490,6 +501,7 @@ bool deriveWindows(PbrConfig& oConfig)
 
 bool validate(PbrConfig& oConfig)
 {
+    oConfig.bHaveSurveillance2 = (oConfig.sSurveillance2Name != "none");
     return checkValues(oConfig) && deriveWindows(oConfig);
 }
 
@@ -505,7 +517,7 @@ bool isKnownKey(const std::string& sKey)
 // exists only once per run.
 const char* const kRestartKeys[] = {
     "SAMPLE_RATE_Hz", "REFERENCE_RECEIVER_NAME", "SURVEILLANCE_RECEIVER_NAME",
-    "UDP_PORT", "CONTROL_PORT", "VITA49_FULLSCALE", "BUFFER_LENGTH_s",
+    "SURVEILLANCE2_RECEIVER_NAME", "UDP_PORT", "CONTROL_PORT", "VITA49_FULLSCALE", "BUFFER_LENGTH_s",
     "DSI_BACKEND", "ARD_WRITE_FILES", "ARD_STREAM", "ARD_STREAM_DEST",
 };
 
@@ -528,6 +540,11 @@ bool configFromKeyValues(const KeyValueMap& mValues, const char* pLabel, PbrConf
     getUInt64(mValues, "SAMPLE_RATE_Hz",             oConfig.uSampleRateHz,      bOk);
     getString(mValues, "REFERENCE_RECEIVER_NAME",    oConfig.sReferenceName,     bOk);
     getString(mValues, "SURVEILLANCE_RECEIVER_NAME", oConfig.sSurveillanceName,  bOk);
+    getString(mValues, "SURVEILLANCE2_RECEIVER_NAME", oConfig.sSurveillance2Name, bOk);
+    getDouble(mValues, "CARRIER_FREQ_Hz",        oConfig.dCarrierFreqHz,      bOk);
+    getDouble(mValues, "ARRAY_SPACING_m",        oConfig.dArraySpacingM,      bOk);
+    getDouble(mValues, "ARRAY_BASELINE_AZ_deg",  oConfig.dArrayBaselineAzDeg, bOk);
+    getDouble(mValues, "PHASE_CAL_deg",          oConfig.dPhaseCalDeg,        bOk);
 
     getPort(mValues, "UDP_PORT",     oConfig.uUdpPort,     bOk);
     getPort(mValues, "CONTROL_PORT", oConfig.uControlPort, bOk);   // 0 = off
@@ -697,6 +714,11 @@ std::string pbrConfigToText(const PbrConfig& oConfig)
         "SAMPLE_RATE_Hz = %llu\n"
         "REFERENCE_RECEIVER_NAME = %s\n"
         "SURVEILLANCE_RECEIVER_NAME = %s\n"
+        "SURVEILLANCE2_RECEIVER_NAME = %s\n"
+        "CARRIER_FREQ_Hz = %.10g\n"
+        "ARRAY_SPACING_m = %.10g\n"
+        "ARRAY_BASELINE_AZ_deg = %.10g\n"
+        "PHASE_CAL_deg = %.10g\n"
         "UDP_PORT = %u\n"
         "CONTROL_PORT = %u\n"
         "VITA49_FULLSCALE = %.10g\n"
@@ -737,6 +759,8 @@ std::string pbrConfigToText(const PbrConfig& oConfig)
         "CFAR_TRAIN_DOPPLER = %llu\n",
         (unsigned long long)oConfig.uSampleRateHz,
         oConfig.sReferenceName.c_str(), oConfig.sSurveillanceName.c_str(),
+        oConfig.sSurveillance2Name.c_str(), oConfig.dCarrierFreqHz, oConfig.dArraySpacingM,
+        oConfig.dArrayBaselineAzDeg, oConfig.dPhaseCalDeg,
         (unsigned)oConfig.uUdpPort, (unsigned)oConfig.uControlPort,
         oConfig.dFullScale, oConfig.dBufferSeconds, oConfig.dCpiSeconds, oConfig.dHopSeconds,
         (unsigned long long)oConfig.uRangeBins, (unsigned long long)oConfig.uClutterTaps,
@@ -930,6 +954,15 @@ void printPbrConfig(const PbrConfig& oConfig)
                 static_cast<unsigned long long>(oConfig.uSampleRateHz));
     std::printf("  reference          %s\n", oConfig.sReferenceName.c_str());
     std::printf("  surveillance       %s\n", oConfig.sSurveillanceName.c_str());
+    if (oConfig.bHaveSurveillance2) {
+        std::printf("  surveillance 2     %s\n", oConfig.sSurveillance2Name.c_str());
+        std::printf("  array              %.3f m apart, baseline at %.1f deg, carrier %.3f MHz, "
+                    "phase cal %.1f deg\n",
+                    oConfig.dArraySpacingM, oConfig.dArrayBaselineAzDeg,
+                    oConfig.dCarrierFreqHz / 1e6, oConfig.dPhaseCalDeg);
+    } else {
+        std::printf("  surveillance 2     none (two-channel chain)\n");
+    }
     std::printf("  udp port           %u\n", static_cast<unsigned>(oConfig.uUdpPort));
     std::printf("  fullscale          %g\n", oConfig.dFullScale);
     std::printf("  buffer             %.3f s  (%llu samples per channel)\n",

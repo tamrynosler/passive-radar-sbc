@@ -22,6 +22,11 @@ const char* const kValidConfig =
     "SAMPLE_RATE_Hz = 204800\n"
     "REFERENCE_RECEIVER_NAME = ArmasuisseRefRxClean\n"
     "SURVEILLANCE_RECEIVER_NAME = ArmasuisseSurRxClean\n"
+    "SURVEILLANCE2_RECEIVER_NAME = none\n"
+    "CARRIER_FREQ_Hz = 89e6\n"
+    "ARRAY_SPACING_m = 1.6842\n"
+    "ARRAY_BASELINE_AZ_deg = 35\n"
+    "PHASE_CAL_deg = 0\n"
     "\n"
     "UDP_PORT = 4991\n"
     "CONTROL_PORT = 4993\n"
@@ -378,6 +383,11 @@ void testWhitespaceAndCommentHandling()
         "SAMPLE_RATE_Hz=204800\n"                      // no spaces at all
         "  REFERENCE_RECEIVER_NAME   =   RefName   \n"  // padded everywhere
         "SURVEILLANCE_RECEIVER_NAME = SurName\n"
+        "SURVEILLANCE2_RECEIVER_NAME = none\n"
+        "CARRIER_FREQ_Hz = 89e6\n"
+        "ARRAY_SPACING_m = 1.6842\n"
+        "ARRAY_BASELINE_AZ_deg = 35\n"
+        "PHASE_CAL_deg = 0\n"
         "UDP_PORT = 4991\n"
     "CONTROL_PORT = 4993\n"
         "VITA49_FULLSCALE = 0.0022\n"
