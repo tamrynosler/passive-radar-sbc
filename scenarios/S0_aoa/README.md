@@ -59,6 +59,12 @@ recorded with `N_RANGE_BINS = 4` and `N_CLUTTER_TAPS = 4` (processing under
 0.1 s per CPI) and no datagram was lost; the capture holds the datagrams,
 not the processing, so any config replays it.
 
+On the Jetson (2026-10-12, GPU, clocks unpinned, all 88 CPIs, every
+canceller; live from FERS on the Mac with ECA-CD, 70 CPIs in real time):
+see PROGRESS.md 2026-10-12 and `results/L2_performance/S0_aoa/`. The
+three batched ECAs give an AoA RMS error of 0.4 deg; `directPhaseDeg` is
+-176.1 in every run.
+
 Measured on that capture, replayed on the Mac CPU (ECA-CD, Batches), 30
 CPIs: `directPhaseDeg` -176.1 on every CPI against -176.1 from the
 geometry; the strongest plot's bearing within 0.5 deg of `apparentBearingDeg`

@@ -16,9 +16,14 @@ for every CPI frame, nothing fancy". Decisions 2, 3, 5, 6, 7 of §2 taken as
 recommended; decision 4 deferred: the frame stays `PBRARD01` and the
 per-frame AoA travels in the status JSON, so the per-plot bearing is in
 `plots.csv` only, not drawn. The bearing is read over the 3 x 3 cells
-around the plot's peak (coherence needs more than one cell). Next: the
-Jetson (step 6 of §8: GPU memory, timing, FERS from the Mac), then §6.2
-and §7 as the author decides.
+around the plot's peak (coherence needs more than one cell). **2026-10-12: step 6 done on the
+Jetson** (PROGRESS 2026-10-12): live from FERS on the Mac over a direct
+cable, ECA-CD, 70 CPIs in real time at a median 114 ms for both channels,
+AoA RMS 0.34 deg; every canceller replayed on the GPU (unpinned), the
+three batched ECAs at 0.4 deg RMS; ECA-m peaks at 962 MB used of the
+board's 3963 MB with two sets of stages. Next: §6.2 and §7 as the author
+decides, and the §2.3 question raised by the results: the strongest plot
+is the residue when cancellation is weak.
 
 ## 1. What the third channel buys
 
