@@ -1,8 +1,30 @@
 %*********************************************************************
 %	RESULTS
 %*********************************************************************
-\chapter{Results}
+\chapter{Performance Tests and Results}
 \label{ch:results}
+
+% Test data, moved from Chapter 3 on 2026-10-13 (was the FERS description in
+% 3.3.1 and the scenarios table in 3.3.4). The text is verbatim and
+% commented out until this chapter has a section for it.
+% Test data is generated with FERS, a signal-level simulator for multistatic radar \citep{brooker2011}, which produces the reference and surveillance signals for a defined geometry of transmitter, receivers and targets. The illuminator waveform is not synthetic: each scenario transmits a cut of a real FM broadcast recorded at Malmesbury in 2012 at 88.2~MHz, so the simulated signals carry the time-varying bandwidth of real programme content. The scenarios are built up one change at a time from a baseline, S0, which contains a single aircraft and no clutter, so that a difference in results can be attributed to the one thing that changed. Later scenarios add a second surveillance channel, static clutter, a trajectory through zero Doppler, a target close to the direct signal, a weak target and a second target. FERS models point scatterers only and has no distributed clutter model, so clutter is represented by static point targets. Each scenario is streamed once from FERS and recorded as a capture file, and every subsequent test replays that capture, so that all runs of a scenario see identical input.
+
+% Rows from scenarios/README.md. Only scenarios that were built and run are
+% listed; S1 to S5 were planned and not built (2026-10-12).
+% \begin{table}[H]
+%     \centering
+%     \caption[TODO]{\todo{caption}}
+%     \label{tab:ch3.scenarios}
+%     \begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{2.6cm}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+%     \toprule
+%     \textbf{Scenario} & \textbf{Change from the previous} & \textbf{What it tests} \\
+%     \midrule
+%     S0\_clean      & Baseline: one target, no clutter, 180~s & \todo{} \\
+%     S0\_long       & S0 over the full 600~s waveform & \todo{} \\
+%     S0\_aoa        & S0\_long with a second surveillance antenna $\lambda/2$ away & \todo{} \\
+%     \bottomrule
+%     \end{tabularx}
+% \end{table}
 %---------------------------------------------------------------------
 
 %*********************************************************************

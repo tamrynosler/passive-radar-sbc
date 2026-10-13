@@ -1,14 +1,245 @@
 %*********************************************************************
-\chapter{Theoretical Design and Development}
-\label{ch:theory}
+\chapter{Design and Simulations}
+\label{ch:design}
 %*********************************************************************
+%   High-level design: requirements, the system and its stages, and the
+%   development approach with its verification. Implementation detail
+%   belongs in Chapter 4.
 %=====================================================================
-\section{Overview of Design}
+
+This chapter describes the overall design of the system. It details the various functional and performance requirements it had to meet, as well as certain constraints to the design. It then walks through the high level design of this passive radar processing system.
+Implementation detail, including specific GPU work, is left to Chapter~\ref{ch:implementation}.
 
 %=====================================================================
-\section{Matlab Simulation}
+\section{Requirements and Specifications}
+\label{sec:ch3.requirements}
+
+%---------------------------------------------------------------------
+\subsection{Functional Requirements}
+\label{subsec:ch3.requirements.functional}
+
+The system was required to take the reference and surveillance signals of an FM broadcast illuminator, cancel the direct-path interference, form a range-Doppler map and detect targets in it, all on a single-board computer and fast enough to keep pace with the incoming signal. Because the system also serves as a test bed for comparing DSI cancellation algorithms, further requirements were placed on how it is fed, controlled and observed. These are listed in Table~\ref{tab:ch3.functional}.
+
+\begin{table}[H]
+    \centering
+    \caption[TODO]{\todo{caption}}
+    \label{tab:ch3.functional}
+    \begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{1.2cm}>{\raggedright\arraybackslash}X}
+    \toprule
+    \textbf{ID} & \textbf{Requirement} \\
+    \midrule
+    FR1 & Receive two coherent channels as VITA 49.2 over UDP, from the USRP driver or the FERS simulator, with no change to the processing. \\
+    FR2 & Process a recorded capture as well as a live stream, through the same chain. \\
+    FR3 & Provide several DSI cancellation algorithms behind one interface, selectable from the configuration. \\
+    FR4 & Form a range-Doppler map per CPI, detect with CA-CFAR and group touching detections into plots. \\
+    FR5 & Stream maps and plots to any number of viewers on the network, shown in a web browser. \\
+    FR6 & Allow processing parameters to be changed while running, applied at a CPI boundary and logged. \\
+    FR7 & Keep running through missing or unprocessable input; never crash or exit on a timeout. \\
+    FR8 & Optionally estimate the angle of arrival of each plot from a second surveillance channel. \\
+    \bottomrule
+    \end{tabularx}
+\end{table}
+
+%---------------------------------------------------------------------
+\subsection{Performance Requirements}
+\label{subsec:ch3.requirements.performance}
+
+The most important performance requirement is that the chain runs in real time: each CPI must be processed before the next one has fully arrived, so the processing budget per CPI equals the CPI length itself. The system was required to support CPIs of roughly 1 to 4~s, a number determine by Craig Tong's previous work on FM Passive Radar \todo{cite Craig Tong}. 
+
+Moreover, it is not enough for the processing chain to meet the processing budget on average, as this risks the chain falling behind slowly and eventually crashing. The ideal case would be for the processing time for each CPI to be well within the CPI threshold; however, measures will be taken to ensure the code is resilient to exceptions or random spikes in the time taken to process a segment of data.
+
+Additionally, all the data held for one CPI, across every stage, must fit within the memory of the single-board computer. This includes the received data, as well as the memory structures and objects created during processing. The computer's "scratch space" so to speak.
+
+Finally, the detections must be good enough for a tracking algorithm to follow a target: at least one detection must fall on the true target in at least 98\% \todo{TBC} of CPIs, within a range and Doppler accuracy still to be set \todo{TBC}. False detections are not counted against this measure.
+% TODO (author): set the two TBC numbers or delete the sentence. A
+%       requirement the results cannot score is worse than none.
+
+%---------------------------------------------------------------------
+\subsection{Platform Constraints}
+\label{subsec:ch3.requirements.platform}
+
+The target platform (or chosen SBC) is the NVIDIA Jetson Nano Dev Kit (2019) \todo{cite the jetson docs}. 
+This 2019 system was chosen as a suitable upgrade from the previous Nvidia Tegra K1 board fitted to the current passive radar processing system in 2013 \todo{cite Craig Tong and the Tegra K1 docs}. Although there are newer Nvidia prcoessing boards available, they are becoming increasingly more expensive and the University happened to have a 2019 board on hand. This project is focused on proving that significant upgrades can be made to the system without having to plurge on the newest hardware.
+
+The table below \todo{reference table} shows the hardware specifications of the Nvidia Jetson Nano Dev Kit 2019.
+
+\todo{Table of specifications}
+
+Three properties of the board shaped the design. First, its 4~GB of RAM is shared between the CPU and the GPU, and the CUDA context alone was measured to occupy roughly 780~MB of it, so every buffer in the chain competes for the same limited memory. Second, the Maxwell GPU executes double-precision arithmetic at 1/32 of its single-precision rate \citep{nvidia2020cuda}, which makes FP64 on the GPU slower than on the CPU; all device-side processing is therefore FP32. This constraint is imposed by the hardware and is not really a design choice. This has a consequence for verification. The MATLAB reference computes in double precision (on a laptop's CPU), so a GPU result cannot be compared with it sample by sample without single-precision rounding appearing as error. 
+
+The CPU backend is therefore given a single-precision mode (Section~\ref{subsec:ch3.philosophy.cpugpu}), and the accuracy cost of FP32 itself is measured in Chapter~\ref{ch:results}. Third, the board's software stack is fixed at CUDA~10.2, whose compiler limits the code to C++14.
+% TODO: check the Jetson Nano specifications (CPU cores, GPU, RAM) against
+%       the Tegra X1 whitepaper or the Nano datasheet, and cite it.
+
+%---------------------------------------------------------------------
+\subsection{System Parameters}
+\label{subsec:ch3.requirements.parameters}
+
+The parameters common to the whole chain are listed in Table~\ref{tab:ch3.parameters}, for both the USRP configuration and the FERS scenarios. The two were chosen to give the same number of samples per CPI, so that every window length tuned and validated on the simulated data carries over unchanged to the hardware. 
+
+The USRP2 derives its sample rate by integer decimation of a 100~MHz clock, which rules out the 204\,800~Hz used by FERS; 200\,000~Hz is the nearest available rate, and lengthening the CPI to 1.024~s restores 204\,800 samples per CPI. The lower half of the table holds quantities derived from these settings rather than set directly... \todo{describe this in a more concise way}
+
+% Set values: config/prb.conf and config/fers.conf. Derived values computed
+% with c = 299792458 m/s; range bin = c/fs (include/pbr/ArdProcessor.hpp),
+% Doppler span = fs/128 after decimation.
+\begin{table}[H]
+    \centering
+    \caption[TODO]{\todo{caption}}
+    \label{tab:ch3.parameters}
+    \begin{tabular}{lrr}
+    \toprule
+    \textbf{Parameter} & \textbf{USRP} & \textbf{FERS} \\
+    \midrule
+    Carrier frequency          & 89~MHz            & 89~MHz \\
+    Sample rate                & 200\,000~Hz       & 204\,800~Hz \\
+    CPI length and hop         & 1.024~s           & 1~s \\
+    Range bins                 & 120               & 120 \\
+    Clutter taps               & 120               & 120 \\
+    Doppler decimation         & 128               & 128 \\
+    Displayed Doppler span     & $\pm$200~Hz       & $\pm$200~Hz \\
+    \midrule
+    \multicolumn{3}{l}{\textit{Derived}} \\
+    Samples per CPI                              & 204\,800          & 204\,800 \\
+    Range bin spacing ($c/f_s$)                  & 1.50~km           & 1.46~km \\
+    Maximum bistatic range                       & 179.9~km          & 175.7~km \\
+    Doppler resolution (1/CPI)                   & 0.977~Hz          & 1~Hz \\
+    Unambiguous Doppler span ($\pm f_s/256$)     & $\pm$781.25~Hz    & $\pm$800~Hz \\
+    Wavelength                                   & 3.37~m            & 3.37~m \\
+    \bottomrule
+    \end{tabular}
+\end{table}
 
 %=====================================================================
-\section{Golden Measure}
+\section{High Level Design}
+\label{sec:ch3.highlevel}
+\label{sec:ch3.architecture}
+
+The high level design of this system can be shown in figure ... \todo{reference figure}. 
+
+\todo{Describe the high level design}
+
+\begin{figure}[H]
+    \centering
+    \fbox{\parbox[c][7cm][c]{0.9\textwidth}{\centering
+        \todo{figure: system block diagram, hardware and software in one.
+        Antennas $\rightarrow$ USRP2 (BasicRX: RX-A reference, RX-B
+        surveillance) $\rightarrow$ switch $\rightarrow$ Jetson Nano running
+        \texttt{pbr\_run} (VITA 49 decode $\rightarrow$ circular buffers
+        $\rightarrow$ CPI extraction $\rightarrow$ DSI cancellation
+        $\rightarrow$ range-Doppler map $\rightarrow$ CA-CFAR $\rightarrow$
+        plot grouping $\rightarrow$ AoA) $\rightarrow$ ARD frames (UDP
+        multicast) $\rightarrow$ \texttt{ard\_view} $\rightarrow$ browser on
+        the laptop; FERS on the laptop in place of the radio;
+        \texttt{uhd\_to\_vita49} on the Nano; control path browser
+        $\rightarrow$ \texttt{ard\_view} $\rightarrow$ \texttt{pbr\_run}}}}
+    \caption[TODO]{\todo{caption}}
+    \label{fig:ch3.system}
+    \label{fig:ch3.hardware}
+    \label{fig:ch3.software}
+    \label{fig:ch3.chain}
+\end{figure}
+
+%---------------------------------------------------------------------
+\subsection{Hardware}
+\label{subsec:ch3.architecture.hardware}
+\label{sec:ch3.frontend}
+\label{sec:ch3.gui}
+
+The hardware is shown in Figure~\ref{fig:ch3.system}. Two antennas feed a USRP2 fitted with a BasicRX daughterboard, which digitises the reference and surveillance channels, tunes them to the FM carrier and sends complex baseband samples at 200\,000~Hz over Ethernet. The Jetson Nano receives the samples on the same switch, runs the processing chain and sends each range-Doppler frame back onto the network. A laptop on the switch displays the frames in a web browser. During testing the laptop also runs FERS, which takes the place of the antennas and the radio and sends the same stream. The USRP2 has two inputs, so the second surveillance channel used for angle of arrival is available only from FERS. \todo{check: third channel on hardware}
+
+%---------------------------------------------------------------------
+\subsection{Software}
+\label{subsec:ch3.architecture.software}
+\label{subsec:ch3.architecture.chain}
+\label{subsec:ch3.dataflow.faults}
+
+The software is three programs that communicate only over the network, as shown in Figure~\ref{fig:ch3.system}. The driver, \texttt{uhd\_to\_vita49}, reads the USRP2 and sends both channels as a VITA~49.2 stream over UDP multicast; in testing, FERS sends the same stream in its place. The processing chain, \texttt{pbr\_run}, decodes the packets into one circular buffer per channel, extracts one CPI at a time, and passes it through DSI cancellation, range-Doppler map formation, CA-CFAR detection and the grouping of touching detections into plots. With a second surveillance channel, that channel is cancelled and mapped in the same way, and the angle of arrival of each plot is estimated from the two maps. Each CPI produces one frame, holding the map, the detections and the plots, which is sent to a multicast group together with a status message. The viewer, \texttt{ard\_view}, keeps the newest frame and serves a web page that draws it in the browser. The page also sends parameter changes back to a control port on the chain, where they take effect at the next CPI boundary and are logged. A CPI that cannot be processed, or a stage that fails, produces a blank frame carrying the reason, and the run continues, as FR7 requires.
+
+%---------------------------------------------------------------------
+\subsection{DSI Cancellation}
+\label{subsec:ch3.stages.dsi}
+
+All DSI cancellation algorithms implement one interface, so that they can be exchanged on identical input for benchmarking. Each takes the reference and surveillance channels of one CPI and returns the cleaned surveillance signal with its statistics, including the suppression achieved. They share one signal model: the direct signal and the echoes from stationary objects are delayed copies of the reference, so cancellation finds the combination of delayed copies that best matches the surveillance signal and subtracts it, leaving the moving targets. The algorithms differ only in how the weights of that combination are estimated: over what stretch of signal, how often they are updated, in the time or the frequency domain, and by a direct solve or by iteration. Seven are provided, listed in Table~\ref{tab:ch3.dsi} with the parameters each one reads: ECA-m, a single solve over the whole CPI as in the MATLAB reference, and ECA-B, ECA-S, ECA-CD, CGLS, FBLMS and ECA-LD, described in Chapter~\ref{ch:review}. The algorithm is selected by name in the configuration. FBLMS adapts its weights continuously and carries state from one CPI to the next, so the interface includes a reset.
+
+% Rows from the DSI section of config/prb.conf (algorithm list and the
+% comments on each algorithm's keys).
+\begin{table}[H]
+    \centering
+    \caption[TODO]{\todo{caption}}
+    \label{tab:ch3.dsi}
+    \begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{1.9cm}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}p{5.2cm}}
+    \toprule
+    \textbf{Algorithm} & \textbf{Weight estimation} & \textbf{Own parameters} \\
+    \midrule
+    ECA-m  & One least-squares solve over the whole CPI & Clutter taps \\
+    ECA-B  & Independent weights per batch, estimated and applied over the same batch & Clutter taps, batch length, diagonal loading \\
+    ECA-S  & Weights estimated over a long window and updated at a shorter interval, so the windows overlap & Clutter taps, estimation window, update interval, diagonal loading \\
+    ECA-CD & Clutter projected out carrier by carrier in the frequency domain, per batch & Batch length, Doppler taps \\
+    CGLS   & Iterative least squares per batch, a fixed number of iterations, optionally started from the previous CPI's weights & Clutter taps, batch length, iterations, priming \\
+    FBLMS  & Adaptive frequency-domain block LMS, with weights carried across CPIs & Filter taps, step size, forgetting factor \\
+    ECA-LD & ECA-B's problem per batch, solved on a Toeplitz approximation of the Gram matrix by the Levinson recursion & Clutter taps, batch length, diagonal loading \\
+    \bottomrule
+    \end{tabularx}
+\end{table}
+
+%---------------------------------------------------------------------
+\subsection{Range-Doppler Map Formation}
+\label{subsec:ch3.stages.ard}
+
+The range-Doppler map is formed by correlating the cleaned surveillance signal against delayed copies of the reference, one delay for each of the 120 range bins. For each delay, the surveillance signal is multiplied by the conjugate of the delayed reference and the product is summed over consecutive blocks of 128 samples, which reduces the 204\,800 samples of a CPI to 1600 values per delay. A Fourier transform across those 1600 values gives the Doppler spectrum for that delay, over an unambiguous span of $\pm f_s/256$. Two methods of building the per-block correlations are provided, selected in the configuration: the direct method forms the lag product for every delay separately, and the batches method correlates each block with the reference by a short FFT, so that all delays come out of one transform. \todo{cite: batches method, Petri et al.\ 2011} The two give the same map and differ only in cost. Range is drawn on the horizontal axis and Doppler on the vertical, as in the published work the maps are compared with \citep{colone2016,schuepbach2020}.
+
+%---------------------------------------------------------------------
+\subsection{Detection and Plot Formation}
+\label{subsec:ch3.stages.detection}
+
+Targets are detected in the power map by cell-averaging CFAR \citep{finn1968}. For each cell under test, the background power is estimated as the mean of the training cells around it, excluding a band of guard cells next to the cell under test so that the target's own spread does not raise its threshold. The cell is declared a detection if its power exceeds the background estimate multiplied by $\alpha = N(P_{fa}^{-1/N} - 1)$, where $N$ is the number of training cells and $P_{fa}$ is the design probability of false alarm. The guard and training widths are set separately for range and for Doppler, so the same detector runs as a two-dimensional window or, with no range cells, as a one-dimensional window along Doppler only. The base configuration uses the one-dimensional form, with eight training cells and four guard cells on each side in Doppler ($N = 16$) and $P_{fa} = 10^{-5}$. The detector runs over the full unambiguous Doppler span, not only the part shown in the viewer.
+
+A target occupies several cells of the map: on a live run the mainlobe of a target was measured at three range bins either side of its peak, so CFAR typically reports one target as a cluster of adjacent detections. These are grouped into plots following Tong~\citep{tong2014}: detections that touch, in range, in Doppler or diagonally, form one region, and each region becomes one plot. The position of a plot is the centroid of its cells weighted by their linear power, a revision Tong suggested of the equal weighting he used, which places the plot between bins rather than on the bin grid. Each plot also keeps its peak cell, for use where the centroid of a large region would be misleading. The rule has no tuning parameter, and the MATLAB reference applies the same rule, so the two produce the same plots.
+
+%---------------------------------------------------------------------
+\subsection{Angle of Arrival}
+\label{subsec:ch3.stages.aoa}
+
+When a second surveillance channel is configured, the angle of arrival of each plot is estimated by interferometry between two surveillance antennas half a wavelength apart, 1.684~m at 89~MHz, on a baseline perpendicular to the surveillance direction. An echo arriving at angle $\theta$ from broadside reaches the two antennas with a phase difference $\Delta\phi = 2\pi (d/\lambda) \sin\theta$, which for $d = \lambda/2$ is unambiguous over $\pm 90^\circ$. The second channel passes through its own canceller and map former in the same CPI, while CFAR and grouping run on the first channel's map only, so the plots are the same with or without it. For each plot, the phase difference between the two complex maps is measured over the cells around the peak, with a coherence that marks the plot as likely noise when that phase is inconsistent. The feature is an extension of the chain and is taken no further in this project.
+
+%=====================================================================
+\section{Development Approach}
+\label{sec:ch3.philosophy}
+
+%---------------------------------------------------------------------
+\subsection{Incremental Development}
+\label{subsec:ch3.philosophy.incremental}
+
+The guiding principle of the development is to start simple, prove that it works, and then build on it. Each stage of the chain is to be run in isolation, from a recorded file, and pass a checkpoint before the next stage is begun, so that no stage is built on one that has not been proven. For the main processing chain this takes the form of a series of increments (Figure~\ref{fig:ch3.increments}): a plain reference implementation in MATLAB, first offline and then on a live stream; a C++ version on the CPU; a GPU version; and finally the real front-end. Each increment is checked against the one before it, so a difference points at the newest change. Within an increment, a feature begins as the simplest version that can be shown to work and is restructured or optimised only once it has been verified.
+
+\begin{figure}[H]
+    \centering
+    \fbox{\parbox[c][4cm][c]{0.9\textwidth}{\centering
+        \todo{figure: the increments of the main chain. MATLAB offline
+        $\rightarrow$ MATLAB streaming $\rightarrow$ C++ CPU $\rightarrow$ GPU
+        $\rightarrow$ USRP2 front-end, each checked against the previous}}}
+    \caption[TODO]{\todo{caption}}
+    \label{fig:ch3.increments}
+\end{figure}
+
+%---------------------------------------------------------------------
+\subsection{CPU First, Then GPU}
+\label{subsec:ch3.philosophy.cpugpu}
+
+Each processing stage has a CPU and a GPU implementation behind the same interface, and the backend is selected in the configuration. The CPU version of a stage is written and verified first; the GPU version is then written and verified against it. The CPU version is kept after the GPU version works, as the reference for the GPU output. Because the GPU computes in single precision, the CPU backend can also be run in single precision, so that a difference between the two backends indicates an error in the GPU implementation and not a precision effect. The cost of single precision itself is measured separately against the double-precision reference.
+
+%---------------------------------------------------------------------
+\subsection{Source-Agnostic Chain}
+\label{subsec:ch3.philosophy.source}
+
+The processing chain does not depend on where its samples come from: the FERS simulator, the USRP2 driver and a recorded capture all deliver the same VITA~49.2 stream, and the chain treats them identically. As a result, a stage that has been verified on simulated data runs unchanged on the hardware, and any recorded run can be replayed through the same code path as a live one.
+
+%---------------------------------------------------------------------
+\subsection{Verification}
+\label{subsec:ch3.verification}
+\label{subsec:ch3.verification.golden}
+
+Verification follows the increments. The MATLAB reference chain is the ground truth for the C++ implementation: it computes in double precision, and its detections are checked against the target's range and Doppler from the scenario geometry. Where possible a computation is also checked by an independent route to the same answer. The C++ implementation is checked against golden files: the output of the reference on a fixed input, written to disk, with one file per stage so that each stage is tested on its own and an error in one stage cannot appear as an error in the next. The reference and the implementation read their parameters from the same configuration file, so they cannot run with different settings. Correctness is tested on replays of recorded captures, which are repeatable; real-time behaviour can only be tested on a live stream from the simulator at the scenario's real rate. The test data, the tolerances and the scoring of detections against the truth are given with the results in Chapter~\ref{ch:results}.
+
 
 %*********************************************************************

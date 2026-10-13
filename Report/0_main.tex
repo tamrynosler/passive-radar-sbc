@@ -50,6 +50,7 @@
 \usepackage[bottom]{footmisc}         % Footnotes aligned to bottom
 \usepackage{tocloft}                  % TOC customisation
 \usepackage{import}                   % Import files/folders
+\PassOptionsToPackage{dvipsnames,table,xcdraw}{xcolor} % pdfpages loads xcolor first
 \usepackage{pdfpages}                 % Insert full PDFs
 \usepackage{calc}                     % Length arithmetic
 \usepackage{xspace}                   % Smarter spacing after macros
@@ -76,9 +77,11 @@
 %---------------------------------------------------------------------
 \usepackage{fix-cm}                  % Enable scalable font sizes
 \usepackage{color}                   % Basic colour support
-\usepackage[dvipsnames,table,xcdraw]{xcolor} % Extended colours
+\usepackage{xcolor}                  % Extended colours (options passed above pdfpages)
 % Visible placeholder for text still owed. Remove if todonotes is ever added.
 \newcommand{\todo}[1]{{\color{red}\textbf{[TODO]} #1}}
+% Grey planning notes for sections still being outlined.
+\newcommand{\note}[1]{{\color{gray}#1}}
 \usepackage{gensymb}                 % Generic symbols (e.g. °)
 \usepackage{ebgaramond}    % Use EB Garamond font
 
@@ -94,6 +97,8 @@
 \usepackage{caption}                 % Caption formatting
 \usepackage{tikz}                    % Create vector graphics
 \usepackage{mdframed}                % Framed text boxes
+\usepackage{algorithm}               % Floating algorithm environment
+\usepackage{algpseudocode}           % Pseudo-code (algorithmicx)
 
 %---------------------------------------------------------------------
 % TABLES
