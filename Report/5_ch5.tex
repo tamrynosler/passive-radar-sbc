@@ -1,17 +1,549 @@
 %*********************************************************************
-%	Validation
+%	IMPLEMENTATION
 %*********************************************************************
-\chapter{Verification/Validation of Implementation}
-\label{ch:experiments}
+\chapter{C/C++ and CUDA Implementation}
+\label{ch:implementation}
 %---------------------------------------------------------------------
-% This is where we describe how we verified that the implementation works from start to finish.
-% First, MatLab program was run and verified against expected target location.
-% This allowed us to create golden files.
-% Picture of MatLab run: CPI.
 
-% Brief note on how each stage of the processing piepline was verified independently. But the more important thing to show here is how we verified the final toolchain on the jetson. Ran short tests with FERS, short s0 scenario, verified that the target was tracked correctly.
-% Show verification for all DSI Cancellation algorithms. 
+%=====================================================================
+\section{Overview}
+\label{sec:ch4.overview}
 
-% This section should prove to the reader that our implementation was thoroughly tested for correctness, not performance.
+%---------------------------------------------------------------------
+\subsection{Toolchain and Build Workflow}
+\label{subsec:ch4.overview.toolchain}
 
+\begin{itemize}
+    \item \note{All authoring, analysis and display stay on the Mac as far as possible; the Nano runs headless (no desktop, editor or display), leaving its CPU, GPU and shared memory to the chain.}
+    \item \note{The Nano is a disposable target: \texttt{rsync --delete} makes the board an exact copy of the Mac, so it can be reflashed or replaced without losing anything.}
+    \item \note{A host-only build runs the CPU backend and every test on the Mac without CUDA: correctness is checked away from the board, which is needed only for GPU work and timing.}
+    \item \note{Standards: C++14 on host and device, fixed by nvcc in CUDA~10.2, the newest the Nano's L4T supports.}
+    \item \note{Compile flags that add value:}
+    \begin{itemize}
+        \item \note{\texttt{-gencode arch=compute\_53,code=sm\_53}: native code for the Maxwell GPU only, no PTX JIT at startup.}
+        \item \note{Release builds by default: all timing is measured on optimised code.}
+        \item \note{\texttt{-UNDEBUG} on test targets only: Release would turn every \texttt{assert} into a no-op (a suite once ``passed'' while checking nothing).}
+        \item \note{\texttt{-Wall -Wextra} on the host build.}
+        \item \note{\texttt{PBR\_WITH\_CUDA} and \texttt{PBR\_HAVE\_UHD}: CUDA and UHD code built only where the libraries exist, so one source tree builds on both machines.}
+        \item \note{AddressSanitizer and UndefinedBehaviorSanitizer runs on the ingest layer and circular buffer.}
+    \end{itemize}
+\end{itemize}
+% Sources: CLAUDE.md (toolchain, workflow); CMakeLists.txt lines 11-21, 51,
+% 83, 102; Makefile lines 16, 191, 204; PROGRESS 2026-09-16 (ASan, UBSan).
+
+\begin{figure}[H]
+    \centering
+    \fbox{\parbox[c][4cm][c]{0.9\textwidth}{\centering
+        \todo{figure: development workflow. Mac (edit, MATLAB, FERS, viewer)
+        $\rightarrow$ rsync $\rightarrow$ Nano (CMake, nvcc, run headless)
+        $\rightarrow$ results pulled back to the Mac}}}
+    \caption[TODO]{\todo{caption}}
+    \label{fig:ch4.workflow}
+\end{figure}
+
+%---------------------------------------------------------------------
+\subsection{Code Organisation}
+\label{subsec:ch4.overview.code}
+
+\begin{itemize}
+    \item \note{Annotated source tree (Figure~\ref{fig:ch4.tree}), laid out so a reader can navigate the repository from it.}
+    \item \note{Organised by pipeline stage, not by library: mirrors the chain, so each stage is built, tested and replaced on its own (Section~\ref{subsec:ch3.philosophy.incremental}).}
+    \item \note{Public headers carry no CUDA types: the GPU is hidden behind the same interface as the CPU.}
+    \item \note{No wrapper layer over cuFFT, cuBLAS or cuSOLVER: less code to verify, every library call visible where it is used.}
+\end{itemize}
+
+\begin{figure}[H]
+    \centering
+\begin{Verbatim}[frame=single,fontsize=\small]
+include/pbr/   public headers, flat (#include "pbr/<Name>.hpp")
+src/ingest/    VITA 49 decode, UDP, circular buffer, config,
+               capture/replay, CPI extraction
+src/dsi/       canceller interface; cpu/ and gpu/, one file per algorithm
+src/ard/       CAF, CFAR, plot grouping, bearing, frame format, stream;
+               cpu/ and gpu/
+src/gpu/       GpuCommon.cuh: helpers shared by every GPU stage
+src/display/   HTTP server and the viewer page
+src/app/       one executable per file: pbr_run, uhd_to_vita49,
+               ard_view, dsi_verify, ard_verify
+tests/  bench/  matlab/  config/  scenarios/  docs/
+\end{Verbatim}
+    \caption[TODO]{\todo{caption}}
+    \label{fig:ch4.tree}
+\end{figure}
+
+%---------------------------------------------------------------------
+\subsection{Coding Standards}
+\label{subsec:ch4.overview.standards}
+
+\begin{itemize}
+    \item \note{No exceptions: return codes, with checks that stay on in Release; a fault is reported with its location, which lets a failed stage become a blank frame (Section~\ref{subsec:ch3.dataflow.faults}).}
+    \item \note{Deliberately simple C++, no templates or metaprogramming: thesis-critical code fully understood by its author.}
+    \item \note{Host and device complex types share one layout and are converted only at the copy boundary.}
+\end{itemize}
+
+%=====================================================================
+\section{Ingest Layer}
+\label{sec:ch4.ingest}
+
+%---------------------------------------------------------------------
+\subsection{VITA 49 Decoder and UDP Receiver}
+\label{subsec:ch4.ingest.vita49}
+
+% Moved verbatim from Chapter 3 on 2026-10-13 (was 3.3.3 Source-Agnostic Chain).
+The chain reads the receiver name and the sample rate of each stream from its context packet and assigns the reference and surveillance roles from the configuration, so the roles are not fixed by the order in which the streams arrive.
+
+% Moved verbatim from Chapter 3 on 2026-10-13 (was 3.5.1 Sample Transport and Ingest). To be integrated with the notes below.
+Samples travel from the source to the processing chain as VITA~49.2 packets over UDP, the format in which FERS already streams its output. Each channel is a separate stream made up of two packet types. A data packet carries 342 complex samples as 16-bit integers, and the time of its first sample as UTC seconds plus picoseconds. A context packet, sent when the stream opens and then about once per second, carries the sample rate, the carrier frequency, the full-scale value used to convert the integers to physical units, and a text field naming the receiver. Because each packet is one UDP datagram, the network provides the framing and no synchronisation search is needed in the byte stream. UDP does not retransmit lost packets, so losses must be detected by the receiver.
+
+\begin{itemize}
+    \item \note{Legacy PXGF handler-registry pattern rejected: UDP already frames every packet, so sync-word search and resynchronisation have no purpose.}
+    \item \note{Single-threaded receive-then-process, justified by measurement: one CPI's processing time leaves about 272~KB undrained against an 8~MB socket buffer (3\%).}
+    \item \note{Decoder cross-checked against an independent MATLAB parser: all 14 fields across 3602 packets.}
+\end{itemize}
+% Sources: PROGRESS 2026-09-16, 2026-09-17.
+
+%---------------------------------------------------------------------
+\subsection{Circular Buffer}
+\label{subsec:ch4.ingest.buffer}
+
+% Moved verbatim from Chapter 3 on 2026-10-13 (was 3.5.1 Sample Transport and Ingest). To be integrated with the notes below.
+Samples are placed by time, not by order of arrival. Each channel's samples are held in its own circular buffer, which keeps the most recent stretch of the signal, two seconds in the base configuration, and overwrites the oldest samples as new ones arrive. The buffer is addressed by absolute sample index: every sample has a position on a single timeline shared by all channels, computed from its packet's timestamp with integer arithmetic, and a write states where its samples belong rather than appending them in arrival order. Packets that arrive out of order are written to the correct place without any reordering step, and a lost packet cannot shift the samples that follow it. The channels are aligned by construction, since a given index refers to the same instant in every buffer, so no synchronisation between channels is needed. A packet that arrives so late that its slot has already been overwritten is rejected rather than written into the wrong cycle of the buffer. Standard ring-buffer libraries implement first-in, first-out queues and do not offer writes at arbitrary positions inside a sliding window, with gaps detected, so the buffer was written for this project.
+
+\begin{itemize}
+    \item \note{Capacity not padded to a power of two: the modulo runs once per packet, not per sample, so it costs nothing measurable; padding would cost 28\% more memory and break parity with the MATLAB buffer.}
+    \item \note{Allocated once at startup and never resized: no allocation in the packet path.}
+\end{itemize}
+% Sources: docs/design_decisions.md sections 1.4, 2.
+
+\begin{figure}[H]
+    \centering
+    \fbox{\parbox[c][5cm][c]{0.9\textwidth}{\centering
+        \todo{figure: the circular buffer as a ring; a packet write split into
+        two copies at the wrap; a zero-filled gap; the per-slot validity flags}}}
+    \caption[TODO]{\todo{caption}}
+    \label{fig:ch4.buffer}
+\end{figure}
+
+\begin{algorithm}[H]
+    \caption[TODO]{\todo{caption}}
+    \label{alg:ch4.bufferwrite}
+    \begin{algorithmic}[1]
+        \State \todo{pseudo-code: \texttt{write(index, samples)}: late reject, zero-fill of a forward jump, slot computed once, two-span copy, validity flags set}
+    \end{algorithmic}
+\end{algorithm}
+
+%---------------------------------------------------------------------
+\subsection{CPI Extraction}
+\label{subsec:ch4.ingest.cpi}
+
+% Moved verbatim from Chapter 3 on 2026-10-13 (was 3.5.1 Sample Transport and Ingest). To be integrated with the notes below.
+A CPI is a fixed window on the shared timeline, and its start advances by one CPI hop each time a CPI is extracted. Because all channels share the timeline, one start index serves every channel. A CPI is ready for processing when every channel has received samples past the end of the window, none has yet overwritten its start, and at least 99\% of the window in every channel came from received packets. The last condition is judged from packets, not from sample values, so a quiet input whose samples are close to zero is still processed, while a gap left by lost packets is not. A window that falls below the threshold is skipped rather than processed in part, because a CPI with missing samples produces a map that looks like a valid frame with no targets. If the chain falls so far behind that a window has been overwritten before it is read, the start advances by whole hops, so CPI starts stay on a fixed grid of times and the number of hops skipped equals the number of CPIs lost.
+
+\begin{itemize}
+    \item \note{Absolute index in integer arithmetic, multiply before divide: sample-exact at any integer rate.}
+    \item \note{Each channel anchors its own first index: a shared anchor once silently dropped one channel.}
+\end{itemize}
+% Sources: PROGRESS 2026-09-16 (absoluteIndex); docs/design_decisions.md 1.1.
+
+\begin{algorithm}[H]
+    \caption[TODO]{\todo{caption}}
+    \label{alg:ch4.extract}
+    \begin{algorithmic}[1]
+        \State \todo{pseudo-code: \texttt{tryExtractCpi}: the three ready conditions, the validity count, the whole-hop advance}
+    \end{algorithmic}
+\end{algorithm}
+
+%=====================================================================
+\section{CPU and GPU Backends}
+\label{sec:ch4.backends}
+
+%---------------------------------------------------------------------
+\subsection{CUDA Functions}
+\label{subsec:ch4.backends.cuda}
+% which parts of the processing are offloaded to the GPU initially?
+% This allowed real-time processing.
+
+\begin{itemize}
+    \item \note{The split: heavy, regular work on the GPU (cancellation, CAF, CFAR); cheap or branchy work on the CPU (ingest, plot grouping, AoA, spectrum).}
+    \item \note{Device-coupled chain: the cleaned surveillance signal stays on the GPU between cancellation and the CAF, no 1.6~MB copy per CPI; opaque pointers keep CUDA types out of public headers.}
+    \item \note{Libraries by default: cuBLAS for the Gram matrices, cuSOLVER batched Cholesky for the per-batch ECA solves, cuFFT for the CAF and the frequency-domain cancellers.}
+    \item \note{Custom kernels where launch overhead dominates: FBLMS made 14\,400 small launches per CPI; one kernel with a shared-memory FFT took it from 364 to 36~ms.}
+    \item \note{FP32 as a constraint, managed: hierarchical summation limits accumulation error; the Gram by exact recurrence instead of \texttt{cherk} was both faster (ECA-B 153 to 56~ms) and closer to the FP64 golden files.}
+    \item \note{Deliberately different reference: the CPU uses a direct DFT, not an FFT, so it shares no algorithm with the cuFFT path it checks.}
+    \item \note{GPU warmed up before the clock starts: the first CUDA call costs 1--2~s of context creation.}
+\end{itemize}
+% Sources: PROGRESS 2026-10-07 (evening); docs/design_decisions.md 1d.6b,
+% 1d.13, 1e.2, 1e.3; CLAUDE.md "CUDA on this board".
+
+%---------------------------------------------------------------------
+\subsection{Memory Management}
+\label{subsec:ch4.backends.memory}
+
+\begin{itemize}
+    \item \note{Budget set by measurement: the CUDA context takes about 780~MB of the 4~GB; \texttt{cudaMemGetInfo} reported 234~MB free while a 2988~MB allocation succeeded; the real hazard is zram swap (an oversized allocation thrashes instead of failing). Hence a fixed policy ceiling on device allocation, not an out-of-memory test.}
+    \item \note{Every device buffer allocated when the chain is built, never per CPI; a rebuild releases the old stages first, since two sets would not fit.}
+    \item \note{The delayed-reference matrix is never formed: each Gram entry is computed directly, 115~KB instead of 197~MB.}
+\end{itemize}
+% Sources: docs/design_decisions.md 1d (Gram), 1d.10 (budget, 512 MB
+% ceiling); PROGRESS 2026-10-12 (two-channel peaks).
+
+\begin{table}[H]
+    \centering
+    \caption[TODO]{\todo{caption}}
+    \label{tab:ch4.memory}
+    \begin{tabular}{lr}
+    \toprule
+    \textbf{Configuration} & \textbf{Memory used (MB)} \\
+    \midrule
+    \todo{idle} & \todo{} \\
+    \todo{one surveillance channel} & \todo{} \\
+    \todo{two surveillance channels} & \todo{} \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+%=====================================================================
+\section{DSI Cancellers}
+\label{sec:ch4.dsi}
+
+%---------------------------------------------------------------------
+\subsection{ECA-m and ECA-B}
+\label{subsec:ch4.dsi.ecab}
+\todo{}
+
+%---------------------------------------------------------------------
+\subsection{ECA-S}
+\label{subsec:ch4.dsi.ecas}
+\todo{}
+
+%---------------------------------------------------------------------
+\subsection{ECA-CD}
+\label{subsec:ch4.dsi.ecacd}
+\todo{}
+
+%---------------------------------------------------------------------
+\subsection{CGLS}
+\label{subsec:ch4.dsi.cgls}
+\todo{}
+
+%---------------------------------------------------------------------
+\subsection{FBLMS}
+\label{subsec:ch4.dsi.fblms}
+\todo{}
+
+%---------------------------------------------------------------------
+\subsection{ECA-LD}
+\label{subsec:ch4.dsi.ecald}
+\todo{}
+
+%=====================================================================
+\section{Range-Doppler Map Formation}
+\label{sec:ch4.ard}
+
+\paragraph{Formulation}
+\begin{itemize}
+    \item \note{Lag product $\rightarrow$ integrate-and-dump over blocks of 128 $\rightarrow$ FFT across the 1600 block sums; refer to Chapter~\ref{ch:review} for the CAF and Section~\ref{subsec:ch3.stages.ard} for the parameters.}
+\end{itemize}
+
+\begin{algorithm}[H]
+    \caption[TODO]{\todo{caption}}
+    \label{alg:ch4.ard.direct}
+    \begin{algorithmic}[1]
+        \State \todo{pseudo-code: Direct: per delay, multiply by the delayed reference, sum each block, one FFT per delay}
+    \end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+    \caption[TODO]{\todo{caption}}
+    \label{alg:ch4.ard.batches}
+    \begin{algorithmic}[1]
+        \State \todo{pseudo-code: Batches: per block, pack the surveillance block and the reference tail into a length-$L$ circular correlation, all delays from one transform}
+    \end{algorithmic}
+\end{algorithm}
+
+\paragraph{Design decisions}
+\begin{itemize}
+    \item \note{Batches is exact, not an approximation: with $L \ge S + K - 1$ (256 for 128 and 120) the circular correlation equals the direct sum term for term, so the map is identical. $L$ is derived, never configured, since exposing it would only let a user break the exactness. The zero-padding is not a longer integration and adds no Doppler droop; the legacy \texttt{Batches\_ARD.m} overlapped its blocks and correlated without padding, a different algorithm with wrapped-lag contamination.}
+    \item \note{The two algorithms differ in exactly one stage: the Doppler transform, fftshift, power map and CFAR are shared, so a benchmark of Direct against Batches measures only the correlation step.}
+    \item \note{Stored in display orientation, range varying fastest; the complex-to-power kernel does the transpose and fftshift in the same pass, at no cost (Section~\ref{subsec:ch3.stages.ard}).}
+    \item \note{Device-coupled: the stage reads the canceller's device output directly (Section~\ref{subsec:ch4.backends.cuda}).}
+\end{itemize}
+
+\paragraph{CPU implementation}
+\begin{itemize}
+    \item \note{A direct DFT, not an FFT, on purpose: the Doppler length $1600 = 2^6 \cdot 5^2$ is not radix-2, and a reference sharing no algorithm with cuFFT fails differently from it. Seconds per CPI; that is the trade.}
+    \item \note{FP32 throughout, so a CPU-vs-GPU comparison measures the backend, not the arithmetic width; golden-map agreement moved from $3 \times 10^{-7}$ to $6.8 \times 10^{-7}$, still well inside $10^{-4}$.}
+    \item \note{The radix-2 FFT in ECA-CD deliberately not shared with the ARD: the two need different numerics.}
+\end{itemize}
+
+\paragraph{GPU implementation}
+\begin{itemize}
+    \item \note{Direct: lag-product kernel, then batched cuFFT over the 120 delays.}
+    \item \note{Batches: pack kernel, one batched short cuFFT per block, then the shared Doppler cuFFT.}
+\end{itemize}
+
+\begin{figure}[H]
+    \centering
+    \fbox{\parbox[c][5cm][c]{0.9\textwidth}{\centering
+        \todo{figure: data layout of one block correlation (surveillance block,
+        wrapped reference tail, zero padding), showing why the $K-1$ wrapped
+        samples make the result exact}}}
+    \caption[TODO]{\todo{caption}}
+    \label{fig:ch4.batches}
+\end{figure}
+
+\paragraph{Parameters}
+\begin{itemize}
+    \item \note{\texttt{N\_RANGE\_BINS}, \texttt{DOPPLER\_DECIMATION}, \texttt{ARD\_ALGORITHM}. Nothing else: Batches adds no parameter.}
+\end{itemize}
+
+\paragraph{Verification}
+\begin{itemize}
+    \item \note{Golden-map agreement, all four combinations (Direct/Batches $\times$ CPU/GPU): $3.2 \times 10^{-7}$ to $6.8 \times 10^{-7}$.}
+    \item \note{Batches vs Direct $3.1 \times 10^{-7}$ (CPU), $3.4 \times 10^{-7}$ (GPU); identical peaks and detection counts on every CPI of the replay.}
+    \item \note{Three range-bin counts exercise the power-of-two boundary of the transform length.}
+    \item \note{The physical check the golden file could not give: ECA-B's Doppler ambiguities land exactly on the $1/T_B = 40$~Hz comb, confirming the Doppler axis and the coherence of the two stages at once.}
+\end{itemize}
+% Sources: docs/design_decisions.md 1e.1-1e.3, 1e.6, 1e.8, 1e.9;
+% PROGRESS 2026-09-22.
+
+\begin{table}[H]
+    \centering
+    \caption[TODO]{\todo{caption}}
+    \label{tab:ch4.ard}
+    \begin{tabular}{lr}
+    \toprule
+    \textbf{Algorithm} & \textbf{Stage time per CPI (ms)} \\
+    \midrule
+    Direct  & \todo{} \\
+    Batches & \todo{} \\
+    \bottomrule
+    \end{tabular}
+\end{table}
+
+%=====================================================================
+\section{CFAR Detection and Plot Grouping}
+\label{sec:ch4.cfar}
+
+\paragraph{Formulation}
+\begin{itemize}
+    \item \note{CA-CFAR with $\alpha = N(P_{fa}^{-1/N} - 1)$, guard and training half-widths per axis (Section~\ref{subsec:ch3.stages.detection}).}
+\end{itemize}
+
+\begin{algorithm}[H]
+    \caption[TODO]{\todo{caption}}
+    \label{alg:ch4.cfar}
+    \begin{algorithmic}[1]
+        \State \todo{pseudo-code: 2-D CA-CFAR over the power map}
+    \end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+    \caption[TODO]{\todo{caption}}
+    \label{alg:ch4.group}
+    \begin{algorithmic}[1]
+        \State \todo{pseudo-code: grouping touching detections into plots}
+    \end{algorithmic}
+\end{algorithm}
+
+\paragraph{Design decisions}
+\begin{itemize}
+    \item \note{Edges match MATLAB exactly: out-of-map neighbours count as zero, as \texttt{conv2(..., 'same')} does, so border cells under-estimate the background. Not corrected silently, because a golden comparison against a quietly improved reference proves nothing; the number of border detections is reported with every run instead.}
+    \item \note{The window is separable: the 2-D sum is built from running sums along Doppler, then across range, so a 2-D window costs about the same as a 1-D one.}
+    \item \note{Detections over the full Doppler span, not the displayed $\pm 200$~Hz; the viewer's span is display only.}
+    \item \note{Grouping runs on the host after either backend, deliberately outside the ARD timer. No plot can be dropped: the plot list holds one slot per detection.}
+    \item \note{Power-weighted centroid plus the peak cell per plot (Section~\ref{subsec:ch3.stages.detection}).}
+\end{itemize}
+
+\paragraph{CPU implementation}
+\begin{itemize}
+    \item \note{Direct window sums in FP32, the same arithmetic as the GPU.}
+\end{itemize}
+
+\paragraph{GPU implementation}
+\begin{itemize}
+    \item \note{One kernel per map; detections appended with \texttt{atomicAdd}, so the order of the list varies run to run while the set is identical. Byte comparison of detection files is therefore not a valid regression test; comparison is by set and by margin (Section~\ref{subsec:ch3.verification.golden}).}
+\end{itemize}
+
+\paragraph{Parameters}
+\begin{itemize}
+    \item \note{\texttt{CFAR\_PFA}, \texttt{CFAR\_GUARD\_RANGE}, \texttt{CFAR\_GUARD\_DOPPLER}, \texttt{CFAR\_TRAIN\_RANGE}, \texttt{CFAR\_TRAIN\_DOPPLER}. Grouping has no parameter.}
+\end{itemize}
+
+\paragraph{Verification}
+\begin{itemize}
+    \item \note{CFAR tested in isolation by feeding it MATLAB's golden map, so an error in map formation cannot appear as a detection error; detections compared by set and margin against the golden detections.}
+    \item \note{Grouping compared with \texttt{group\_detections.m} on the same detection lists.}
+    \item \note{Caveat to state with the results: the CA-CFAR factor assumes independent, exponentially distributed noise, which a post-cancellation map does not have, so the achieved false-alarm rate will not equal the configured $P_{fa}$.}
+\end{itemize}
+% Sources: docs/design_decisions.md 1e.4, 1e.5, 1e.7, 1d.13; PROGRESS
+% 2026-09-21 (later), 2026-10-06 (evening).
+
+%=====================================================================
+\section{Angle of Arrival}
+\label{sec:ch4.aoa}
+
+\paragraph{Formulation}
+\begin{itemize}
+    \item \note{The two-element interferometer of Section~\ref{subsec:ch3.stages.aoa}: per plot, $z = \sum M_2 \overline{M_1}$ over the cells around the peak; $\Delta\phi = \arg z + \phi_{cal}$; coherence $|z| / \sqrt{\sum|M_1|^2 \sum|M_2|^2}$; $\theta = \arcsin(\Delta\phi\,\lambda / 2\pi d)$; bearing $=$ baseline azimuth $- 90^\circ + \theta$.}
+\end{itemize}
+
+\begin{algorithm}[H]
+    \caption[TODO]{\todo{caption}}
+    \label{alg:ch4.bearing}
+    \begin{algorithmic}[1]
+        \State \todo{pseudo-code: bearing per plot}
+    \end{algorithmic}
+\end{algorithm}
+
+\paragraph{Design decisions}
+\begin{itemize}
+    \item \note{Two instances, no interface change: the second channel gets its own canceller and map former built from the same parameters, so every canceller works unchanged on channel 2 and the comparison between them stays intact.}
+    \item \note{Channel 2 after channel 1, in the same single-threaded loop, timed separately. No CUDA streams or second thread: the budget does not call for them and the comparison is clearer without them.}
+    \item \note{CFAR on channel 1 only: channel 2's map is read only at the plots' cells, so the plots and every existing result stay comparable with or without the third channel.}
+    \item \note{The phase is measured on the complex maps, not the raw samples: each plot's bearing is taken after range and Doppler processing has separated it from the direct signal and other targets.}
+    \item \note{Noise rejection comes free: a target's range and Doppler sidelobes share its phase relation and get its bearing; noise plots get a low coherence.}
+    \item \note{The sign convention is settled in one place: the direct-path phase $\arg \sum s_2 \overline{s_1}$ over the raw CPI is compared with the known transmitter bearing from the geometry before anything downstream exists. It stays in the telemetry as the phase-calibration check for a real array.}
+    \item \note{Frame format unchanged: the AoA travels in the status JSON rather than by bumping the frame format, keeping old frames and golden files readable.}
+    \item \note{The array keys are live-changeable (spacing, baseline azimuth, phase calibration): the AoA step reads them per CPI, nothing is rebuilt.}
+    \item \note{Three ring buffers in an array indexed by role, in place of two named members: the one rewrite in the feature, in central ring-buffer code.}
+\end{itemize}
+
+\paragraph{Implementation}
+\begin{itemize}
+    \item \note{Host arithmetic over the $3 \times 3$ cells around each plot's peak, from channel 2's map copied to the host each CPI. No GPU code.}
+    \item \note{\texttt{Plot} carries bearing, phase and coherence; \texttt{plots.csv} gains the three columns.}
+\end{itemize}
+
+\paragraph{Parameters}
+\begin{itemize}
+    \item \note{\texttt{SURVEILLANCE2\_RECEIVER\_NAME} (\texttt{none} for two channels, restart-only), \texttt{CARRIER\_FREQ\_Hz}, \texttt{ARRAY\_SPACING\_m}, \texttt{ARRAY\_BASELINE\_AZ\_deg}, \texttt{PHASE\_CAL\_deg}.}
+\end{itemize}
+
+\paragraph{Verification}
+\begin{itemize}
+    \item \note{Direct-path phase against the geometry, sign included, on the S0\_aoa scenario.}
+    \item \note{\texttt{fers\_truth.m} extended with the true and apparent bearing per CPI; \texttt{score\_run.m} scores the strongest plot's bearing against it.}
+    \item \note{Coherence of the target's plot against that of noise plots, as the discriminator check.}
+\end{itemize}
+% Sources: docs/third-channel-aoa-design.md sections 1, 2, 4; PROGRESS
+% 2026-10-11 (decisions as taken: frame format unchanged, AoA in the JSON).
+
+%=====================================================================
+\section{USRP Driver}
+\label{sec:ch4.driver}
+
+% Moved verbatim from Chapter 3 on 2026-10-13 (was 3.8 Front-end Interface and Viewer). To be integrated with the notes below.
+The radar front-end is the same as that of the earlier UCT system \citep{tong2014}: a USRP2 with a BasicRX daughterboard, digitising the reference and surveillance channels. \todo{check citation: tong2014 or tong2015} Only the processing computer is replaced, by the Jetson Nano. The earlier system read the USRP2 through a capture program that converted its samples to PXGF, a proprietary format whose library is available only as a prebuilt x86 archive. Rather than carry that library onto an ARM board, a new driver was designed that reads both channels from the USRP2 through the vendor's UHD library and streams them as VITA~49.2 in exactly the format FERS produces. The processing chain therefore cannot tell the driver from the simulator, and nothing downstream of the network socket changes when the hardware replaces FERS. The driver is divided so that only one small part depends on UHD. A sample source, either the USRP2 or a synthetic source that generates a tone in noise, feeds a packet writer and a UDP sender that do not depend on the radio. Everything except the UHD part can therefore be written and tested, and run end to end into the processing chain, before the radio is connected.
+
+% The next paragraph reports a test result (driver verified without antennas);
+% it may belong in the results chapter.
+The interface was verified with the USRP2 but without antennas. The driver delivered samples at exactly 200\,000~Hz with no overflows and no gaps in the stream, and the full chain ran in real time on the Jetson Nano from the radio's output. With nothing connected to its inputs, the radio digitises only its own noise, so this test covers the transport and the processing but not the radar function itself. Connecting antennas was not pursued further in this project, because of the time available and the work involved in installing antennas on the roof. The remaining steps are to connect the antennas, to confirm the orientation of the spectrum against a known FM station, and to detect a first aircraft.
+
+\begin{itemize}
+    \item \note{Reads both channels from the USRP2 through UHD and streams them as VITA 49.2 in FERS's profile, byte-identical to the simulator's packets, so the chain is unchanged downstream of the socket (Section~\ref{sec:ch3.frontend}).}
+    \item \note{The UHD side (device setup order, subdevice mapping of RX-A to the reference and RX-B to the surveillance, timed start, 200~kHz at 89~MHz defaults) was adapted from Craig Tong's \texttt{UHDToPXGF} capture program \citep{tong2014}. Its PXGF output, TCP server, Boost dependency and three-thread ring buffer were dropped; the output stage was replaced by the VITA 49 writer and a UDP sender.}
+    \item \note{Timestamps come from an integer sample counter anchored to the radio's clock, the exact inverse of the ingest's index arithmetic, so any radio discontinuity becomes a correctly placed gap rather than a time shift.}
+    \item \note{Single-threaded by measurement: at 200~kS/s there is no need for a buffer, which keeps the driver outside the central code.}
+    \item \note{A synthetic source stands in for the radio, so the driver was tested end to end into the chain before the hardware was connected.}
+\end{itemize}
+% Sources: docs/UHD_VITA49_Driver_design.md sections 1, 3, 5, 6.2, 12;
+% PROGRESS 2026-09-22, 2026-09-25.
+
+%=====================================================================
+\section{Viewer and Live Parameters}
+\label{sec:ch4.viewer}
+
+% Moved verbatim from Chapter 3 on 2026-10-13 (was 3.5.2 Output, Control and Faults). To be integrated with the notes below.
+Each processed CPI produces one frame, holding the range-Doppler map, the CFAR detections and the plots, together with a header describing the axes and the processing that produced them. The frame is serialised once into a fixed binary format, the same format used when frames are written to disk, so a frame received from the network is identical to one read from a file and both are read by the same parser. The serialised frame, about 1.5~MB, is divided into UDP datagrams and sent to a multicast group, followed by a short status message in JSON that carries the timing and statistics of that CPI. Any number of viewers can join the group, and the chain does not know how many are listening. Frames are written to disk only when a configuration flag asks for it, for test and verification runs, so in normal operation the chain can run indefinitely without filling the board's storage.
+
+The processing parameters can be changed while the chain runs. A change arrives from the viewer on an HTTP control port, is validated as a whole against the same rules as the configuration file, and takes effect at the next CPI boundary, where the affected stages are rebuilt while the samples already in the circular buffers are kept. Every accepted change is logged with the CPI at which it took effect, so a run can be reproduced from its starting configuration and the log; this is what allows the cancellation algorithms to be exchanged and compared on the same live signal. A CPI whose input cannot be processed, or a stage that fails on a CPI, produces a blank frame carrying the reason, and the run continues with the next CPI, as FR7 requires.
+
+% Moved verbatim from Chapter 3 on 2026-10-13 (was 3.8 Front-end Interface and Viewer). To be integrated with the notes below.
+The graphical user interface is a web page, served by the viewer and drawn entirely in the browser, so it needs no GUI toolkit on the Jetson Nano and can be opened on any machine on the network (Figure~\ref{fig:ch3.gui}). It shows the range-Doppler map of the newest frame with its plots and those of recent frames, a max-hold map, and two spectrograms that add one row per CPI, one of the raw signal and one of the processed map. A control panel beside the displays sets the cancellation algorithm, its parameters and the CFAR settings, sends a change to the chain with Apply, and shows the reason for any change the chain refuses.
+
+% Placeholder image: headless screenshot from results/bandwidth/viewer.png
+% (2026-10-08, CPU run on the Mac, S0_long). Replace with a fresh screenshot.
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{figs/ch3/viewer.png}
+    \caption[TODO]{\todo{caption}}
+    \label{fig:ch3.gui}
+\end{figure}
+
+\paragraph{The viewer}
+\begin{itemize}
+    \item \note{A sidecar with zero risk to the timed path: the chain never knows the viewer exists, so it cannot add latency to a CPI or crash the chain.}
+    \item \note{Zero compute on the Jetson for display: the viewer validates and relays bytes; dB conversion, colour mapping and drawing happen in the browser's JavaScript, where the cycles are free.}
+    \item \note{Two threads and one mutex: the receiver thread reassembles frames and swaps the newest complete one into a published slot; the HTTP thread copies it out, so a slow browser never blocks the receiver. Two fixed buffers, no per-datagram allocation.}
+    \item \note{A minimal GET/POST HTTP server on POSIX sockets, about 150 lines with no dependency, in place of a web framework.}
+    \item \note{The same binary runs on the board or on the Mac; several viewers may join the multicast group at once.}
+    \item \note{Offline development: the viewer can serve one recorded frame, and a local replayer feeds recorded frames plus a stub control port, so the page is developed and tested on the Mac without the board. Automated page checks driven from headless Chrome.}
+\end{itemize}
+
+\paragraph{Live parameters}
+\begin{itemize}
+    \item \note{Validate the whole candidate set with the file loader's own rules, then swap: nothing is half-applied, and a refusal returns the loader's message to the page.}
+    \item \note{Every change rebuilds the affected stages through their existing factories rather than poking values into them: no setters on central code, one mechanism to reason about. A few hundred milliseconds once per change, visible as a single bump in the lag telemetry.}
+    \item \note{The viewer learns the chain's control address from the stream itself (sender address plus the port in the status JSON), so any viewer that sees frames can change the chain with no configuration.}
+    \item \note{The page's field set is loaded from the chain, not hard-coded, and reloads the moment a change takes effect; hover explanations are drawn from the configuration file's own comments, so page and config cannot drift apart.}
+\end{itemize}
+% Sources: docs/ard-viewer.md "Why a sidecar"; docs/ard-stream-design.md 6;
+% docs/live-parameters.md rules 3-4; src/app/ard_view.cpp header;
+% PROGRESS 2026-09-29, 2026-10-01.
+
+%=====================================================================
+\section{Full System Audit and Performance Improvement}
+\label{sec:ch4.audit}
+% This is when we did a huge clean up of the processing chain, which lead to huge performance improvements.
+
+\paragraph{The audit}
+\begin{itemize}
+    \item \note{One pass over every area in order (build, config, VITA 49, ingest, DSI, ARD and CFAR, tests and MATLAB, apps), with a written audit of each area before any edit, ranked trivial / low / needs-approval.}
+    \item \note{Refactor, not redesign. Behaviour-preserving by rule: identical numerical output against the goldens, CLI, config semantics and wire formats. Any change that could alter a result is proposed first; bugs found are reported, never fixed silently.}
+    \item \note{A gate after every area: CPU output byte-identical for all cancellers in FP64 and FP32 on the Mac; clean build, full test suite and identical GPU output on the Nano. Committed one area at a time.}
+    \item \note{Delete, simplify, unify; inline single-use helpers; no new abstractions. The chain's 740-line main split into named steps.}
+\end{itemize}
+
+\paragraph{The speed work}
+\begin{itemize}
+    \item \note{Measure first, kernel by kernel (nvprof, clocks pinned): the earlier review had only estimates, and two of them were wrong.}
+    \item \note{One change per item, each in its own git worktree with its own build directory on the board, so several could be built and tested at once.}
+    \item \note{Verify before merge: the golden file for the algorithm and for every other algorithm sharing a changed kernel, the CPU twin in FP32, the full test suite, bit-identical repeated runs. A change that altered a number beyond rounding was not merged; where the summation order changed, the rounding difference was recorded.}
+    \item \note{Merge, then measure again with the board to itself; only the after-table is cited.}
+    \item \note{The changes themselves (FBLMS fused kernel, ECA Gram recurrence, CGLS tiling, separable CFAR, ECA-LD Levinson, Batches default) belong to their algorithm's section; this section records the method, and Table~\ref{tab:ch4.speed} lists the items with a cross-reference each.}
+\end{itemize}
+% Sources: PLAN.md cleanup rules and procedure; PROGRESS 2026-10-06 (later),
+% 2026-10-07 (evening); results/performance_improvements/README.md.
+
+\begin{figure}[H]
+    \centering
+    \fbox{\parbox[c][4cm][c]{0.9\textwidth}{\centering
+        \todo{figure: the measure $\rightarrow$ change $\rightarrow$ verify
+        $\rightarrow$ merge $\rightarrow$ measure loop}}}
+    \caption[TODO]{\todo{caption}}
+    \label{fig:ch4.speedloop}
+\end{figure}
+
+\begin{table}[H]
+    \centering
+    \caption[TODO]{\todo{caption}}
+    \label{tab:ch4.speed}
+    \begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{3cm}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}p{2.6cm}}
+    \toprule
+    \textbf{Item} & \textbf{Change} & \textbf{Section} \\
+    \midrule
+    FBLMS   & Fused single-kernel block loop with a shared-memory FFT & \todo{ref} \\
+    ECA Gram & Built by exact shift recurrence instead of \texttt{cherk} & \todo{ref} \\
+    CGLS    & Tiled convolve, segmented adjoint & \todo{ref} \\
+    CFAR    & Separable 2-D window & Section~\ref{sec:ch4.cfar} \\
+    ECA-LD  & Levinson step one thread per batch & \todo{ref} \\
+    ECA-CD  & Projection kernel loads coalesced & \todo{ref} \\
+    ARD     & Batches as the default algorithm & Section~\ref{sec:ch4.ard} \\
+    \bottomrule
+    \end{tabularx}
+\end{table}
+
+%*********************************************************************
+% End of Implementation
 %*********************************************************************
