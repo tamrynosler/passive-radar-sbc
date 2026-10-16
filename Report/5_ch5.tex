@@ -1,7 +1,7 @@
 %*********************************************************************
 %	IMPLEMENTATION
 %*********************************************************************
-\chapter{C/C++ and CUDA Implementation}
+\chapter{Implementation}
 \label{ch:implementation}
 %---------------------------------------------------------------------
 
@@ -13,44 +13,42 @@
 \subsection{Toolchain and Build Workflow}
 \label{subsec:ch4.overview.toolchain}
 
+The toolchain used in this repository is C++14 and nvcc 10.2 for all central code. Additional testing and plotting scripts are written in bash, Python or MatLab.
+All writing of code and preliminary testing was done on the author's laptop, contained within a GitHub repository. This allowed the jetson to run headless, in order to save compute resources. A clone of the repository lived on the jetson and was kept up to date either view git pull or `-rsync`. 
+
+\subsubsection{Compile flags used}
+
 \begin{itemize}
-    \item \note{All authoring, analysis and display stay on the Mac as far as possible; the Nano runs headless (no desktop, editor or display), leaving its CPU, GPU and shared memory to the chain.}
-    \item \note{The Nano is a disposable target: \texttt{rsync --delete} makes the board an exact copy of the Mac, so it can be reflashed or replaced without losing anything.}
-    \item \note{A host-only build runs the CPU backend and every test on the Mac without CUDA: correctness is checked away from the board, which is needed only for GPU work and timing.}
-    \item \note{Standards: C++14 on host and device, fixed by nvcc in CUDA~10.2, the newest the Nano's L4T supports.}
-    \item \note{Compile flags that add value:}
-    \begin{itemize}
-        \item \note{\texttt{-gencode arch=compute\_53,code=sm\_53}: native code for the Maxwell GPU only, no PTX JIT at startup.}
-        \item \note{Release builds by default: all timing is measured on optimised code.}
-        \item \note{\texttt{-UNDEBUG} on test targets only: Release would turn every \texttt{assert} into a no-op (a suite once ``passed'' while checking nothing).}
-        \item \note{\texttt{-Wall -Wextra} on the host build.}
-        \item \note{\texttt{PBR\_WITH\_CUDA} and \texttt{PBR\_HAVE\_UHD}: CUDA and UHD code built only where the libraries exist, so one source tree builds on both machines.}
-        \item \note{AddressSanitizer and UndefinedBehaviorSanitizer runs on the ingest layer and circular buffer.}
-    \end{itemize}
+        \item \texttt{-gencode arch=compute\_53,code=sm\_53}: native code for the Maxwell GPU only, no PTX JIT at startup.
+        \item Release builds by default: all timing is measured on optimised code.
+        \item \texttt{-UNDEBUG} on test targets only: Release would turn every \texttt{assert} into a no-op (a suite once ``passed'' while checking nothing).
+        \item \texttt{-Wall -Wextra} on the host build.
+        \item \texttt{PBR\_WITH\_CUDA} and \texttt{PBR\_HAVE\_UHD}: CUDA and UHD code built only where the libraries exist, so one source tree builds on both machines.
+        \item AddressSanitizer and UndefinedBehaviorSanitizer runs on the ingest layer and circular buffer.
 \end{itemize}
 % Sources: CLAUDE.md (toolchain, workflow); CMakeLists.txt lines 11-21, 51,
 % 83, 102; Makefile lines 16, 191, 204; PROGRESS 2026-09-16 (ASan, UBSan).
 
-\begin{figure}[H]
-    \centering
-    \fbox{\parbox[c][4cm][c]{0.9\textwidth}{\centering
-        \todo{figure: development workflow. Mac (edit, MATLAB, FERS, viewer)
-        $\rightarrow$ rsync $\rightarrow$ Nano (CMake, nvcc, run headless)
-        $\rightarrow$ results pulled back to the Mac}}}
-    \caption[TODO]{\todo{caption}}
-    \label{fig:ch4.workflow}
-\end{figure}
+% \begin{figure}[H]
+%     \centering
+%     \fbox{\parbox[c][4cm][c]{0.9\textwidth}{\centering
+%         \todo{figure: development workflow. Mac (edit, MATLAB, FERS, viewer)
+%         $\rightarrow$ rsync $\rightarrow$ Nano (CMake, nvcc, run headless)
+%         $\rightarrow$ results pulled back to the Mac}}}
+%     \caption[TODO]{\todo{caption}}
+%     \label{fig:ch4.workflow}
+% \end{figure}
 
 %---------------------------------------------------------------------
 \subsection{Code Organisation}
 \label{subsec:ch4.overview.code}
 
-\begin{itemize}
-    \item \note{Annotated source tree (Figure~\ref{fig:ch4.tree}), laid out so a reader can navigate the repository from it.}
-    \item \note{Organised by pipeline stage, not by library: mirrors the chain, so each stage is built, tested and replaced on its own (Section~\ref{subsec:ch3.philosophy.incremental}).}
-    \item \note{Public headers carry no CUDA types: the GPU is hidden behind the same interface as the CPU.}
-    \item \note{No wrapper layer over cuFFT, cuBLAS or cuSOLVER: less code to verify, every library call visible where it is used.}
-\end{itemize}
+All code written for this project is contained within the GitHub repository: https://github.com/tamrynosler/passive-radar-sbc.git
+The central code for this project is organised within the following subfolders as layed out in Figure \ref{fig:ch5.tree}.
+The code is mainly organised according to pipeline stage, not by library. This aided the incremental development approach (Section~\ref{subsec:ch3.philosophy.incremental}).
+The public headers contain no CUDA types, leaving the GPU-specific code hidden behind the same interface as the CPU-specific code. This ensures the code is more readable and modular.
+There is no rapper layer over the CUDA libraries (cuFFT, cuBLAS, or cuSOLVER etc.). This was chosen to avoid code bloat. It is less code to verify and leaves every library code visible where it is used.
+
 
 \begin{figure}[H]
     \centering
@@ -68,52 +66,56 @@ src/app/       one executable per file: pbr_run, uhd_to_vita49,
 tests/  bench/  matlab/  config/  scenarios/  docs/
 \end{Verbatim}
     \caption[TODO]{\todo{caption}}
-    \label{fig:ch4.tree}
+    \label{fig:ch5.tree}
 \end{figure}
-
-%---------------------------------------------------------------------
-\subsection{Coding Standards}
-\label{subsec:ch4.overview.standards}
-
-\begin{itemize}
-    \item \note{No exceptions: return codes, with checks that stay on in Release; a fault is reported with its location, which lets a failed stage become a blank frame (Section~\ref{subsec:ch3.dataflow.faults}).}
-    \item \note{Deliberately simple C++, no templates or metaprogramming: thesis-critical code fully understood by its author.}
-    \item \note{Host and device complex types share one layout and are converted only at the copy boundary.}
-\end{itemize}
 
 %=====================================================================
 \section{Ingest Layer}
 \label{sec:ch4.ingest}
 
+The ingest layer was the first part of the chain to be implemented. Its job is to turn a stream of UDP datagrams from the receiver into aligned, fixed-length blocks of reference and surveillance samples ready for processing. Data passes through four classes in turn. \texttt{UdpReceiver} pulls raw datagrams off the socket; \texttt{Vita49Packet} decodes each datagram into a packet structure; \texttt{ChannelIngest} interprets the decoded packets, converts the samples to physical units and writes them into a per-channel \texttt{CircularBuffer} at the position given by their timestamp; and, once enough of the timeline has arrived, \texttt{ChannelIngest} extracts one CPI from every buffer and passes it to the processing chain. The subsections below follow this path.
+
 %---------------------------------------------------------------------
-\subsection{VITA 49 Decoder and UDP Receiver}
+\subsection{Sample Transport: VITA 49 over UDP}
 \label{subsec:ch4.ingest.vita49}
 
-% Moved verbatim from Chapter 3 on 2026-10-13 (was 3.3.3 Source-Agnostic Chain).
-The chain reads the receiver name and the sample rate of each stream from its context packet and assigns the reference and surveillance roles from the configuration, so the roles are not fixed by the order in which the streams arrive.
+Samples travel from the source to the processing chain as VITA~49.2 packets over UDP, the format in which FERS already streams its output. Each channel is a separate stream carrying two packet types. A \emph{data packet} holds 342 complex samples as 16-bit integers together with the time of its first sample, expressed as UTC seconds plus picoseconds. A \emph{context packet}, sent when the stream opens and then about once per second, carries the sample rate, the carrier frequency, the full-scale value that converts the integer codes to physical units, and a text field naming the receiver.
 
-% Moved verbatim from Chapter 3 on 2026-10-13 (was 3.5.1 Sample Transport and Ingest). To be integrated with the notes below.
-Samples travel from the source to the processing chain as VITA~49.2 packets over UDP, the format in which FERS already streams its output. Each channel is a separate stream made up of two packet types. A data packet carries 342 complex samples as 16-bit integers, and the time of its first sample as UTC seconds plus picoseconds. A context packet, sent when the stream opens and then about once per second, carries the sample rate, the carrier frequency, the full-scale value used to convert the integers to physical units, and a text field naming the receiver. Because each packet is one UDP datagram, the network provides the framing and no synchronisation search is needed in the byte stream. UDP does not retransmit lost packets, so losses must be detected by the receiver.
+Two properties of this transport shape the design of the ingest layer. First, since each packet is one UDP datagram, the network provides the framing: there is no need to search a byte stream for synchronisation words, and the legacy handler-registry pattern used by the earlier PXGF code was dropped. Second, UDP does not retransmit, so lost packets must be detected downstream. The decoder was prototyped and validated in MATLAB before being reimplemented in C++; the two implementations were cross-checked field by field over a recorded stream.
 
-\begin{itemize}
-    \item \note{Legacy PXGF handler-registry pattern rejected: UDP already frames every packet, so sync-word search and resynchronisation have no purpose.}
-    \item \note{Single-threaded receive-then-process, justified by measurement: one CPI's processing time leaves about 272~KB undrained against an 8~MB socket buffer (3\%).}
-    \item \note{Decoder cross-checked against an independent MATLAB parser: all 14 fields across 3602 packets.}
-\end{itemize}
-% Sources: PROGRESS 2026-09-16, 2026-09-17.
+%---------------------------------------------------------------------
+\subsection{Receiving and Decoding Packets}
+\label{subsec:ch4.ingest.decode}
+
+\texttt{UdpReceiver} owns a single UDP socket bound to the configured port. At start-up it requests a large kernel receive buffer and logs the size actually granted, warning if the kernel returned less than was asked for, since a small socket buffer could lead to data loss. The receiver then reads one datagram at a time into a byte vector and passes it on; if no datagram is waiting, the call returns immediately and the receive loop tries again.
+
+\texttt{Vita49Packet} decodes one datagram into a packet structure. It checks the class identifier, the timestamp mode and the declared length against what the stream is expected to carry, classifies the packet as context or data, and extracts the fields of each packet. A context packet yields the stream parameters and the receiver name; A data packet yields the timestamp and the block of integer samples.
+
+Receiving and processing run in a single thread, so while one CPI is being processed no datagrams are read from the socket and new arrivals accumulate in the kernel's receive buffer. Measurement shows this backlog is small: the time taken to process one CPI corresponds to roughly 272~KB of incoming packets, about 3\% of the 8~MB socket buffer, which the receive loop then drains. A separate receive thread would add synchronisation complexity without preventing any loss.
+
+%---------------------------------------------------------------------
+\subsection{Channel Ingest}
+\label{subsec:ch4.ingest.channel}
+
+\texttt{ChannelIngest} holds one \texttt{CircularBuffer} per channel and handles each decoded packet according to its type.
+
+A context packet identifies its stream. \texttt{ChannelIngest} reads the receiver name and sample rate from it and looks the name up in the configuration to assign the stream its role: reference or surveillance. Roles are therefore tied to named receivers, not to the order in which the streams open.
+
+\texttt{ChannelIngest} scales the 16-bit codes, from a data packet, to physical units using the full-scale value from the stream's latest context packet, then computes the packet's \emph{absolute sample index} from its timestamp: the position of its first sample on a single timeline shared by all channels, computed with integer arithmetic so that it is exact. The samples are written into the channel's buffer at that index. Packet-count gaps, session changes and timeline jumps are detected and reported at this point.
+
+\texttt{ChannelIngest} also performs CPI extraction. When the buffers have advanced far enough, it reads a CPI-length window from each one at the same absolute index and passes the window to the processing chain. The readiness conditions are given in Section~\ref{subsec:ch4.ingest.cpi}.
 
 %---------------------------------------------------------------------
 \subsection{Circular Buffer}
 \label{subsec:ch4.ingest.buffer}
 
-% Moved verbatim from Chapter 3 on 2026-10-13 (was 3.5.1 Sample Transport and Ingest). To be integrated with the notes below.
-Samples are placed by time, not by order of arrival. Each channel's samples are held in its own circular buffer, which keeps the most recent stretch of the signal, two seconds in the base configuration, and overwrites the oldest samples as new ones arrive. The buffer is addressed by absolute sample index: every sample has a position on a single timeline shared by all channels, computed from its packet's timestamp with integer arithmetic, and a write states where its samples belong rather than appending them in arrival order. Packets that arrive out of order are written to the correct place without any reordering step, and a lost packet cannot shift the samples that follow it. The channels are aligned by construction, since a given index refers to the same instant in every buffer, so no synchronisation between channels is needed. A packet that arrives so late that its slot has already been overwritten is rejected rather than written into the wrong cycle of the buffer. Standard ring-buffer libraries implement first-in, first-out queues and do not offer writes at arbitrary positions inside a sliding window, with gaps detected, so the buffer was written for this project.
+Each channel's samples are held in a \texttt{CircularBuffer} that keeps the most recent stretch of that channel's signal. Standard C++ library ring buffers were not suitable: these are first-in, first-out queues, so a sample's position depends on when it arrived, and a lost or reordered packet shifts every sample after it. Here, a sample's position must depend on when it was \emph{captured}. The class is therefore \emph{absolute-indexed}: every write and read is addressed by the absolute sample index of Section~\ref{subsec:ch4.ingest.channel}, which the buffer maps to a slot with a single modulo operation. \todo{Reference the circular buffer section of the design chapter.}
 
-\begin{itemize}
-    \item \note{Capacity not padded to a power of two: the modulo runs once per packet, not per sample, so it costs nothing measurable; padding would cost 28\% more memory and break parity with the MATLAB buffer.}
-    \item \note{Allocated once at startup and never resized: no allocation in the packet path.}
-\end{itemize}
-% Sources: docs/design_decisions.md sections 1.4, 2.
+Three properties follow from this design. Out-of-order packets land in the correct slots with no reordering step. The channel buffers are aligned by construction, since one index means the same instant in every buffer; thus, no cross-channel synchronisation is needed. And a packet whose slot has already been overwritten is rejected rather than written over newer data.
+
+If a packet's index lies beyond the current write position, the slots in between are zero-filled and marked invalid; every slot carries a validity flag recording whether its sample came from a packet or from a fill. The buffer returns a window only if every slot in it is still resident, and can report how many of those slots are valid. CPI extraction uses these two operations to decide whether a window is fit to process.
+
+Each buffer holds two CPIs, giving the processing chain one CPI of slack before unread samples are overwritten. The buffers are allocated once at start-up and never resized, so the packet path performs no memory allocation (which is time consuming); the cost is that a change in CPI length requires a rebuild.
 
 \begin{figure}[H]
     \centering
@@ -124,47 +126,48 @@ Samples are placed by time, not by order of arrival. Each channel's samples are 
     \label{fig:ch4.buffer}
 \end{figure}
 
-\begin{algorithm}[H]
-    \caption[TODO]{\todo{caption}}
-    \label{alg:ch4.bufferwrite}
-    \begin{algorithmic}[1]
-        \State \todo{pseudo-code: \texttt{write(index, samples)}: late reject, zero-fill of a forward jump, slot computed once, two-span copy, validity flags set}
-    \end{algorithmic}
-\end{algorithm}
+% \begin{algorithm}[H]
+%     \caption[TODO]{\todo{caption}}
+%     \label{alg:ch4.bufferwrite}
+%     \begin{algorithmic}[1]
+%         \State \todo{pseudo-code: \texttt{write(index, samples)}: late reject, zero-fill of a forward jump, slot computed once, two-span copy, validity flags set}
+%     \end{algorithmic}
+% \end{algorithm}
 
 %---------------------------------------------------------------------
 \subsection{CPI Extraction}
 \label{subsec:ch4.ingest.cpi}
 
-% Moved verbatim from Chapter 3 on 2026-10-13 (was 3.5.1 Sample Transport and Ingest). To be integrated with the notes below.
-A CPI is a fixed window on the shared timeline, and its start advances by one CPI hop each time a CPI is extracted. Because all channels share the timeline, one start index serves every channel. A CPI is ready for processing when every channel has received samples past the end of the window, none has yet overwritten its start, and at least 99\% of the window in every channel came from received packets. The last condition is judged from packets, not from sample values, so a quiet input whose samples are close to zero is still processed, while a gap left by lost packets is not. A window that falls below the threshold is skipped rather than processed in part, because a CPI with missing samples produces a map that looks like a valid frame with no targets. If the chain falls so far behind that a window has been overwritten before it is read, the start advances by whole hops, so CPI starts stay on a fixed grid of times and the number of hops skipped equals the number of CPIs lost.
-
+A CPI is a fixed-length window on the shared timeline. Its start advances by one hop each time a CPI is extracted, and because all channel buffers share the same timeline, one start index serves every channel. A window is ready to extract when three conditions hold in every channel:
 \begin{itemize}
-    \item \note{Absolute index in integer arithmetic, multiply before divide: sample-exact at any integer rate.}
-    \item \note{Each channel anchors its own first index: a shared anchor once silently dropped one channel.}
+    \item samples have been received past the end of the window;
+    \item the start of the window has not yet been overwritten; and
+    \item at least 99\% of the window's slots are valid, that is, were filled from received packets rather than by zero-fill.
 \end{itemize}
-% Sources: PROGRESS 2026-09-16 (absoluteIndex); docs/design_decisions.md 1.1.
+The last condition is judged from the validity flags, not from the sample values, so a quiet input whose samples happen to be near zero is still processed, while a gap left by lost packets is not. A window that falls below the threshold is skipped entirely rather than processed in part.
 
-\begin{algorithm}[H]
-    \caption[TODO]{\todo{caption}}
-    \label{alg:ch4.extract}
-    \begin{algorithmic}[1]
-        \State \todo{pseudo-code: \texttt{tryExtractCpi}: the three ready conditions, the validity count, the whole-hop advance}
-    \end{algorithmic}
-\end{algorithm}
+If the processing chain falls behind, the second condition eventually fails: the oldest part of a window is overwritten before it has been read. In that case the start index is advanced by whole hops until the window is resident again. Advancing in whole hops rather than to the oldest resident sample keeps the CPI starts on a fixed grid of times, so a lost CPI appears as a clean gap in the output and the number of hops skipped is exactly the number of CPIs lost.
 
 %=====================================================================
 \section{CPU and GPU Backends}
 \label{sec:ch4.backends}
 
-%---------------------------------------------------------------------
-\subsection{CUDA Functions}
-\label{subsec:ch4.backends.cuda}
-% which parts of the processing are offloaded to the GPU initially?
-% This allowed real-time processing.
+The parts of the processing that is offloaded to the GPU is chosen with great care to maximise processing efficiency. 
+In general, heavy, regular work that contains large matrix operations or is largely parallel is sent to the GPU, while cheap, branchy or serial work is kept on the CPU.
+However, there are some cases in which it is cheaper to keep the instantaneous data on the GPU and perform intermediate, but serial processing there rather than move such data to the CPU for processing due to memory bandwidth costs. 
+
+Figure \ref{fig:ch5.data_flow} shows the processing chain flow and which sections of data and processing are stored/computed where (on the CPU or GPU).
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1.0\textwidth,keepaspectratio]{figs/ch5/data_flow_diagram_landscape.png}
+    \caption[Processing chain data flow for the CPU and GPU backends]{Processing chain data flow for the CPU and GPU backends. Solid boxes are processing steps, dashed boxes are buffers, and red arrows are copies between host and device memory.}
+    \label{fig:ch5.data_flow}
+\end{figure}
+
+\todo{elaborate on some honourable mentions as per what the figure shows}
 
 \begin{itemize}
-    \item \note{The split: heavy, regular work on the GPU (cancellation, CAF, CFAR); cheap or branchy work on the CPU (ingest, plot grouping, AoA, spectrum).}
     \item \note{Device-coupled chain: the cleaned surveillance signal stays on the GPU between cancellation and the CAF, no 1.6~MB copy per CPI; opaque pointers keep CUDA types out of public headers.}
     \item \note{Libraries by default: cuBLAS for the Gram matrices, cuSOLVER batched Cholesky for the per-batch ECA solves, cuFFT for the CAF and the frequency-domain cancellers.}
     \item \note{Custom kernels where launch overhead dominates: FBLMS made 14\,400 small launches per CPI; one kernel with a shared-memory FFT took it from 364 to 36~ms.}
@@ -172,8 +175,17 @@ A CPI is a fixed window on the shared timeline, and its start advances by one CP
     \item \note{Deliberately different reference: the CPU uses a direct DFT, not an FFT, so it shares no algorithm with the cuFFT path it checks.}
     \item \note{GPU warmed up before the clock starts: the first CUDA call costs 1--2~s of context creation.}
 \end{itemize}
-% Sources: PROGRESS 2026-10-07 (evening); docs/design_decisions.md 1d.6b,
-% 1d.13, 1e.2, 1e.3; CLAUDE.md "CUDA on this board".
+
+%---------------------------------------------------------------------
+\subsection{CUDA Functions}
+\label{subsec:ch4.backends.cuda}
+% which parts of the processing are offloaded to the GPU initially?
+% This allowed real-time processing.
+As per the GPU work described above, the following CUDA functions were created:
+
+\todo{Brief description of each CUDA function and what it does}
+
+\todo{Which CUDA libraries are used where}
 
 %---------------------------------------------------------------------
 \subsection{Memory Management}
@@ -187,34 +199,36 @@ A CPI is a fixed window on the shared timeline, and its start advances by one CP
 % Sources: docs/design_decisions.md 1d (Gram), 1d.10 (budget, 512 MB
 % ceiling); PROGRESS 2026-10-12 (two-channel peaks).
 
-\begin{table}[H]
-    \centering
-    \caption[TODO]{\todo{caption}}
-    \label{tab:ch4.memory}
-    \begin{tabular}{lr}
-    \toprule
-    \textbf{Configuration} & \textbf{Memory used (MB)} \\
-    \midrule
-    \todo{idle} & \todo{} \\
-    \todo{one surveillance channel} & \todo{} \\
-    \todo{two surveillance channels} & \todo{} \\
-    \bottomrule
-    \end{tabular}
-\end{table}
+% This table belongs in results rather:
+% \begin{table}[H]
+%     \centering
+%     \caption[TODO]{\todo{caption}}
+%     \label{tab:ch4.memory}
+%     \begin{tabular}{lr}
+%     \toprule
+%     \textbf{Configuration} & \textbf{Memory used (MB)} \\
+%     \midrule
+%     \todo{idle} & \todo{} \\
+%     \todo{one surveillance channel} & \todo{} \\
+%     \todo{two surveillance channels} & \todo{} \\
+%     \bottomrule
+%     \end{tabular}
+% \end{table}
 
 %=====================================================================
 \section{DSI Cancellers}
 \label{sec:ch4.dsi}
+The heaviest part of the passive radar processing chain is the DSI/DPI and clutter cancellation. There are multiple methods of solving this problem, as explored in the literature review, each with their accuracy, performance and speed trade-offs. 
 
+For this project, six DSI cancellation algorithms were implemented. The first two (ECA-m and ECA-B) were implemented due to their simplicity, they were used initially to get a basic working implementation. The last four were explored because they appeared to be (as per the literature review) the top contenders of DSI Cancellation algorithms existing at present.
 %---------------------------------------------------------------------
-\subsection{ECA-m and ECA-B}
+\subsection{ECA-m, ECA-B and ECA-S}
 \label{subsec:ch4.dsi.ecab}
-\todo{}
 
-%---------------------------------------------------------------------
-\subsection{ECA-S}
-\label{subsec:ch4.dsi.ecas}
+ECA-m is not a formalised name for the algorithm but rather an alias created to describe the initial "MatLab" ECA algorithm. It is actually an implementation of ECA-B in which the batch size it set to 1. It is the most basic ECA algorithm in this project, and the most basic DSI cancellation algorithm at that.
+
 \todo{}
+% Refer back to ECA descriptions in theory/lit review sections. Give pseudo-code
 
 %---------------------------------------------------------------------
 \subsection{ECA-CD}
@@ -466,7 +480,7 @@ The graphical user interface is a web page, served by the viewer and drawn entir
 % (2026-10-08, CPU run on the Mac, S0_long). Replace with a fresh screenshot.
 \begin{figure}[H]
     \centering
-    \includegraphics[width=\textwidth]{figs/ch3/viewer.png}
+    \includegraphics[width=\textwidth]{figs/ch5/viewer.png}
     \caption[TODO]{\todo{caption}}
     \label{fig:ch3.gui}
 \end{figure}

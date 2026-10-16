@@ -36,333 +36,277 @@
 % TODO: what this chapter covers, in what order, and why that order.
 % TODO: state up front that the review builds towards the gap in 2.7.
 
-
 %=====================================================================
 \section{Passive Bistatic Radar}
 \label{sec:ch2.pbr}
-\todo{}
 %=====================================================================
-% What is passive bistatic radar? What makes it different from active/monostatic radar?
+There are two general categories of radar systems: monostatic and bistatic systems. Monostatic refers to a system in which the transmitter and receiver are co-located, that is, placed at the same location. In bistatic radar systems, the transmitter and receiver are located a great distance apart. The distance between them is usually a significant fraction of the target range \citep{griffiths2007}.
+
+Within the category of bistatic radars, we have passive bistatic radar systems. A passive bistatic radar does not have a transmitter of its own. It exploits signals transmitted by other sources -- for example broadcast, communications and radionavigation transmitters \citep{griffiths2007,kuschel2019}. Such a transmitter is called an \gls{ioo}. The literature uses several names for passive bistatic radar systems, including \gls{pcl}, commensal radar and passive covert radar \citep{kuschel2019}. This thesis uses the term \gls{pbr}, or passive radar for short.
 
 %---------------------------------------------------------------------
 \subsection{Principle of Operation}
 \label{subsec:ch2.pbr.principle}
-\todo{}
 %---------------------------------------------------------------------
 % TODO: illuminator of opportunity, non-cooperative transmitter, receiver-only
 %       system. Advantages (covert, low cost, no spectrum licence) and
 %       disadvantages (no control over the waveform, poor dynamic range).
+Passive bistatic radar systems contain only receiving antennas and make use of nearby illuminators of opportunity. Examples include broadcast transmitters for \gls{fm} radio, \gls{dab}, analogue television and \gls{dvbt}, and the base stations of mobile communication networks \citep{kuschel2019}. The \gls{pbr} listens for both the direct signal from the \gls{ioo}, as well as its echo reflected off of a moving target. From these two signals, the system can determine the target's bistatic range and bistatic Doppler shift \citep{kuschel2019}.
+
+A passive radar has several advantages over an active radar. The system is covert, since it does not transmit anything \citep{kuschel2019}. It requires no frequency allocation, so it can operate easily in densely populated areas where the spectrum is congested \citep{kuschel2019}. It adds no electromagnetic pollution \citep{colone2023}, and it saves the cost of a transmitter. Kuschel et al. \citep{kuschel2019} note that the low cost claim about passive radar (as opposed to active radar) is still to be proven; however, \gls{pbr}s do require less maintenance. %Most broadcast illuminators operate in the \gls{vhf} and \gls{uhf} bands, which gives some capability against stealth aircraft \citep{kuschel2019}. 
+The receiver can be built from commercial off-the-shelf components, which has let many universities build experimental systems \citep{colone2023}.
+
+The disadvantages of \gls{pbr} systems mostly stem from the transmitted waveform. The radar designer has no control over the transmitted signal and cannot determine it in advance \citep{kuschel2019}. The receiver must record a copy of the transmitted signal on a dedicated reference channel \citep{kuschel2019}. The transmitted signal is designed for other purposes, so its spectrum properties may not match the needs of a radar. Its bandwidth is usually small and variable, which limits range resolution \citep{kuschel2019}. The direct signal travels a much shorter path than the echo and is not attenuated by reflection from the target. It therefore masks the target echo unless the two are separated in Doppler, so the system must suppress it before detection \citep{kuschel2019}. Section~\ref{subsec:ch2.pbr.dynamicrange} covers this problem.
 
 %---------------------------------------------------------------------
-% \subsection{Historical Development of Passive Radar}
-% \label{subsec:ch2.pbr.history}
-% \todo{}
+\subsection{History of passive bistatic radar}
+\label{subsec:ch2.pbr.fm}
 %---------------------------------------------------------------------
-% TODO: Klein Heidelberg, Silent Sentry, Manastash Ridge, the UCT lineage.
-% TODO: keep to passive radar; general radar history lives in Chapter 1.
+Passive radar systems are as old as radar itself. Tong \cite{tong2014} mentioned in his thesis (back in 2014) that this technology had been explored widely by a range of private, public and academic initiatives. He mentioned that the computational limitations of processing hardware back then was the main reason that most \gls{pbr} systems were for military purposes, and he hoped that advances in the High Performance computing (HPC) industry would lead to these systems becoming more popular in airtraffic control and aviation industries.
 
-%---------------------------------------------------------------------
-\subsection{Bistatic Geometry}
-\label{subsec:ch2.pbr.geometry}
-\todo{}
-%---------------------------------------------------------------------
-% TODO: figure of the transmitter-target-receiver triangle (figs/ch2/).
-The geometry of a basic, passive bistatic radar is depicted in \ref{fig:bistatic_geometry}. 
-\begin{figure}[H]
-    \centering
-    \begin{tikzpicture}
-        \node[draw=gray, thick, dashed, fill=gray!10, text=gray!60!black,
-              minimum width=0.8\textwidth, minimum height=6cm,
-              align=center, font=\sffamily]
-        {\textbf{Geometry of Basic Passive Bistatic Radar}\\[1ex]
-         Range--Doppler map before and after ECA-B cancellation\\
-         (FERS single-target scenario)};
-    \end{tikzpicture}
-    \caption{\todo{Caption.}}
-    \label{fig:bistatic_geometry}
-\end{figure}
+% Do we have sources that prove this growth?
 
-The radar setup includes a transmitter or illuminator of opportunity, and two receive channels: a referenvce and surveillance.
-The reference channel is aimed directly at the illuminator of opportunity such that the direct signal is the strongest one received.
-The surveillance antenna is aimed towards some area in which an observed target may be: for example, Cape Town international airport.
-The signal received by the surveillance channel is a mixture of the direct (reference) signal, and many other delayed and doppler shifted versions of that direct signal.
-Each delayed and doppler shifted "echo" comes from static and dynamic clutter, as well as the moving target itself.
-The nature of the receibed signal is one of the mopst important things to understand, because the heaviest part of a passive radar processing chain is designed around filtering out everything except the echoes of the signal reflected off our targets.
-In this case, our target is a fast moving aircraft; thus, it's echo will have some magnitude of doppler shift proportional to its velocity.
-Other clutter in our scenario also causes echos: static mountains and city infrastructure cause delayed signals arrive. 
-Moving trees or ocean waves and clouds may cause delayed and doppler shifted echoes to arrive.
+Indeed, since Tong's thesis \cite{tong2014}, there have been great advances in the processing capabilities available to the average consumer. Over the last ten years, GPUs have become exceedingly popular and are now available in smaller embedded systems and development boards. Nvidia is one such vendor. However, although this technology is becoming more powerful, the last 5 years (predating this project) has seen a rise in the demand and price for computational resources. This follows the development of artificial intellegence. GPUs, especially those from Nvidia, are becoming more expensive and sought-after. There is great incentive for projects like this one to make use of hardware that has already been aquired by the University and to squeeze as much performance out of this hardware as possible. This point informs the hardware decisions made later in this project.
 
-A diagram depicting these various signals is depicted in \ref{fig:signal_echoes}.
-\begin{figure}[H]
-    \centering
-    \begin{tikzpicture}
-        \node[draw=gray, thick, dashed, fill=gray!10, text=gray!60!black,
-              minimum width=0.8\textwidth, minimum height=6cm,
-              align=center, font=\sffamily]
-        {\textbf{Diagram showing the various reflected and doppler shifted signals arising in the scenario}\\[1ex]
-         Range--Doppler map before and after ECA-B cancellation\\
-         (FERS single-target scenario)};
-    \end{tikzpicture}
-    \caption{\todo{Caption.}}
-    \label{fig:signal_echoes}
-\end{figure}
-
-\subsubsection{Bistatic Range and the Baseline}
-\label{subsubsec:ch2.pbr.geometry.range}
-\todo{}
-% TODO: bistatic range definition, ellipses of constant range, the baseline
-%       as the zero-range reference.
-Bistatic range is the distance from the transmitter to the target to the receiver...
-
-\subsubsection{Bistatic Doppler}
-\label{subsubsec:ch2.pbr.geometry.doppler}
-\todo{}
-% TODO: bistatic Doppler expression, dependence on the bistatic angle,
-%       zero-Doppler cases.
-
-%---------------------------------------------------------------------
-\subsection{Signal Model}
-\label{subsec:ch2.pbr.signalmodel}
-\todo{}
-%---------------------------------------------------------------------
-
-\subsubsection{Reference and Surveillance Channels}
-\label{subsubsec:ch2.pbr.signalmodel.channels}
-\todo{}
-% TODO: two-channel receiver, purpose of each channel, reference purity.
-
-\subsubsection{Direct Signal, Multipath and Clutter}
-\label{subsubsec:ch2.pbr.signalmodel.clutter}
-\todo{}
-% TODO: composition of the surveillance channel; stationary clutter as
-%       delayed copies of the reference at zero Doppler.
-
-\subsubsection{Target Echoes}
-\label{subsubsec:ch2.pbr.signalmodel.targets}
-\todo{}
-% TODO: delayed and Doppler-shifted copies; relative power to the direct
-%       signal; where the bistatic radar equation enters.
-\begin{equation}
-    P_r = \frac{P_t \, G_t \, G_r \, \lambda^2 \, \sigma_b \, F_t^2 \, F_r^2}
-               {(4\pi)^3 \, R_T^2 \, R_R^2 \, L_t \, L_r}
-    \label{eq:bistatic-radar}
-\end{equation}
-
-\begin{figure}[H]
-    \centering
-    \begin{tikzpicture}
-        \node[draw=gray, thick, dashed, fill=gray!10, text=gray!60!black,
-              minimum width=0.7\textwidth, minimum height=7cm,
-              align=center, font=\sffamily]
-        {\textbf{PLACEHOLDER FIGURE}\\[1ex]
-         Bistatic geometry: transmitter (Tx), receiver (Rx), target\\
-         Baseline $L$, ranges $R_T$ and $R_R$, bistatic angle $\beta$};
-    \end{tikzpicture}
-    \caption{\todo{Caption.}}
-    \label{fig:bistatic-geometry}
-\end{figure}
+This project supercedes Tong's thesis at the University of Cape Town, where he developed a real-time, embedded-system based FM passive radar system \cite{tong2014}. In the last 12 years following Tong's project, there have been advances in both the Nvidia GPU embedded system he used, the C++/CUDA libraries used on such hardware, and even the real-time file streaming format he used (PXGF to VITA 49).
 
 %---------------------------------------------------------------------
 \subsection{FM Broadcast as an Illuminator of Opportunity}
 \label{subsec:ch2.pbr.fm}
-\todo{}
 %---------------------------------------------------------------------
+
+Since this project uses an FM \gls{ioo}, it is important to understand the FM waveform itself in the context of passive radar transmit signals. Things like the signal's carrier frequency, bandwidth and power all affect a passive radar system's ability to detect a target reliably.
 % SEE Report/docs/fm_broadcast_summary.md
-\subsubsection{Properties of the FM Waveform}
-\label{subsubsec:ch2.pbr.fm.waveform}
-\todo{}
-% TODO: band, channel spacing, transmitter power and coverage, continuous
-%       transmission, why FM suits long-range air surveillance.
+\subsubsection{Power, Coverage and Demonstrated Range}
+\label{subsubsec:ch2.pbr.fm.power}
+
+FM transmitters are usually sited on tall masts in high locations. Their patterns are omnidirectional in azimuth, and the elevation pattern is shaped to avoid wasting power above the horizontal \citep{griffiths2007}. The strongest transmitters in the UK and the US radiate 250~kW EIRP \citep{griffiths2007}. Broadcasters plan for a minimum field strength at ground level, from 54~dB($\mu$V/m) for stereo in rural areas to 74~dB($\mu$V/m) in large cities \citep{itu_bs412}. The result is a strong direct signal over a wide area. Because of the high transmitted power and the long wavelength, FM-based passive radar is the best candidate for long-range detection \citep{malanowski2014}. Trials have reported detections to 300~km bistatic range, and the PaRaDe demonstrator has shown detections beyond 600~km \citep{malanowski2014}. Griffiths and Baker \citep{griffiths2007} report that Howland's FM-based system detected targets 150~km from the receiver.
+
+FM transmitters provide much coverage over the South African region, particularly within the Western Cape. Although this project does not extend beyond the development one one \gls{pbr} system with receivers placed at the University of Cape Town (an urban area with widespread FM coverage), this is an interesting motivation for the development of \gls{pbr} systems within South Africa.
+
+% \begin{figure}
+%     \centering
+%     \begin{tikzpicture}
+%         \node[draw=gray, thick, dashed, fill=gray!10, text=gray!60!black,
+%               minimum width=0.7\textwidth, minimum height=7cm,
+%               align=center, font=\sffamily]
+%         {\textbf{PLACEHOLDER FIGURE}\\[1ex]
+%          FM signal coverage over South Africa};
+%     \end{tikzpicture}
+%     \caption{\todo{Caption.}}
+%     \label{fig:ch2.fm_coverage}
+% \end{figure}
 
 \subsubsection{Ambiguity Function and Content Dependence}
 \label{subsubsec:ch2.pbr.fm.ambiguity}
-\todo{}
-% TODO: instantaneous bandwidth varies with programme content; effect on
-%       sidelobes; speech vs music; the ambiguity-function literature.
 
-\subsubsection{Range and Doppler Resolution}
-\label{subsubsec:ch2.pbr.fm.resolution}
-\todo{}
-% TODO: resolution from bandwidth and integration time; typical figures,
-%       each with a citation.
+The ambiguity function of a waveform gives its point-target response as a function of delay and Doppler shift \citep{griffiths2007}. For FM it depends on the instantaneous modulation, that is on the programme content \citep{griffiths2005af,griffiths2007}. Griffiths and Baker \citep{griffiths2005af} measured off-air stations in London to determine how an FM radio signal's content affects its ambiguity function. Music with high spectral content, such as rock, gives the narrowest peak and the best range resolution. Speech gives a broad peak, and during pauses between words the range resolution degrades by a factor of ten or more \citep{griffiths2005af}. Over a 2.5~s interval the range resolution of the music stations varied by a factor of two or three \citep{griffiths2005af}. Table~\ref{table:ch2.fm-ambiguity} lists their measurements for four stations.
+
+\begin{table}[H]
+    \centering
+    \caption[Measured ambiguity-function properties of four FM stations]{\textbf{Measured ambiguity-function properties of four London FM stations}, from Griffiths and Baker \citep{griffiths2005af}, Table~1. Range resolution is the $-3$~dB width of the zero-Doppler cut, expressed as equivalent monostatic range.}
+    \begin{tabular}{lrrrr}
+    \toprule
+    \textbf{Programme} & \textbf{Station} & \textbf{Range resolution} & \textbf{Effective bandwidth} & \textbf{Peak range sidelobe} \\
+                       & [MHz]            & [km]                      & [kHz]                        & [dB] \\
+    \midrule
+    Speech          & 93.5  & 16.5 & 9.1  & $-19.1$ \\
+    Classical music & 100.6 & 5.8  & 25.9 & $-23.9$ \\
+    Rock music      & 104.9 & 6.55 & 22.9 & $-12.0$ \\
+    Reggae          & 107.1 & 1.8  & 83.5 & $-27.0$ \\
+    \bottomrule
+    \end{tabular}
+    \label{table:ch2.fm-ambiguity}
+\end{table}
+
+This shows how the content of the FM waveform being transmitted affects a \gls{pbr}'s ability to determine a target within a specific range of certainty (or resolution). The typical radio stations cycles through periods of speech, advertisements and different genre's of music, so the range resolution of an FM \gls{pbr} varies greatly with time.
+
+% \todo{what is kurtosis? Is this really relevant?}
+% Lauri et al. \citep{lauri2007} built an FM emulator and linked range resolution to the statistics of the modulating signal. When the kurtosis of the modulating signal is near 3, the range resolution follows its standard deviation. A more impulsive signal, with higher kurtosis, breaks this rule \citep{lauri2007}. Silence is the worst case. Only the 19~kHz pilot tone modulates the carrier, the self-ambiguity function becomes periodic and the peak-to-sidelobe ratio rises to 0~dB \citep{lauri2007}. Olsen and Baker \citep{olsen2008} measured a $-3$~dB channel width of about 100~kHz and a $-10$~dB width of about 150~kHz for a station at 100~MHz, and showed the bandwidth of each station varying with time. The choice of station therefore matters. Several authors propose selecting the channel dynamically from its instantaneous ambiguity performance \citep{griffiths2005af,lauri2007}. Baker, Griffiths and Papoutsis give the fuller analysis of the FM ambiguity function \todo{cite: baker2005, not yet obtained}.
 
 %---------------------------------------------------------------------
-% \subsection{Aircraft as Targets at FM Frequencies}
-% \label{subsec:ch2.pbr.aircraft}
+\subsection{Aircraft as Targets at FM Frequencies}
+\label{subsec:ch2.pbr.aircraft}
+\todo{This section can be cut down. Not that relevant.}
+
+
+% \subsubsection{Radar Cross-Section}
+% \label{subsubsec:ch2.pbr.aircraft.rcs}
 % \todo{}
-%---------------------------------------------------------------------
-
-\subsubsection{Radar Cross-Section}
-\label{subsubsec:ch2.pbr.aircraft.rcs}
-\todo{}
-% TODO: RCS of commercial aircraft at VHF, resonance-region behaviour.
+% % TODO: RCS of commercial aircraft at VHF, resonance-region behaviour.
+% At 89~MHz the wavelength is about 3.4~m, which is comparable to the dimensions of an aircraft. The target is then in the resonance region, where the radar cross-section varies strongly with frequency and aspect and is on average larger than at microwave frequencies \todo{cite: a text on RCS in the resonance region}. Stealth shaping and absorbing materials are matched to the radar wavelength, and operational active radars work from L-band to X-band, so metre wavelengths defeat both measures \citep{kuschel2019,kuschel2010b}. Kuschel et al. \citep{kuschel2010b} report chamber measurements of a 3~m missile whose average nose-on RCS rises by about 10~dB from 1~GHz to 200~MHz, and calculations for a stealth cruise-missile model whose mean bistatic RCS is $-14$~dBm$^2$ at 200~MHz against $-26$~dBm$^2$ at 1.9~GHz. For a large airliner, the UCT FM passive radar work assumes 200~m$^2$, or 23~dBm$^2$, at 89~MHz \citep{paine2019a}, and Sendall \citep{sendall2016} takes 100~m$^2$ as representative of a large passenger aircraft. Measured bistatic RCS of airliners at VHF is scarce. Pisane et al. \citep{pisane2012} recovered the bistatic RCS of airliners along their tracks from a VOR transmitter at 114.7~MHz, using ADS-B for the geometry, but publish the result as relative curves only \todo{cite: Fix et al. 2021 for measured VHF aircraft RCS}.
+% % NOTE (Claude, 2026-10-14): 3.4 m is c / 89 MHz, no source. The 200 m^2 is Paine's
+% %   simulation assumption (Table 3.1), the 100 m^2 is Sendall's link-budget assumption
+% %   citing his ref [44]; neither is a measurement.
 
 \subsubsection{Expected Doppler and Range Extents}
 \label{subsubsec:ch2.pbr.aircraft.extents}
 \todo{}
 % TODO: speeds and altitudes of aircraft near an airport; the Doppler and
 %       bistatic-range window this sets for the map.
+The targets of interest are commercial aircraft near Cape Town International Airport \todo{cite: typical approach, departure and cruise speeds and altitudes}. The literature assumes airliner speeds up to 300~m/s \citep{malanowski2014,tong2014}. Sendall \citep{sendall2016} takes the 274.5~m/s maximum speed of a Boeing 747-8 as the fastest commercial aircraft, and Paine's FERS simulations use 200~m/s at altitudes from 5000 to 10\,000~m \citep{paine2019a}. The bistatic Doppler shift is bounded by $2V/\lambda$, which is Equation~\ref{eq:bistatic-doppler-geometry} with $\alpha = 0$ and $\beta = 0$. At 300~m/s and a wavelength of 3.4~m the bound is about 180~Hz. Most geometries give less, because a target rarely flies along the extended baseline. Sendall's radar covered bistatic range rates to about 400~m/s and detected airliners to just under 200~km bistatic range \citep{sendall2016}. The PaRaDe demonstrator detected airliners to 600~km bistatic range \citep{malanowski2014}. These figures set the extent of the range-Doppler map: a few hundred kilometres of bistatic range and a few hundred hertz of Doppler shift.
+
+\todo{talk about range resolution as a function of bandwidth and also what affects doppler resolution. Cite the equation from the theory.}
 
 %---------------------------------------------------------------------
 \subsection{The Dynamic-Range Problem}
 \label{subsec:ch2.pbr.dynamicrange}
-\todo{}
+\todo{This can be cut down. Get to the point.}
 %---------------------------------------------------------------------
 % TODO: direct-signal to echo power ratio; masking through the ambiguity
 %       sidelobes; why cancellation is needed before correlation.
 % TODO: this subsection is the hinge into 2.3.2.
+Equation~\ref{eq:direct-to-echo} showed that the direct signal is far stronger than the target echo. Griffiths and Baker \citep{griffiths2007} measured the FM band from central London, with the receiver partly shielded from the transmitters by buildings, and found FM signals at about $-45$~dBm against a thermal noise floor of $-122$~dBm in a 50~kHz bandwidth. The direct signals raise the system input noise temperature by four to six orders of magnitude \citep{griffiths2007}. Malanowski et al. \citep{malanowski2014} compute, for a 100~kW transmitter 10~km from the receiver, a direct signal 100~dB above the noise and 140~dB above the minimum detectable echo. Moving the receiver 40~km further from the transmitter lowers the two figures to 88 and 128~dB \citep{malanowski2014}. Sendall \citep{sendall2016} shows that with a 40~km baseline and a 100~m$^2$ target, a receiver with 78~dB of dynamic range saturates, and the maximum detectable bistatic range falls to 72~km if the direct signal is not removed before digitisation.
 
+The direct signal does not only occupy the zero-range, zero-Doppler cell. Howland, as quoted by Griffiths and Baker \citep{griffiths2007}, wrote that it correlates perfectly with the reference signal and produces range and Doppler sidelobes several orders of magnitude greater than the echoes that are sought. The FM ambiguity function has peak sidelobes only 12 to 27~dB below its peak (Table~\ref{table:ch2.fm-ambiguity}), so a direct signal 100~dB above the noise leaves sidelobes more than 70~dB above the noise across the whole map. Each stationary clutter echo does the same at its own delay. A target echo 140~dB below the direct signal is lost in this floor. The direct signal and clutter must therefore be suppressed before the correlation, by physical shielding, by a spatial null, by an adaptive filter in the time domain, or by a combination of these \citep{griffiths2007}. Howland's FM system combined 15~dB of spatial nulling with about 75~dB from a two-stage adaptive canceller, which was enough for detections at 150~km \citep{griffiths2007}. Griffiths and Baker conclude that suppression of the order of 80~dB or more is needed, and that even then an effective receiver noise figure of 20 to 30~dB should be used in performance calculations \citep{griffiths2007}. Section~\ref{subsec:ch2.chain.dsi} reviews the cancellation algorithms that provide this suppression. Their cost on an embedded GPU is the subject of this thesis.
+% NOTE (Claude, 2026-10-14): "more than 70 dB above the noise" is 100 dB (Malanowski
+%   2014) minus the 27 dB worst sidelobe in Table ch2.fm-ambiguity; arithmetic, no source.
+%   The 15 dB, 75 dB and 150 km are Griffiths 2007's account of Howland's trials, refs
+%   [23],[24] there. Howland 2005 is not held, so it is cited second-hand on purpose.
 
 %=====================================================================
 \section{The Passive Radar Processing Chain}
 \label{sec:ch2.chain}
 \todo{}
 %=====================================================================
-This section details the processing algorithms involved in passive radar processing. Taking the received reference and surveillance channel signals, and ending up with an amplitude-range-doppler map that should reveal a moving target.
+This section details the processing algorithms typically involved in passive radar processing, taking the received reference and surveillance channel signals and producing an amplitude-range-Doppler map that should reveal a moving target. It then covers the detection step that turns the map into a list of plots. These methods and algorithms are described in more detail in \todo{reference theory chapter and sections}.
 
 %---------------------------------------------------------------------
 \subsection{Overview of the Chain}
 \label{subsec:ch2.chain.overview}
-\todo{}
 %---------------------------------------------------------------------
-% TODO: block diagram (figs/ch2/): receive, condition, cancel, correlate,
-%       detect, track/display. Name which blocks this thesis implements.
-A block diagram of the passive radar processing chain used in this project is shown below in \ref{fig:processing-chain-diagram}.
+
+A block diagram of the passive radar processing chain used in this project is shown below in Figure~\ref{fig:processing-chain-diagram}.
 
 \begin{figure}[H]
     \centering
-    \begin{tikzpicture}
-        \node[draw=gray, thick, dashed, fill=gray!10, text=gray!60!black,
-              minimum width=0.7\textwidth, minimum height=7cm,
-              align=center, font=\sffamily]
-        {\textbf{PLACEHOLDER FIGURE}\\[1ex]
-         Passive radar processing chain};
-    \end{tikzpicture}
-    \caption{\todo{Caption.}}
+    \includegraphics[width=\textwidth]{figs/lit_review/pbr_processing_chain_flow_diagram_paine_2019.jpg}
+    \caption[Passive radar processing chain]{Block diagram of a passive radar processing chain, from the surveillance and reference receivers through DSI and clutter cancellation and CAF calculation to post-processing. Taken from Paine \citep{paine2019a}.}
     \label{fig:processing-chain-diagram}
 \end{figure}
 
-Describe ...
+The chain has the same stages in every passive radar that uses an analogue broadcast illuminator \citep{kuschel2019,colone2023}. The reference and surveillance channels are received and digitised. The disturbance cancellation stage removes the direct signal and the stationary clutter from the surveillance signal. The cleaned surveillance signal is cross-correlated with the reference signal over one coherent processing interval to form a range-Doppler map. A constant false alarm rate detector marks the cells of the map that rise above the local disturbance, producing target detections. When a target occupies several cells, clustering merges them into one detection. With more than one surveillance channel, an angle of arrival is estimated for each detection, and tracking over consecutive intervals forms tracks \citep{kuschel2019,colone2023}. This thesis implements the chain from the receiver output to the detection list: sample ingest, DSI cancellation, the range-Doppler map, two-dimensional cell-averaging CFAR and the grouping of touching detections into plots, with a second surveillance channel giving an angle of arrival per plot. Tracking is not implemented. The map and the plots are streamed to a display. 
+
 %---------------------------------------------------------------------
 \subsection{Direct-Signal Interference Cancellation}
 \label{subsec:ch2.chain.dsi}
-\todo{}
 %---------------------------------------------------------------------
-The first and most important part of passive radar processing is filtering out the direct FM signal received by the reference channel which is many order of magnitude stronger than the target echo which we are looking for.
-Not only does the surveillance antenna still hear the direct signal, it also receives the transmitted signal reflections of buildings, hills and infrastructure -- each with a unique time delay.
-The direct signal and building reflections are roughly a million times stronger than the target (aircraft echo).
-The DSI processing stage aims to remove the direct signal and clutter so that the echo from the aircraft target is clearer.
-
-\subsubsection{Formulation as a Least-Squares Problem}
-\label{subsubsec:ch2.chain.dsi.leastsquares}
-\todo{}
-% TODO: clutter subspace spanned by delayed reference copies; the normal
-%       equations; the projection interpretation shared by the ECA family.
-The target echo can be found by subtracting the received surveillance signal by the emount of "clutter" that it contains. And such "clutter" can be modeled as the sum of delayed and doppler shifted copes of the reference signal.
-As such, we get the equation
-$ target[n] = s[n] - (w[0] \cdot r[n] + w[1] \cdot r[n-1] + w[2] \cdot r[n-2] + ... + w[N] \cdot r[n-N] )$
-Where ... state what each variable means.
-% This equation needs to be labelled.
-We want the scale factors $w$ that leave the most energy behind; thus, this is a least-squares problem with a closed form answer:
-The Gram matrix, $G$ has entries $G[i][j]$ that represent how similar the reference delayed by $i$ is to the reference delayed by $j$.
-The right-hand side, $v$ has entries $v[i]$ that represent how similar the reference delayed by i is to the surveillance signal. This is effectively a map of how the clutter is dispersed in the scenario physically.
-The answer to the problem is a solution of euqation ... label:
-
-$G \cdot w = v$
-
-Each variant of a DSI algorithm focuses on solving for this solution: an $N \times N$ system of equations.
+The first and most important part of passive radar processing is filtering out the direct FM signal received by the surveillance channel, which is many orders of magnitude stronger than the target echo which we are looking for. Not only does the surveillance antenna still hear the direct signal, it also receives the transmitted signal reflections off buildings, hills and infrastructure, each with a unique time delay. The direct signal and the building reflections are many orders of magnitude stronger than the target echo (Section~\ref{subsec:ch2.pbr.dynamicrange}). The DSI processing stage aims to remove the direct signal and clutter so that the echo from the aircraft target is detectable.
 
 \subsubsection{Extensive Cancellation Algorithm (ECA)}
 \label{subsubsec:ch2.chain.dsi.eca}
-\todo{}
-% TODO: original formulation; cost of the full-CPI solve.
+
+Of the many \gls{dsi} cancellation algorithms existing, the ECA family is very common. This is popular due to its low computational complexity. \todo{is this true? cite.}
+
+Colone et al. \citep{colone2009} tested the ECA of Section~\ref{subsec:th.dsi.eca} in simulation. On simulated FM data with the direct signal 63~dB above the noise and ten clutter scatterers, cancelling the first 50 range bins at zero Doppler gave a deep notch at zero velocity and revealed the strong targets, but residuals around zero Doppler and the sidelobes of the strong targets still hid the weak ones \citep{colone2009}. Extending the subspace to three Doppler bins, with $K = 40$ and $P = 1$, detected four of the six targets at the price of a larger system \citep{colone2009}. Colone et al. \citep{colone2009} name two limitations: the cost of the $M \times M$ solve, and the masking of weak targets by strong ones, which the ECA does not address.
 
 \subsubsection{Batched ECA (ECA-B)}
 \label{subsubsec:ch2.chain.dsi.ecab}
 \todo{}
 % TODO: splitting the CPI into batches; effect on cost and on Doppler
 %       notch width.
+Colone et al. \citep{colone2009} then tested ECA-B, defined in Section~\ref{subsec:th.dsi.ecab}. On the same simulated data, ECA-B with $b = 10$ and $K = 50$ matched the detections of the Doppler-extended ECA with a computational saving of about four to six times \citep{colone2009}. On FM data recorded near Fiumicino airport with $K = 140$ taps at 200~kHz, the plain ECA fell well short of the theoretical cancellation of about 52~dB, and batches of 25~ms raised the mean clutter attenuation by 6~dB and made it stable over the acquisition \citep{colone2016}. Clutter attenuation is defined there as the ratio of the signal power at the input and the output of the cancellation filter, measured over the FM channel bandwidth \citep{colone2016}.
 
 \subsubsection{Sliding ECA (ECA-S)}
 \label{subsubsec:ch2.chain.dsi.ecas}
 \todo{}
 % TODO: overlapping windows; what it buys over ECA-B and what it costs.
+Colone et al. \citep{colone2016} compared the three ECA versions of Section~\ref{sec:th.dsi} on real data. In a MATLAB GPU implementation on an Nvidia Quadro M5000, on a DVB-T maritime data set with a 1~s CPI, the ECA took 0.24~s, ECA-B 0.67~s and ECA-S 3.12~s \citep{colone2016}.
 
 \subsubsection{ECA by Carrier and Doppler (ECA-CD)}
 \label{subsubsec:ch2.chain.dsi.ecacd}
 \todo{}
 % TODO: extending the subspace to non-zero Doppler; when that is needed.
+Schüpbach et al. \citep{schuepbach2020} applied ECA-CD, defined in Section~\ref{subsec:th.dsi.ecacd}, to FM. They report results on FM but give no analysis of the notch this approximation produces.
+
+\todo{paine also analysed ECA-CD.}
+
+\subsubsection{ECA by Levinson-Durbin (ECA-LD)}
+\label{subsubsec:ch2.chain.dsi.ecald}
+\todo{}
+% TODO: Toeplitz structure of the Gram matrix; Levinson solve; cost.
+Lu et al. \citep{lu2026} tested ECA-LD, defined in Section~\ref{subsec:th.dsi.ecald}, against the ECA, ECA-B and a frequency-domain batch variant, ECA-FBD, on simulated data with an FMCW reference and on L-band measured data from a coastal site. In the stationary simulation with $K = 40$ and $P = 6$, the ECA gave a signal-to-clutter-plus-noise ratio of 61.9~dB, ECA-LD 52.8~dB, ECA-B 43.9~dB and ECA-FBD 35.3~dB; with non-stationary clutter the figures were 43.4, 38.5, 30.2 and 34.0~dB \citep{lu2026}. The running times on an Intel i7-12700K were 222~s for the ECA, 192~s for ECA-B, 14.7~s for ECA-LD and 1.2~s for ECA-FBD \citep{lu2026}. On the measured data with $K = 150$ and $P = 30$, the ECA reached 32.9~dB, ECA-LD 29.4~dB, ECA-B 27.0~dB and ECA-FBD 23.3~dB \citep{lu2026}. Lu et al. conclude that ECA-LD trades a small loss of suppression from the Toeplitz approximation for a large saving in time, and that the loss grows with the condition number of the approximate matrix \citep{lu2026}. The data are confidential and the illuminator is not FM, so the figures are indicative only.
+% NOTE (Claude, 2026-10-14): Lu 2026 Tables 6 and 7 (PDF p.8 and p.11); the simulation
+%   reference is FMCW and the measured data L-band, not FM broadcast.
 
 \subsubsection{Conjugate Gradient Least Squares (CGLS)}
 \label{subsubsec:ch2.chain.dsi.cgls}
 \todo{}
 % TODO: iterative solution of the same least-squares problem; convergence;
 %       semiconvergence in finite precision; iteration count as a knob.
+CGLS is defined in Section~\ref{subsec:th.dsi.cgls}. Boray and Srinath brought the method to adaptive filtering \citep{boray1992} \todo{confirm: scanned PDF, read via Schüpbach 2020}. Tong \citep{tong2014} chose CGLS for the UCT real-time chain. On recorded FM data, two iterations per 0.5~s interval brought the residual to within 3~dB of the least-squares solution once the filter had converged, with each interval starting from the weights of the last, and the weights had to be updated every interval because the residual diverged when they were held \citep{tong2014}. Two iterations took about a tenth of the time and two thirds of the memory of the direct estimator \citep{tong2014}. Paine \citep{paine2019a} found on FERS simulations that the probability of detection rises with the iteration count from 10 and converges by 20 in the clean case and by 50 with jamming on both channels, whereas the one-shot ECA gives a constant result. The iteration count is thus a knob between cost and suppression, and a fixed count gives a fixed execution time and memory footprint \citep{tong2014,schuepbach2020}.
 
 \subsubsection{Adaptive Filtering Approaches}
 \label{subsubsec:ch2.chain.dsi.adaptive}
 \todo{}
 % TODO: LMS, NLMS, FBLMS; convergence vs tracking; why they are reviewed
 %       but not benchmarked here (or why they are, if that changes).
+The adaptive filters of Section~\ref{subsec:th.dsi.adaptive} have been compared several times. Cardinali et al. \citep{cardinali2007} compared LMS, NLMS, RLS, the ECA and its sequential version on simulated FM: RLS converged quickly to the ECA output level while LMS and NLMS lagged. Attalah et al. \citep{attalah2017} applied FBLMS to DVB-T passive radar. Garry et al. \citep{garry2017} evaluated NLMS, FBLMS, RLS and the ECA on digital television data and found FBLMS the most promising for real-time operation without loss of suppression. On FM, Schüpbach et al. \citep{schuepbach2020} found FBLMS the fastest of the four algorithms they compared, but with a narrower notch, poorer detection than ECA, CGLS or ECA-CD, and a convergence transient over the first CPIs.
 
 \subsubsection{Comparison of Methods}
 \label{subsubsec:ch2.chain.dsi.comparison}
-\todo{}
+
+\todo{This part needs to be more readable and align with the literature.}
+
 % TODO: table comparing cost, suppression and latency as reported in the
 %       literature. State which methods are carried forward and why.
+Table~\ref{table:ch2.dsi-comparison} collects the costs and the suppression figures the literature reports. The numbers come from different data sets, platforms and parameters, so they are indicative only. Two conclusions hold across the sources. First, the cost is dominated by the weight estimate, which scales with $K^2$ or $K^3$ for the direct solvers and with the iteration count for CGLS \citep{colone2016,lu2026,schuepbach2020}. Second, the algorithms differ more in their notch and their behaviour over time than in their mean suppression: on one FM recording, ECA, CGLS, ECA-CD and FBLMS all removed about 20~dB of map energy, but FBLMS detected fewer targets and ECA-CD had the narrowest notch \citep{schuepbach2020}. No source compares the ECA family, CGLS and FBLMS on one embedded GPU with the same data, parameters and metrics. This thesis benchmarks ECA-B, ECA-S, ECA-CD, ECA-LD, CGLS and FBLMS on the Jetson Nano for that reason. The plain ECA is the case of ECA-B with one batch.
+% NOTE (Claude, 2026-10-14): the list of benchmarked algorithms is from CLAUDE.md and
+%   src/dsi/, not the literature.
+
+\begin{table}[H]
+    \centering
+    \caption[Cost and suppression of DSI cancellation algorithms]{\textbf{Cost and suppression of DSI cancellation algorithms as reported in the literature.} Costs are per CPI. Times come from different platforms and are not comparable across rows.}
+    \begin{tabularx}{\textwidth}{l>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}X}
+    \toprule
+    \textbf{Algorithm} & \textbf{Cost} & \textbf{Suppression or detection} \\
+    \midrule
+    ECA & $27.5N\log_2 N + 16.5N + 16K^2$ FLOPs with the Toeplitz solver; 0.24~s per 1~s CPI on a Quadro M5000, DVB-T \citep{colone2016}; 10.5~s in MATLAB on a laptop, FM, $K = 70$ \citep{schuepbach2020} & about 52~dB theoretical on FM, less in practice \citep{colone2016}; about 20~dB of map energy \citep{schuepbach2020} \\
+    ECA-B & $B[27.5N_B\log_2 N_B + 16.5N_B + 16K^2]$; 0.67~s on the Quadro \citep{colone2016} & $+6$~dB over ECA at $T_B = 25$~ms on FM \citep{colone2016} \\
+    ECA-S & $B_S[17.5N_A\log_2 N_A + 15N_S\log_2 N_S + 16K^2 + 8.5N_A + 8N_S]$; 3.12~s on the Quadro \citep{colone2016} & removes the $1/T_B$ ambiguities \citep{colone2016} \\
+    ECA-CD & subspace of $2P+1$ per carrier; 1.6~s in MATLAB on a laptop \citep{schuepbach2020} & detection at least that of ECA and CGLS, narrowest notch \citep{schuepbach2020} \\
+    ECA-LD & $O(PN\log N + PKN + P^2K^2)$; 14.7~s against 222~s for ECA on an i7-12700K, simulation, $K = 40$, $P = 6$ \citep{lu2026} & 52.8~dB SCNR against 61.9~dB for ECA, stationary simulation \citep{lu2026} \\
+    CGLS & two products with $\mathbf{X}$ per iteration; 2 iterations about one tenth of the direct solve \citep{tong2014}; 6.4~s in MATLAB on a laptop, 30 iterations \citep{schuepbach2020} & within 3~dB of least squares at 2 iterations \citep{tong2014}; $P_d$ converges by 20 to 50 iterations \citep{paine2019a} \\
+    FBLMS & five $2n$-point FFTs per block of $n$ \citep{ferrara1980}; 0.8~s in MATLAB on a laptop \citep{schuepbach2020} & about 20~dB of map energy, fewer detections, narrow notch \citep{schuepbach2020} \\
+    \bottomrule
+    \end{tabularx}
+    \label{table:ch2.dsi-comparison}
+\end{table}
 
 %---------------------------------------------------------------------
 \subsection{Range-Doppler Map Formation}
 \label{subsec:ch2.chain.ard}
-\todo{}
 %---------------------------------------------------------------------
+The ARD map is formed by performing a cross correlation operation between the reference and cleaned surveillance signals. \todo{this is over simplified?}
 
-\subsubsection{The Cross-Ambiguity Function}
-\label{subsubsec:ch2.chain.ard.caf}
-\todo{}
-% TODO: definition; the map as a matched filter bank over delay and Doppler.
+% NOTE (Claude, 2026-10-14): the CAF, the XF, FX and batches algorithms and the
+%   complexity table moved to the Theory chapter at the split; the sentences below are
+%   the literature's reported choices and results, verbatim.
+Section~\ref{sec:th.ard} defines the CAF and its three algorithmic options.
 
-\subsubsection{Time-Domain Correlation}
-\label{subsubsec:ch2.chain.ard.timedomain}
-\todo{}
-% TODO: direct evaluation; cost.
+Direct evaluation of the CAF is the first option. For the UCT FM system, with $N = 819\,200$ samples and a map of about 280 by 1601 cells, Tong \citep{tong2014} judged this prohibitive even though every cell is independent and the work is parallel. 
 
-\subsubsection{Frequency-Domain Correlation}
-\label{subsubsec:ch2.chain.ard.freqdomain}
-\todo{}
-% TODO: FFT-based correlation; cost.
+Decimation after the mixing product is the second option. Tong \citep{tong2014} notes that Howland applied the same idea to FM passive radar with a cascaded integrator-comb filter and decimation by 128, for a reduction in complexity of about 15 times. For FM, with a few hundred range bins and long CPIs, Tong \citep{tong2014} found the XF method preferable. Tong \citep{tong2014} reports speed-ups of the order of 100 times over the XF method, with maps that look identical when the batch length is tuned, but shows a target at 116~Hz lost with a longer batch and chose XF for the UCT chain.
 
-\subsubsection{Batched Correlation}
-\label{subsubsec:ch2.chain.ard.batched}
-\todo{}
-% TODO: batch-and-FFT method; approximation made; Doppler resolution limits.
+\todo{The third option: batches. I think Paine implemented this}
 
-\subsubsection{Computational Complexity}
-\label{subsubsec:ch2.chain.ard.complexity}
-\todo{}
-% TODO: side-by-side operation counts; this justifies the choice in Ch. 3.
-
-%---------------------------------------------------------------------
 \subsection{Constant False Alarm Rate Detection}
 \label{subsec:ch2.chain.cfar}
-\todo{}
+
 %---------------------------------------------------------------------
+% NOTE (Claude, 2026-10-14): the CA-CFAR definition, its P_fa relation and the
+%   variants moved to the Theory chapter at the split; the sentences below are the
+%   literature's reported choices, verbatim.
+Section~\ref{sec:th.cfar} defines the CA-CFAR detector and its two-dimensional window. Colone et al. \citep{colone2009} apply a conventional two-dimensional CA-CFAR with 120 training bins at a nominal $P_{fa}$ of $10^{-4}$. Tong \citep{tong2014} argues against the range dimension for FM: the extent of a target in range changes with the instantaneous bandwidth of the broadcast, so the guard cells cannot be set, whereas long integration gives sharp target edges in Doppler. The UCT chain therefore ran a greatest-of CA-CFAR in the Doppler dimension only, on the squared magnitude, with $P_{fa} = 10^{-5}$, four guard cells and five reference cells on each side, and chose greatest-of for the clutter edges that the mountains of the Western Cape produce \citep{tong2014}. 
 
-\subsubsection{Cell-Averaging CFAR}
-\label{subsubsec:ch2.chain.cfar.ca}
-\todo{}
-% TODO: reference window, guard cells, threshold factor, P_fa relation.
+Kuschel et al. \citep{kuschel2019} add two cautions for passive radar. The disturbance is dominated by direct-signal residue rather than thermal noise, so the Gaussian assumption behind the threshold must be checked against the histogram of the map. And a target may occupy more than one cell, so adjacent detections should be clustered into one, which cuts the number of detections passed on \citep{kuschel2019,colone2023}. 
 
-\subsubsection{Two-Dimensional CFAR}
-\label{subsubsec:ch2.chain.cfar.2d}
-\todo{}
-% TODO: extension to the range-Doppler map; window shape; edge handling.
+Venter et al. \citep{venter2011} implemented CA-CFAR on a GPU for pulse-Doppler radar and found the kernel faster than the CPU for large inputs, but not the whole operation once the transfer to and from the GPU was counted.
 
-\subsubsection{Variants and Their Trade-offs}
-\label{subsubsec:ch2.chain.cfar.variants}
-\todo{}
-% TODO: GO, SO, OS-CFAR; clutter edges and multiple targets; why CA is used.
-
+% \subsubsection{Variants and Their Trade-offs}
+% \label{subsubsec:ch2.chain.cfar.variants}
+% \todo{}
+% % TODO: GO, SO, OS-CFAR; clutter edges and multiple targets; why CA is used.
 
 % %=====================================================================
 % \section{Performance Evaluation of Passive Radar}
@@ -409,28 +353,13 @@ Each variant of a DSI algorithm focuses on solving for this solution: an $N \tim
 % % TODO: FERS; golden-reference verification against MATLAB.
 % % TODO: drop this subsection if Chapter 3 covers it fully.
 
-
 %=====================================================================
 \section{Real-Time and Embedded Implementations}
 \label{sec:ch2.implementations}
 \todo{}
 %=====================================================================
-
-%---------------------------------------------------------------------
-\subsection{GPU-Based Passive Radar Processing}
-\label{subsec:ch2.implementations.gpu}
-\todo{}
-%---------------------------------------------------------------------
-% TODO: desktop-GPU implementations; which stages were ported; speed-ups
-%       reported and against what baseline.
-
-%---------------------------------------------------------------------
-\subsection{Embedded and Single-Board Implementations}
-\label{subsec:ch2.implementations.embedded}
-\todo{}
-%---------------------------------------------------------------------
-% TODO: Jetson and other SBC passive radar work; memory and power limits.
-
+% This sections functions as a review of the various systems described in the literature and how they perform. The main focus is Craig Tong's papers, as this is the legacy system my project builds on.
+This section reviews the real-time passive radar systems described in the literature and how they perform. The main focus is the UCT system of Tong, as this project builds on it.
 %---------------------------------------------------------------------
 \subsection{The Previous UCT FM Passive Radar System}
 \label{subsec:ch2.implementations.uct}
@@ -441,17 +370,43 @@ Each variant of a DSI algorithm focuses on solving for this solution: an $N \tim
 \label{subsubsec:ch2.implementations.uct.architecture}
 \todo{}
 % TODO: receiver, PXGF transport, processing server, ARDView; cite Tong.
+The UCT commensal radar processing chain of Tong \citep{tong2014} is the system this project replaces. A USRP2 with a BasicRX daughterboard samples the reference and surveillance channels coherently at 100~MSps, and its FPGA down-converts one FM channel from each to complex baseband at about 200~kSps \citep{tong2015}. The samples leave the USRP over Gigabit Ethernet in the PXGF streaming format of Peralex Electronics, as chunks of interleaved 16-bit IQ with timestamp, rate and frequency metadata, and reach the processing server over a TCP socket during live operation or from a file for replay \citep{tong2014}. The server packetises the stream into CPI blocks, cancels and correlates them on the GPU, and sends the resulting amplitude-range-Doppler (ARD) maps over TCP to a Qt viewer, ARDView, which runs the CFAR detector on receipt so that the operator can tune it while watching the map \citep{tong2014}. The viewer re-broadcasts the detections for a tracker that was still under development \citep{tong2014}.
+% NOTE (Claude, 2026-10-14): the PXGF format and its chunk contents are from
+%   docs/legacy-audit.md sections 3 and 4.1; Tong 2014 names the socket/file source but
+%   not the format.
 
 \subsubsection{The CUDA Processing Server}
 \label{subsubsec:ch2.implementations.uct.cudaprocserver}
 \todo{}
 % TODO: what it did on the TK1; what survives (docs/legacy-audit.md).
+The server is a pipeline of threads, one per stage, with a two-element circular buffer between packetising and processing so that one CPI is packetised while the previous one is on the GPU \citep{tong2014}. Each GPU has its own thread and context, and with several GPUs one can correlate while the others cancel the next CPI \citep{tong2014}. Cancellation is CGLS on the GPU through cuBLAS, run over sub-CPIs of 0.5~s, or 102\,400 samples, because the model matrix for a full 4~s CPI with 200 taps would occupy 1.28~GB in single precision, and because the shorter block gives a 2~Hz Doppler notch \citep{tong2014}. The map is formed by the XF algorithm with cuFFT over 4~s CPIs of 819\,200 samples, 280 range bins and 1601 Doppler bins \citep{tong2014}. Typical parameters were 10 CGLS iterations over 210 to 250 range bins, and GOCA-CFAR with 4 guard and 6 reference cells per side at $P_{fa} = 10^{-5}$ \citep{tong2014}. On desktop GPUs each card processed a CPI in about a fifth of its capture time \citep{tong2014}. On the Jetson TK1, with a 192-core Kepler GPU and a quad-core ARM Cortex-A15, the same code compiled without change; cancellation took 3059~ms, the CAF 1420~ms, and the complete chain delivered a map every 4690~ms for a 4~s CPI, which Tong summarises as 4~s of data in about 4~s \citep{tong2014}. Tong and Coetser \citep{tong2015} packaged this as a minimal node: the USRP2, a narrowband RF front end at 89~MHz and the TK1, running CGLS, XF and GOCA-CFAR over 150 range bins, and detected airliners to 250~km bistatic range, about 100~km from a receiver 75~km north of Cape Town International Airport. The surviving configuration files of the server record the same design: CGLS with 30 iterations, cancellation blocks of 102\,400 samples, 5 Doppler bins, a CPI of 819\,200 samples and maps of 120 by 1601 cells.
+% NOTE (Claude, 2026-10-14): the configuration-file sentence is from docs/legacy-audit.md
+%   section 4.3 (UCTUSRP.conf). Tong 2014 says "4 s of data in ~4 s" (PDF p.146) but
+%   Table 3.9 (PDF p.166) gives 4690 ms, i.e. slower than real time; both are stated.
+%   The 1.28 GB on PDF p.114 is Tong's figure for a 102400 x 200 matrix; in complex
+%   float that is about 164 MB, and 1.28 GB fits the full 819200-sample CPI.
 
 \subsubsection{Limitations}
 \label{subsubsec:ch2.implementations.uct.limitations}
 \todo{}
 % TODO: what the old system could not do and what motivates the upgrade.
+The processing server, the CGLS canceller, the CFAR and the tracker were kept in UCT repositories that are no longer reachable. The tree inherited by this project holds the PXGF library, the file converter and ARDView, but no CUDA, MATLAB or cancellation code, so the old chain cannot be run, only re-created from the thesis and the configuration record. Three limits of the design itself motivate the upgrade. On the TK1 one CPI took 4690~ms against a 4~s CPI, so the embedded platform had no margin for a second algorithm or a second channel \citep{tong2014}. The chain implemented one canceller, so suppression could not be traded against other algorithms, and detection ran in the display client rather than in the processing path \citep{tong2014}. The ingest depended on a proprietary streaming format and on a 32-bit CUDA 6.5 toolchain for the TK1 that does not carry over to current boards. This project replaces the transport with VITA~49.2, the board with the Jetson Nano and the single canceller with six, and moves detection into the chain.
+% NOTE (Claude, 2026-10-14): sentences 1, 2 and 6 are from docs/legacy-audit.md
+%   sections 1, 6.1 and 6.6; the last sentence is from CLAUDE.md. Neither is a
+%   literature source.
 
+\subsection{Other Passive Radar Systems}
+\label{subsec:ch2.implementations.other}
+Desktop GPUs have carried full passive radar chains since about 2012. Bernaschi et al. \citep{bernaschi2012} ran lattice and NLMS cancellation and range-Doppler processing on GeForce GTX~480 and Tesla C2050 cards beside a 16-core Xeon, and argued that the CPU and GPU combination gives the best performance per watt for 0.5 to 1~Gbit/s of input. Zhang et al. \citep{zhang2014} put an FM chain for two carriers on one Tesla C2075, with direct matrix inversion for cancellation in double precision because of accumulation error and the map and CFAR in single precision, at 384~ms per carrier and speed-ups of 37 to 69 over CPUs. Szczepankiewicz et al. \citep{szczepankiewicz2015} report 58.5~ms for the whole FM chain with seven beams and a 1~s CPI on a GTX Titan in single precision, against about 250~s for the same stages in MATLAB. Liu et al. \citep{liu2016} parallelised a three-level detector on a Tesla card for a CMMB system. Bu et al. \citep{bu2020} ran ECA-B on an RTX~2070 in double precision without reaching real time \todo{confirm: PDF text is unreadable, from the index notes}. Zhao et al. \citep{zhao2023} ran ECA-B, range-Doppler processing and 2D CA-CFAR on an RTX~3090 against an FM recording sampled at 2.4~MHz, at 0.379~s per frame and a speed-up of 50 over an i9 CPU, with the CFAR stage gaining most. Colone et al. \citep{colone2016} report ECA, ECA-B and ECA-S at 0.24, 0.67 and 3.12~s per 1~s CPI on a Quadro M5000 from MATLAB. Gregg and Hazelwood \citep{gregg2011} warn that such speed-ups mean little unless the transfer of data to and from the GPU is counted, which can take 2 to 50 times the kernel time, and Venter et al. \citep{venter2011} found exactly that for CFAR. These systems share two features. They use hundreds to thousands of CUDA cores with dedicated memory, and they report speed-ups against a CPU rather than latency against the CPI.
+% NOTE (Claude, 2026-10-14): "about 250 s" is the sum of Szczepankiewicz 2015 Table I
+%   (170 + 5000 + 40000 + 7000 + 200000 ms). Bu 2020 is cited from
+%   Papers/Summary_of_papers.md because its PDF text layer is garbled.
+
+Embedded implementations are fewer. The TK1 node of Tong and Coetser \citep{tong2015} was the first FM passive radar on an embedded GPU. Sendall \citep{sendall2016} built a low-cost FM system on a USRP B210 and a Jetson TK1 with CUDA 6.5, compared LU, Cholesky, QR, CGLS, CLEAN and lattice cancellers on it, and found an optimised Cholesky and a hybrid LU the fastest. His complete chain processed a 4~s CPI in 1.017~s on the TK1 and 129~ms on a laptop, and detected aircraft to 91~km from the receiver \citep{sendall2016}. Moser et al. \citep{moser2019} ran FM and DAB chains on a Raspberry Pi~3 with an RTL-SDR, with FBLMS for cancellation and the batches algorithm for the map on the Pi's GPU, and measured 510~ms for filtering and 158~ms for the map per 1~s FM CPI, with no CFAR stage. Schüpbach et al. \citep{schuepbach2020} then compared cancellers with that platform in mind, as reviewed in Section~\ref{subsubsec:ch2.chain.dsi.comparison}. No published work runs more than one ECA-family canceller on an embedded GPU, and none reports the suppression and latency of several cancellers on the same board with the same data.
+% NOTE (Claude, 2026-10-14): Sendall 2016 gives 959.84 ms per CPI in the comparison
+%   table (PDF p.142) and 1.017 s in the conclusions (PDF p.143); the latter is used.
+%   "First FM passive radar on an embedded GPU" is this review's claim from the sources
+%   read, not a statement in Tong 2015.
 
 % %=====================================================================
 % \section{Hardware Platforms}
@@ -525,7 +480,6 @@ Each variant of a DSI algorithm focuses on solving for this solution: an $N \tim
 % %     \caption[Platform comparison]{\textbf{Platform comparison.} TODO}
 % %     \label{table:ch2.platformcomparison}
 % % \end{table}
-
 
 %=====================================================================
 \section{Summary and Research Gap}

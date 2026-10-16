@@ -1,0 +1,356 @@
+%=====================================================================
+%   CHAPTER 3 - THEORY
+%=====================================================================
+%   Created 2026-10-14 by splitting the literature review: the equations
+%   and definitions the later chapters use live here; the review keeps
+%   what the literature reports and the research gap. Text moved verbatim.
+%=====================================================================
+\chapter{Theory}
+\label{ch:theory}
+
+%=====================================================================
+\section{Introduction}
+\label{sec:th.introduction}
+\todo{}
+%=====================================================================
+% TODO: what this chapter defines and which later chapters use it.
+
+%=====================================================================
+\section{Bistatic Geometry}
+\label{sec:th.geometry}
+\todo{}
+The geometry of a basic, passive bistatic radar is depicted in Figure~\ref{fig:bistatic-geometry}.
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.5\textwidth]{figs/lit_review/bistatic_geometry_kuschel_2019.jpg}
+    \caption[Bistatic radar geometry]{Bistatic radar geometry: transmitter (tx), receiver (rx) and target, with the baseline $L$, the ranges $R_T$ and $R_R$, the bistatic angle $\beta$, the target velocity $V$ at angle $\alpha$ to the bisector, and the receiver look angle $\theta_R$. Reproduced from Kuschel et al.\ \citep{kuschel2019}. \todo{confirm caption}}
+    \label{fig:bistatic-geometry}
+\end{figure}
+
+The transmitter, the receiver and the target define the bistatic plane. For a ground-based transmitter and receiver and an airborne target, this plane is not parallel to the surface of the Earth \citep{kuschel2019}. The line from the transmitter to the receiver is the baseline, $L$. The range from the transmitter to the target is $R_T$, and the range from the target to the receiver is $R_R$. The angle at the target between the directions to the transmitter and to the receiver is the bistatic angle, $\beta$ \citep{kuschel2019}.
+
+\subsection{Bistatic Range and the Baseline}
+\label{subsec:th.geometry.range}
+\todo{}
+% TODO: bistatic range definition, ellipses of constant range, the baseline
+%       as the zero-range reference.
+Bistatic range is the distance from the transmitter to the target to the receiver, measured relative to the baseline:
+\begin{equation}
+    R_b = R_T + R_R - L
+    \label{eq:bistatic-range}
+\end{equation}
+The receiver measures the time difference of arrival between the direct signal and the target echo. The product of this time difference and the speed of light is $R_b$ \citep{kuschel2019}. A target on the baseline has a bistatic range of zero, so the baseline is the zero-range reference. One bistatic range measurement does not give a position. The points with the same bistatic range form an ellipse in the bistatic plane, with the transmitter and the receiver at its foci. In three dimensions the ellipse becomes an ellipsoid \citep{kuschel2019}.
+
+\subsection{Bistatic Doppler}
+\label{subsec:th.geometry.doppler}
+\todo{}
+% TODO: bistatic Doppler expression, dependence on the bistatic angle,
+%       zero-Doppler cases.
+The bistatic Doppler shift is the rate of change of the bistatic range divided by the carrier wavelength $\lambda$ \citep{kuschel2019}:
+\begin{equation}
+    f_b = \frac{1}{\lambda} \frac{\mathrm{d}}{\mathrm{d}t} \left( R_T + R_R \right)
+    \label{eq:bistatic-doppler}
+\end{equation}
+The transmitter and the receiver are stationary, so only the target motion contributes. For a target with speed $V$, whose velocity makes an angle $\alpha$ with the bisector of the bistatic angle, the Doppler shift is \citep{kuschel2019}
+\begin{equation}
+    f_b = \frac{2V}{\lambda} \cos\alpha \cos\frac{\beta}{2}
+    \label{eq:bistatic-doppler-geometry}
+\end{equation}
+Two cases follow from this expression. On the extended baseline, $\beta = 0$ and the bistatic Doppler shift equals the monostatic Doppler shift. A target that moves along an iso-range ellipse has zero Doppler shift, because its bistatic range does not change. Such a target cannot be separated from the stationary clutter, which also has zero Doppler shift \citep{kuschel2019}. A target that moves along the baseline also has zero Doppler shift \citep{kuschel2019}.
+
+%---------------------------------------------------------------------
+\section{Signal Model}
+\label{sec:th.signalmodel}
+\todo{}
+%---------------------------------------------------------------------
+
+\subsection{Reference and Surveillance Channels}
+\label{subsec:th.signalmodel.channels}
+\todo{}
+% TODO: two-channel receiver, purpose of each channel, reference purity.
+The radar setup includes a transmitter or illuminator of opportunity, and two receive channels: a reference and a surveillance channel. The reference channel is aimed directly at the illuminator of opportunity such that the direct signal is the strongest one received. The surveillance antenna is aimed towards some area in which an observed target may be: for example, Cape Town International Airport. The processing uses the reference signal as its copy of the transmitted signal, so the reference signal must be as clean as possible. This needs a line of sight to the transmitter and a directional antenna, so that multipath does not reach the reference channel \citep{kuschel2019}. An analogue broadcast signal such as FM cannot be reconstructed from synchronisation features in the signal, so the quality of the reference channel matters more than it does for a digital waveform \citep{kuschel2019}. The reference channel is normally a single channel. The surveillance side can have more than one channel, which gives a direction of arrival for each detection \citep{kuschel2019,colone2023}.
+
+\subsection{Direct Signal, Multipath and Clutter}
+\label{subsec:th.signalmodel.clutter}
+\todo{}
+% TODO: composition of the surveillance channel; stationary clutter as
+%       delayed copies of the reference at zero Doppler.
+The signal received by the surveillance channel is a mixture of the direct (reference) signal, and many other delayed and Doppler shifted versions of that direct signal. Each delayed and Doppler shifted "echo" comes from static and dynamic clutter, as well as the moving target itself. The nature of the received signal is one of the most important things to understand, because the heaviest part of a passive radar processing chain is designed around filtering out everything except the echoes of the signal reflected off our targets. In this case, our target is a fast moving aircraft; thus, its echo will have some magnitude of Doppler shift proportional to its velocity. Other clutter in our scenario also causes echoes: static mountains and city infrastructure cause delayed signals to arrive. Moving trees or ocean waves and clouds may cause delayed and Doppler shifted echoes to arrive. Figure~\ref{fig:pbr-scenario} also depicts these various signals in the scenario.
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{figs/lit_review/pbr_processing_chain_colone_2023.jpg}
+    \caption[Passive bistatic radar scenario and processing chain]{Passive bistatic radar scenario and processing chain: the transmitter of opportunity, the direct signal at the reference antenna, the target echo at the surveillance antennas, and the processing stages that follow. Reproduced from Colone et al.\ \citep{colone2023}. \todo{confirm caption}}
+    \label{fig:pbr-scenario}
+\end{figure}
+
+Colone et al.\ \citep{colone2009} model the clutter and multipath as a set of discrete scatterers. The complex envelope of the surveillance signal is then
+\begin{equation}
+    s_{\mathrm{surv}}(t) = A_{\mathrm{surv}}\, d(t)
+    + \sum_{m=1}^{N_T} a_m\, d(t - \tau_m)\, e^{j 2\pi f_{d_m} t}
+    + \sum_{i=1}^{N_C} c_i\, d(t - \tau_{c_i})
+    + n_{\mathrm{surv}}(t)
+    \label{eq:surv-model}
+\end{equation}
+where $d(t)$ is the complex envelope of the direct signal, $A_{\mathrm{surv}}$ is the complex amplitude of the direct signal received through the sidelobes of the surveillance antenna, $a_m$, $\tau_m$ and $f_{d_m}$ are the amplitude, delay and Doppler shift of the $m$-th of $N_T$ targets, $c_i$ and $\tau_{c_i}$ are the amplitude and delay of the $i$-th of $N_C$ stationary scatterers, and $n_{\mathrm{surv}}(t)$ is thermal noise \citep{colone2009}. The reference signal is
+\begin{equation}
+    s_{\mathrm{ref}}(t) = A_{\mathrm{ref}}\, d(t) + n_{\mathrm{ref}}(t)
+    \label{eq:ref-model}
+\end{equation}
+on the assumption that the reference antenna receives no target echoes, no clutter echoes and no multipath \citep{colone2009}. The direct signal and the stationary clutter are copies of $d(t)$ with zero Doppler shift. The direct signal has zero delay and the clutter has a delay $\tau_{c_i}$. These zero-Doppler terms are what the cancellation stage in Section~\ref{subsec:ch2.chain.dsi} removes.
+% NOTE (Claude, 2026-10-14): subsubsec:ch2.chain.dsi.leastsquares now uses s_surv and
+%   s_ref from eq:surv-model and eq:ref-model (resolved 2026-10-14).
+
+\subsection{Target Echoes}
+\label{subsec:th.signalmodel.targets}
+\todo{}
+% TODO: delayed and Doppler-shifted copies; relative power to the direct
+%       signal; where the bistatic radar equation enters.
+A target echo is a delayed and Doppler-shifted copy of the direct signal, the second term of Equation~\ref{eq:surv-model}. Its delay gives the bistatic range of Equation~\ref{eq:bistatic-range} and its Doppler shift follows Equation~\ref{eq:bistatic-doppler-geometry}. Its received power follows from the bistatic radar equation \citep{kuschel2019}:
+\begin{equation}
+    P_r = \frac{P_t \, G_t \, G_r \, \lambda^2 \, \sigma_b \, F_t^2 \, F_r^2}
+               {(4\pi)^3 \, R_T^2 \, R_R^2 \, L_t \, L_r}
+    \label{eq:bistatic-radar}
+\end{equation}
+where $P_t$ is the transmitted power, $G_t$ and $G_r$ are the transmitter and receiver antenna gains in the direction of the target, $\sigma_b$ is the bistatic radar cross-section, $F_t$ and $F_r$ are the propagation factors on the two paths, and $L_t$ and $L_r$ are the transmitter and receiver losses \todo{cite Willis for the loss terms}.
+% NOTE (Claude, 2026-10-14): Kuschel 2019 eq. (6) gives this equation without the loss
+%   terms L_t and L_r. The form with losses is Willis's (Bistatic Radar), which is not in
+%   thesis.bib. Add the entry and cite it here, or drop the loss terms.
+The direct signal that reaches the surveillance antenna travels only the baseline and is not scattered by the target. Its power is \citep{kuschel2019}
+\begin{equation}
+    P_d = \frac{P_t \, G_t \, G_r \, \lambda^2 \, F^2}{(4\pi)^2 \, L^2}
+    \label{eq:direct-power}
+\end{equation}
+with $G_t$ and $G_r$ now the gains along the baseline and $F$ the propagation factor on it. With free-space propagation, equal gains in both directions and no losses, the ratio of the two is
+\begin{equation}
+    \frac{P_d}{P_r} = \frac{4\pi \, R_T^2 \, R_R^2}{\sigma_b \, L^2}
+    \label{eq:direct-to-echo}
+\end{equation}
+% NOTE (Claude, 2026-10-14): eq:direct-to-echo is derived from eq:bistatic-radar and
+%   eq:direct-power under the stated assumptions; it has no literature source.
+The ranges are tens of kilometres and the radar cross-section is tens of square metres, so the direct signal is many orders of magnitude stronger than the echo. Section~\ref{subsec:ch2.pbr.dynamicrange} gives the figures from the literature.
+% NOTE (Claude, 2026-10-14): "tens of kilometres" and "tens of square metres" are
+%   order-of-magnitude framing with no citation. Pisane 2012 has measured VHF aircraft
+%   RCS; bring the number here when the aircraft subsection is drafted, or drop the sentence.
+
+%---------------------------------------------------------------------
+\section{The FM Waveform}
+\label{sec:th.fm}
+\todo{}
+%---------------------------------------------------------------------
+\subsection{Band and Modulation}
+\label{subsec:th.fm.waveform}
+\todo{}
+% TODO: band, channel spacing, transmitter power and coverage, continuous
+%       transmission, why FM suits long-range air surveillance.
+% NOTE (Claude, 2026-10-14): the ITU-R BS.450, BS.412, GE84 and ICASA facts below are
+%   cited from Report/docs/fm_broadcast_summary.md, which records the section of each
+%   document they were read from. The PDFs themselves are not in Papers/. Add them and
+%   check each page before submission.
+FM sound broadcasting uses the band 87.5 to 108~MHz in ITU Region~1, which includes South Africa \citep{itu_bs412}. Carrier frequencies are integer multiples of 100~kHz and the channel spacing is 100~kHz \citep{itu_bs412}. The Geneva 1984 agreement plans the band for Region~1 \citep{itu_ge84}. In South Africa, ICASA assigns the band to public, commercial and community broadcasters in the Terrestrial Broadcasting Frequency Plan \citep{icasa_tbfp2013}. The frequency and power of a given transmitter come from this plan.
+
+The modulation is wideband FM. The peak deviation is $\pm 75$~kHz, and no combination of signals may exceed it \citep{itu_bs450}. The audio is pre-emphasised, with a 50~$\mu$s time constant in Europe \citep{itu_bs450} \todo{TBC: the South African value}. Stereo uses the pilot-tone system. The mono-compatible sum signal occupies 0 to 15~kHz \citep{lauri2007}. A pilot tone sits at 19~kHz. The difference signal rides on a suppressed 38~kHz subcarrier with sidebands from 23 to 53~kHz, and data subcarriers may occupy 53 to 76~kHz \citep{itu_bs450}. The mean modulation power over any 60~s may not exceed that of a single tone with $\pm 19$~kHz deviation \citep{itu_bs412}, so the mean deviation is far below the peak.
+% NOTE (Claude, 2026-10-14): BS.450-4 does not state the 15 kHz audio limit; it follows
+%   from the pilot at 19 kHz and the S band from 23 kHz. Lauri 2007 p.2 states 15 kHz
+%   for the emulator's brick-wall filter, so that is what is cited.
+
+\subsection{Continuous Transmission and Integration Gain}
+\label{subsec:th.fm.integration}
+\todo{}
+An FM station transmits continuously. Continuity and wide coverage are what make broadcast transmitters suitable for long-range surveillance \citep{kuschel2019,colone2023}. A continuous-wave radar gets a high integration gain because the signal energy is emitted continuously \citep{malanowski2008}. The signal-to-noise ratio after correlation is the input ratio multiplied by the time-bandwidth product $BT$, where $T$ is the integration time \citep{malanowski2008}. The power and the bandwidth are outside the designer's control, so a longer integration time is one of the few ways to raise the signal-to-noise ratio \citep{malanowski2008}. Long integration also gives fine Doppler resolution \citep{kuschel2019}.
+
+\subsection{Range and Doppler Resolution}
+\label{subsec:th.fm.resolution}
+\todo{}
+% TODO: resolution from bandwidth and integration time; typical figures,
+%       each with a citation.
+The delay resolution of a waveform is the reciprocal of its bandwidth $B$. The equivalent monostatic range resolution is $c/2B$, where $c$ is the speed of light \citep{kuschel2019}. In the bistatic plane the separation of two neighbouring iso-range ellipses depends on the bistatic angle (Figure~\ref{fig:bistatic-range-resolution}) \citep{kuschel2019}:
+\begin{equation}
+    \delta R_b \approx \frac{c}{2 B \cos(\beta/2)}
+    \label{eq:bistatic-range-resolution}
+\end{equation}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\textwidth]{figs/lit_review/bistatic_range_resolution_kuschel_2019.jpg}
+    \caption[Bistatic range resolution]{Bistatic range resolution: two neighbouring iso-range ellipses, their separation $\delta R_{\mathrm{bist}}$ along the bisector of the bistatic angle, and the pseudo-monostatic resolution $\delta R_{\mathrm{pseudo}}$ on the extended baseline. Reproduced from Kuschel et al.\ \citep{kuschel2019}. \todo{confirm caption}}
+    \label{fig:bistatic-range-resolution}
+\end{figure}
+For a typical FM channel bandwidth of 50~kHz the monostatic equivalent is 3000~m \citep{griffiths2007}, and for a 100~kHz channel it is 1500~m \citep{olsen2008}. The measured values in Table~\ref{table:ch2.fm-ambiguity} range from 1.8 to 16.5~km \citep{griffiths2005af}. Range resolution of kilometres is poor by the standards of active radar, but it is adequate for detecting aircraft \citep{kuschel2019}.
+% NOTE (Claude, 2026-10-14): the chain's range axis is bistatic range R_b = c*tau, so a
+%   delay bin of 1/f_s is c/f_s in R_b, twice the "monostatic equivalent" c/2B quoted in
+%   the literature. Keep the two conventions apart when the design chapter quotes bin sizes.
+
+The Doppler resolution is the reciprocal of the integration time $T$ \citep{colone2009}. A Doppler shift $f_b$ corresponds to a bistatic velocity $\lambda f_b$ \citep{colone2009}. An integration time of 1~s therefore resolves 1~Hz, or about 3~m/s at the FM wavelength of about 3~m. The integration time cannot grow without limit. A target with bistatic acceleration causes a phase mismatch that grows with the square of the integration time, and a fast target migrates through range cells within the interval \citep{malanowski2008}. Malanowski and Kulpa \citep{malanowski2008} give the bounds and the corrections for each.
+% NOTE (Claude, 2026-10-14): 1 Hz and 3 m/s are arithmetic from 1/T and lambda*f_b at
+%   lambda = 3 m; no literature source. Malanowski 2008's bound T_max for acceleration A
+%   is garbled in the PDF text layer; read eq. (7) on p.323 before quoting it.
+
+%---------------------------------------------------------------------
+\section{Direct-Signal Interference Cancellation}
+\label{sec:th.dsi}
+\todo{}
+%---------------------------------------------------------------------
+\subsection{Formulation as a Least-Squares Problem}
+\label{subsec:th.dsi.leastsquares}
+\todo{}
+% TODO: clutter subspace spanned by delayed reference copies; the normal
+%       equations; the projection interpretation shared by the ECA family.
+The target echo can be found by subtracting from the received surveillance signal the amount of "clutter" that it contains. Such "clutter" can be modelled as the sum of delayed and Doppler-shifted copies of the reference signal. With $K$ delays at zero Doppler, the cleaned signal is
+\begin{equation}
+    y[n] = s_{\mathrm{surv}}[n] - \sum_{k=0}^{K-1} w_k \, s_{\mathrm{ref}}[n-k]
+    \label{eq:dsi-filter}
+\end{equation}
+where $w_k$ is the complex weight of the copy delayed by $k$ samples, and $K$ covers the range extent over which clutter is expected \citep{colone2009}. We want the scale factors $w_k$ that leave the least energy behind; thus, this is a least-squares problem with a closed-form answer. Colone et al. \citep{colone2009} write it in matrix form. The columns of the $N \times K$ matrix $\mathbf{X}$ are the delayed copies of the reference signal, and the weight vector $\mathbf{w}$ minimises $\lVert \mathbf{s}_{\mathrm{surv}} - \mathbf{X}\mathbf{w} \rVert^2$. The solution is
+\begin{equation}
+    \mathbf{w} = (\mathbf{X}^H \mathbf{X})^{-1} \mathbf{X}^H \mathbf{s}_{\mathrm{surv}}
+    \label{eq:dsi-ls}
+\end{equation}
+The Gram matrix $\mathbf{G} = \mathbf{X}^H \mathbf{X}$ has entries $G_{ij}$ that represent how similar the reference delayed by $i$ is to the reference delayed by $j$. The right-hand side $\mathbf{v} = \mathbf{X}^H \mathbf{s}_{\mathrm{surv}}$ has entries $v_i$ that represent how similar the reference delayed by $i$ is to the surveillance signal. This is effectively a map of how the clutter is dispersed in the scenario physically. The weights are the solution of the normal equations
+\begin{equation}
+    \mathbf{G} \mathbf{w} = \mathbf{v}
+    \label{eq:dsi-normal}
+\end{equation}
+Each variant of a DSI algorithm focuses on solving this $K \times K$ system of equations. The cleaned signal can also be written as a projection,
+\begin{equation}
+    \mathbf{y} = \left[ \mathbf{I} - \mathbf{X} (\mathbf{X}^H \mathbf{X})^{-1} \mathbf{X}^H \right] \mathbf{s}_{\mathrm{surv}} = \mathbf{P} \, \mathbf{s}_{\mathrm{surv}}
+    \label{eq:dsi-projection}
+\end{equation}
+where $\mathbf{P}$ projects the surveillance signal onto the subspace orthogonal to the disturbance subspace spanned by the columns of $\mathbf{X}$ \citep{colone2009}. Doppler-shifted copies of the reference can be added as further columns, which multiplies the number of unknowns by the number of Doppler bins covered \citep{colone2006,colone2009}.
+% NOTE (Claude, 2026-10-14): Colone 2009 writes the weights as alpha and the subspace
+%   dimension as M = (2P+1)K; this section keeps the author's w and uses K for the
+%   zero-Doppler case. The Chapter 3 symbols should follow this section.
+
+\subsection{Extensive Cancellation Algorithm (ECA)}
+\label{subsec:th.dsi.eca}
+\todo{}
+Colone et al. \citep{colone2006} introduced the extensive cancellation algorithm (ECA) as the direct solution of Equation~\ref{eq:dsi-ls} over the whole CPI. The disturbance subspace is spanned by the $K$ delayed copies of the reference and, where clutter spreads in Doppler, by their copies shifted to the $2P+1$ Doppler bins around zero, so it has $M = (2P+1)K$ dimensions \citep{colone2006,colone2009}. Forming and inverting the $M \times M$ matrix $\mathbf{X}^H \mathbf{X}$ costs of the order of $NM^2 + M^2 \log M$ complex products \citep{colone2009}. A direct implementation of the weight estimate costs about $4NK^2 + 4K^3$ floating-point operations \citep{colone2016}.
+
+\subsection{Batched ECA (ECA-B)}
+\label{subsec:th.dsi.ecab}
+\todo{}
+The batches version, ECA-B, applies the ECA to $b$ consecutive portions of the CPI of $N_B = N/b$ samples each, with the weights estimated and applied per batch \citep{colone2009}. The total number of complex products is about the same, $NM^2 + bM^2 \log M$, but each solve works on $N_B$ samples, so the storage per solve falls by a factor $b$ and the cancellation of a batch can start before the whole CPI has arrived \citep{colone2009}. The batch duration $T_B$ sets the time over which the weights are estimated. A shorter batch follows the slowly varying characteristics of a broadcast, and it degrades the Doppler resolution of the filter, which widens the notch in Doppler to about $1/T_B$ \citep{colone2009,colone2016}.
+
+\subsection{Sliding ECA (ECA-S)}
+\label{subsec:th.dsi.ecas}
+\todo{}
+Colone et al. \citep{colone2016} show that the batch structure has a cost. The weights change at every batch boundary, which puts discontinuities into the target echo at intervals of $T_B$. In the range-Doppler map a slowly moving target is then surrounded by spurious peaks spaced $1/T_B$ apart, and a target with $|f_d| < 1/T_B$ loses signal-to-noise ratio to the notch \citep{colone2016}. A short batch adapts quickly but widens the notch and spreads these peaks. A long batch does the opposite. The sliding ECA (ECA-S) separates the two choices. The weights are estimated over a fragment of duration $T_A$, centred on a shorter fragment of duration $T_S$ to which they are applied, so that consecutive estimation windows overlap. $T_S$ sets the update rate and $T_A$ the averaging, and ECA-B is the special case $T_A = T_S = T_B$ \citep{colone2016}. The price is that the weight estimate is repeated $N/N_S$ times per CPI.
+
+\subsection{ECA by Carrier and Doppler (ECA-CD)}
+\label{subsec:th.dsi.ecacd}
+\todo{}
+Schwark and Cristallini \citep{schwark2016} proposed ECA by carrier and Doppler (ECA-CD) for OFDM illuminators such as DVB-T. The reference signal is decoded, and the cancellation runs per OFDM carrier on the sequence of symbol values. A delay in time is only a phase shift on each carrier, so the clutter subspace of a carrier no longer depends on the number of range bins \citep{schwark2016,schuepbach2020}. To remove clutter with small Doppler shifts, the subspace of each carrier is extended by two replicas shifted by $\pm 0.75$~Hz, a value chosen empirically \citep{schwark2016}. The subspace dimension drops from $K(2P+1)$ for the ECA to $2P+1$ \citep{schuepbach2020}. Schüpbach et al. \citep{schuepbach2020} applied it to FM by cutting the CPI into batches and treating each batch as an OFDM symbol, which fits the batches algorithm used for the range-Doppler map.
+
+\subsection{ECA by Levinson-Durbin (ECA-LD)}
+\label{subsec:th.dsi.ecald}
+\todo{}
+Colone et al. \citep{colone2016} note that the Gram matrix $\mathbf{G}$ is, apart from border effects, Hermitian Toeplitz when $K \ll N$, because its entries depend only on the lag between the two delayed copies. The right-hand side is a cross-correlation and the first row of $\mathbf{G}$ an autocorrelation, so both come from FFTs, and the Toeplitz system is solved by the Levinson algorithm in about $16K^2$ floating-point operations instead of the $4K^3$ of a general inversion \citep{colone2016}. Lu et al. \citep{lu2026} develop this into the ECA by Levinson-Durbin (ECA-LD). They extend it to non-zero Doppler by approximating the delay-Doppler autocorrelation matrix as block Toeplitz, and give the complexity as $O(PN \log N + PKN + P^2 K^2)$ against $O(PKN + P^2 K^2 N + P^3 K^3)$ for the ECA. They use the condition number of the approximate matrix as the measure of numerical stability: the closer it is to one, the smaller the loss of suppression \citep{lu2026}.
+
+\subsection{Conjugate Gradient Least Squares (CGLS)}
+\label{subsec:th.dsi.cgls}
+\todo{}
+The conjugate gradient method of Hestenes and Stiefel \citep{hestenes1952} solves a symmetric positive-definite system by steps along mutually conjugate directions, and each step reduces the error function \citep{hestenes1952}. Section~10 of their paper gives the form for a general matrix $\mathbf{A}$: the normal equations $\mathbf{A}^* \mathbf{A} \mathbf{x} = \mathbf{A}^* \mathbf{k}$ are solved without forming $\mathbf{A}^* \mathbf{A}$, because the computed product would carry its own rounding errors \citep{hestenes1952}. This is CGLS. Applied to Equation~\ref{eq:dsi-ls}, $\mathbf{A}$ is the matrix $\mathbf{X}$ of delayed references, each iteration costs one product with $\mathbf{X}$ and one with $\mathbf{X}^H$, and the Gram matrix is never built. In finite precision the conjugacy of the directions is lost as the iterations proceed. Hestenes and Stiefel analyse the propagation of rounding errors and show that it accumulates faster when the step lengths grow, as they do for ill-conditioned matrices \citep{hestenes1952}. Chang and Willson \citep{chang2000} show that in finite word length the method behaves like steepest descent near steady state and can stall \todo{cite: CGLS semiconvergence in floating point, e.g. Nagy and Palmer 2003 or Elfving et al. 2010}.
+% NOTE (Claude, 2026-10-14): "one product with X and one with X^H per iteration" is read
+%   off Hestenes & Stiefel eq. (10:2); it has no separate citation. Tong 2014's printed
+%   Algorithm 1 (PDF p.117) is wrong (see Papers/Summary_of_papers.md); cite (10:2) for
+%   the algorithm itself.
+
+\subsection{Adaptive Filters and FBLMS}
+\label{subsec:th.dsi.adaptive}
+\todo{}
+Classical adaptive filters take the reference as the filter input and the surveillance signal as the desired response, so the filter learns the channel from reference to surveillance and its error output is the cleaned signal \citep{malanowski2006}. The LMS algorithm is simple and cheap but converges slowly, NLMS normalises the step by the input power, and RLS converges fast at a higher cost \citep{cardinali2007,malanowski2006}. Ferrara \citep{ferrara1980} gave the fast LMS, now called FBLMS. The data are processed in blocks of $n$ samples equal to the filter length, the weights update once per block from the sum of the gradient estimates over the block, and the convolution and the gradient are computed with five $2n$-point FFTs by the overlap-save method. The result is exactly the block LMS filter with the same convergence rate, at a fraction of the cost for $n \geq 64$ \citep{ferrara1980}. Shynk \citep{shynk1992} reviews the frequency-domain adaptive filters and gives the per-bin step normalisation that makes convergence independent of the input spectrum \todo{confirm page: scanned PDF, Table I}.
+% NOTE (Claude, 2026-10-14): Ferrara 1980 is for real input; the complex form needs the
+%   complex LMS update (Widrow, McCool & Ball 1975, not yet in thesis.bib).
+
+%---------------------------------------------------------------------
+\section{Range-Doppler Map Formation}
+\label{sec:th.ard}
+\todo{}
+%---------------------------------------------------------------------
+
+\subsection{The Cross-Ambiguity Function}
+\label{subsec:th.ard.caf}
+\todo{}
+% TODO: definition; the map as a matched filter bank over delay and Doppler.
+The range-Doppler map is the cross-ambiguity function (CAF) of the surveillance and reference signals \citep{moscardini2015}:
+\begin{equation}
+    \chi(\tau, f_d) = \int_0^{T} s_{\mathrm{surv}}(t)\, s^*_{\mathrm{ref}}(t - \tau)\, e^{-j 2\pi f_d t}\, \mathrm{d}t
+    \label{eq:caf}
+\end{equation}
+over the delays $0 \leq \tau \leq \tau_{\max}$ and Doppler shifts $|f_d| \leq f_{\max}$ of interest, where $T$ is the integration time \citep{moscardini2015}. It is the optimum two-dimensional matched filter for a point target in white noise: a bank of range-compression filters, each matched to one Doppler shift of the reference \citep{kuschel2019,moscardini2015}. In discrete form over $N$ samples \citep{colone2009},
+\begin{equation}
+    \chi[l, p] = \sum_{n=0}^{N-1} s_{\mathrm{surv}}[n]\, s^*_{\mathrm{ref}}[n - l]\, e^{-j 2\pi p n / N}
+    \label{eq:caf-discrete}
+\end{equation}
+where $l$ is the delay bin and $p$ the Doppler bin at $f_d = p / (N T_s)$. The point-target response of the map is the ambiguity function of the illuminator, and in bistatic geometry it also depends on where the target is \citep{kuschel2019}. Stein \citep{stein1981} describes the same computation as the filtering of a mixing product. For each delay, the product $s_{\mathrm{surv}}(t)\, s^*_{\mathrm{ref}}(t - \tau)$ contains a tone at the Doppler frequency, and the integral is a band-pass filter of bandwidth about $1/T$ that selects it. Longer integration means a narrower filter and less background energy \citep{stein1981}.
+
+\subsection{Time-Domain Correlation}
+\label{subsec:th.ard.timedomain}
+\todo{}
+% TODO: direct evaluation; cost.
+Direct evaluation of Equation~\ref{eq:caf-discrete} needs $N$ complex multiply-adds for each of the $N_{\mathrm{bin}}$ delay bins and $N_{\mathrm{Doppler}}$ Doppler bins, that is $N N_{\mathrm{bin}} N_{\mathrm{Doppler}}$ operations per CPI. Stein \citep{stein1981} gives the standard way to cut the cost when $f_{\max} \ll f_s$: form the mixing product for each delay, integrate and dump over blocks of samples, and continue at the reduced rate. Integrating over 128 samples at 1.25~MHz gives a filter with nulls at multiples of 10~kHz, passes a 1~kHz offset with less than 0.2~dB of loss, and cuts the storage and processing for the Doppler stage by a factor of 128 \citep{stein1981}.
+% NOTE (Claude, 2026-10-14): the direct operation count is read off eq:caf-discrete; no source.
+
+\subsection{Frequency-Domain Correlation}
+\label{subsec:th.ard.freqdomain}
+\todo{}
+% TODO: FFT-based correlation; cost.
+Two FFT formulations exist, which Tong \citep{tong2014} names XF and FX after the order of the cross-multiplication and the transform. In the XF method, called the direct FFT or Fourier-transform method elsewhere \citep{moscardini2015,colone2023}, the mixing product is formed for each delay and its FFT over the CPI gives all Doppler bins at once. The cost per delay falls from $N N_{\mathrm{Doppler}}$ to $N \log_2 N$, two orders of magnitude for the UCT parameters, although the FFT returns all Doppler frequencies up to $\pm f_s / 2$ and more than 99\% of the bins are discarded \citep{tong2014}. In the FX method, called the correlation FFT, both signals are transformed once, the conjugate product is formed with the reference spectrum shifted by each Doppler bin, and an inverse FFT gives all delays for that Doppler bin \citep{tong2014,kuschel2019}. In complex multiplications, the Fourier-transform method costs $[1 + \log_2 N] N N_{\mathrm{bin}}$ and the correlation method $2 N \log_2 N + [1 + \log_2 N] N N_{\mathrm{Doppler}}$ \citep{moscardini2015}. Which is cheaper depends on whether the map has fewer delay bins or fewer Doppler bins.
+
+\subsection{Batched Correlation}
+\label{subsec:th.ard.batched}
+\todo{}
+% TODO: batch-and-FFT method; approximation made; Doppler resolution limits.
+The batches algorithm, also called the FMCW-like algorithm, splits the CPI into $n_B$ batches of duration $T_B$, cross-correlates each batch of the surveillance signal with the matching batch of the reference over the delays of interest, and takes an FFT across the batches for each delay to form the Doppler dimension \citep{moscardini2015,tong2014}. Moscardini et al. \citep{moscardini2015} derive it from the exact CAF, which they write as a phase-weighted sum of per-batch CAFs. The approximation is that the Doppler phase rotation within a batch is constant, which holds when $f_{\max} T_B \ll 1$; the Doppler shift is then measured from the phase change between consecutive batches. The structure is that of pulse-Doppler processing, with the batch as the pulse repetition interval and the per-batch reference as the transmitted pulse \citep{moscardini2015}. Sampling across batches bounds the unambiguous Doppler to $|f_d| \leq 1 / (2 T_B)$, and the peak loss for a target at Doppler $f_T$ is set by the ambiguity function of the reference batch along Doppler, so a shorter batch gives less loss \citep{moscardini2015}. Petri et al. give the general formulation and the rule $f_{\max} T_B \ll 1$ \todo{cite: Petri 2011, not yet obtained}.
+
+\subsection{Computational Complexity Comparisons}
+\label{subsec:th.ard.complexity}
+\todo{}
+% TODO: side-by-side operation counts; this justifies the choice in Ch. 3.
+Table~\ref{table:ch2.caf-complexity} lists the operation counts. The direct count follows from Equation~\ref{eq:caf-discrete}; the other three are from Moscardini et al. \citep{moscardini2015}, who report a reduction in processing time of more than 96\% for the batches algorithm against the optimum on DVB-T data. Chapter~\ref{ch:design} evaluates these counts for the parameters of this system.
+
+\begin{table}[H]
+    \centering
+    \caption[Operation counts for range-Doppler map formation]{\textbf{Operation counts for range-Doppler map formation.} $N$ samples per CPI, $N_{\mathrm{bin}}$ delay bins, $N_{\mathrm{Doppler}}$ Doppler bins, $n_B$ batches.}
+    \begin{tabular}{lll}
+    \toprule
+    \textbf{Method} & \textbf{Complex multiplications per CPI} & \textbf{Source} \\
+    \midrule
+    Direct evaluation           & $N N_{\mathrm{bin}} N_{\mathrm{Doppler}}$                                        & Equation~\ref{eq:caf-discrete} \\
+    Fourier-transform FFT (XF)  & $[1 + \log_2 N]\, N N_{\mathrm{bin}}$                                            & Moscardini et al. \citep{moscardini2015} \\
+    Correlation FFT (FX)        & $2 N \log_2 N + [1 + \log_2 N]\, N N_{\mathrm{Doppler}}$                         & Moscardini et al. \citep{moscardini2015} \\
+    Batches                     & $[3 \log_2 N_{\mathrm{bin}} + 1 + \log_2 n_B]\, N_{\mathrm{bin}} n_B$             & Moscardini et al. \citep{moscardini2015} \\
+    \bottomrule
+    \end{tabular}
+    \label{table:ch2.caf-complexity}
+\end{table}
+% NOTE (Claude, 2026-10-14): the 96 % figure is Moscardini 2015's report of its authors'
+%   earlier work (their ref. [8]), on DVB-T, not FM.
+
+%---------------------------------------------------------------------
+\section{Constant False Alarm Rate Detection}
+\label{sec:th.cfar}
+\todo{}
+%---------------------------------------------------------------------
+
+\subsection{Cell-Averaging CFAR}
+\label{subsec:th.cfar.ca}
+\todo{}
+% TODO: reference window, guard cells, threshold factor, P_fa relation.
+A fixed threshold cannot hold the false alarm rate when the disturbance level varies across the map. A CFAR detector estimates the local disturbance from the cells around the cell under test and sets the threshold as a multiple of that estimate \citep{rohling1983}. In cell-averaging CFAR (CA-CFAR), introduced by Finn and Johnson \citep{finn1968} \todo{confirm page: scanned PDF}, the estimate $Z$ is the arithmetic mean of $L$ reference cells, half on either side of the cell under test, and the threshold is $TZ$ with a scaling factor $T$ set by the required false alarm probability \citep{rohling1983,weiss1982}. The cells directly adjacent to the cell under test are left out as guard cells, because the energy of a target spills into its neighbours and would raise the threshold against itself \citep{rohling1983}. For a square-law detector and Gaussian noise the false alarm probability is \citep{hansen1980}
+\begin{equation}
+    P_{fa} = \left( 1 + \frac{T}{L} \right)^{-L}
+    \label{eq:cacfar-pfa}
+\end{equation}
+and the detection probability for a Swerling~1 target of signal-to-noise ratio $S$ is $[1 + T / (L (1 + S))]^{-L}$ \citep{hansen1980}. With Gaussian interference CA-CFAR maximises the detection probability, and as $L$ grows it approaches the detector with known noise level \citep{weiss1982}. Its assumption is that the reference cells have the same statistics as the cell under test. It fails at clutter edges, where the threshold is raised on the clear side and the false alarm rate rises on the cluttered side, and when a second target in the reference window masks the first \citep{weiss1982,rohling1983}. Greatest-of selection between the leading and lagging halves (GO-CFAR) handles the clutter edge at a loss of 0.1 to 0.3~dB \citep{hansen1980} but suppresses closely spaced targets more strongly, smallest-of selection (SO-CFAR) does the reverse \citep{weiss1982,trunk1978}, and the ordered-statistic detector (OS-CFAR) takes the $k$-th ranked reference cell as the estimate and tolerates both situations at a small loss \citep{rohling1983}.
+% NOTE (Claude, 2026-10-14): eq:cacfar-pfa is Hansen 1980 eq. (8) with S = 0; L is the
+%   total number of reference cells there. The Finn & Johnson 1968 scan does not extract
+%   (pypdf ToUnicode limit), so its page is unverified.
+
+\subsection{Two-Dimensional CFAR}
+\label{subsec:th.cfar.2d}
+\todo{}
+% TODO: extension to the range-Doppler map; window shape; edge handling.
+On a range-Doppler map the reference window can run along range, along Doppler, or over a rectangle in both. Zhao et al. \citep{zhao2023} describe the two-dimensional detector as a rectangular reference window of $N_{\mathrm{ref}} \times M_{\mathrm{ref}}$ cells around a protection window of $N_{\mathrm{prot}} \times M_{\mathrm{prot}}$ cells, and implement it on a GPU.
+
+%****************************************************
+% END
+%****************************************************
