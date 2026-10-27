@@ -61,7 +61,7 @@ assert(rate == fs, 'scenario rate %g differs from config SAMPLE_RATE_Hz %g', rat
 
 % ---- platforms -------------------------------------------------------------
 plats = doc.getElementsByTagName('platform');
-tx = []; rx = []; rx2 = []; targets = {};
+tx = []; rx = []; rx2 = []; targets = {}; nClutter = 0;
 for i = 0:plats.getLength-1
     p = plats.item(i);
     s = struct();
@@ -83,12 +83,19 @@ for i = 0:plats.getLength-1
         if ~isempty(sur2Name) && strcmp(char(r.getAttribute('name')), sur2Name), rx2 = s; end
     elseif p.getElementsByTagName('target').getLength > 0
         s.target = char(p.getElementsByTagName('target').item(0).getAttribute('name'));
-        targets{end+1} = s; %#ok<AGROW>
+        % Clutter scatterers (S1_clutter and later) are FERS targets too, named
+        % Clutter...; they are not scored, so they stay out of the truth.
+        if startsWith(s.target, 'Clutter')
+            nClutter = nClutter + 1;
+        else
+            targets{end+1} = s; %#ok<AGROW>
+        end
     end
 end
 assert(~isempty(tx), 'no transmitter platform');
 assert(~isempty(rx), 'no receiver named %s', surName);
 assert(~isempty(targets), 'no target platforms');
+if nClutter > 0, fprintf('  %d clutter platforms left out of the truth\n', nClutter); end
 assert(strcmp(tx.interp, 'static') && strcmp(rx.interp, 'static'), ...
        'moving transmitter or receiver not supported');
 

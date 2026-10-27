@@ -8,12 +8,18 @@
 %   plot_ard                                       % data/S0_clean/ard/ard_00000.bin
 %   plot_ard('data/S0_clean/golden/golden_ard.bin')
 %   plot_ard('results/<run>/ard/ard_00003.bin', 400) % +-400 Hz
+%   plot_ard('data/S0_clean_wgn/golden/golden_ard.bin', 200, 'data/S0_clean_wgn/truth.csv')
+%
+% With a truth file (fers_truth.m), the target's true position is drawn as a
+% white cross: the row whose cpi is the frame's number (ard_NNNNN.bin), or
+% cpi 0 for a golden file. CFAR detections are small white dots.
 %
 % Run from the repository root.
 
-function plot_ard(path, fdMax)
+function plot_ard(path, fdMax, truthPath)
     if nargin < 1 || isempty(path),  path  = 'data/S0_clean/ard/ard_00000.bin'; end
     if nargin < 2 || isempty(fdMax), fdMax = 200; end
+    if nargin < 3, truthPath = ''; end
 
     [map, nRange, nDop, fs, dec, dets] = read_ard(path);
 
@@ -35,13 +41,27 @@ function plot_ard(path, fdMax)
     title(sprintf('Range-Doppler map  (%d x %d,  %.1f Hz/bin)', ...
                   nRange, nDop, binHz));
 
+    hold on;
+    handles = gobjects(0); labels = {};
     if ~isempty(dets)
         inWin = abs(dets(:,4)) <= fdMax;
-        hold on;
-        plot(dets(inWin,3), dets(inWin,4), 'wo', 'MarkerSize', 8, 'LineWidth', 1.2);
-        hold off;
-        legend(sprintf('%d CFAR detections', nnz(inWin)), ...
-               'TextColor','w', 'Color',[0 0 0 0.3]);
+        handles(end+1) = plot(dets(inWin,3), dets(inWin,4), 'w.', 'MarkerSize', 10);
+        labels{end+1}  = sprintf('%d CFAR detections', nnz(inWin));
+    end
+    if ~isempty(truthPath)
+        [~, baseName] = fileparts(path);
+        cpiIndex = sscanf(baseName, 'ard_%d');
+        if isempty(cpiIndex), cpiIndex = 0; end
+        truth = readtable(truthPath);
+        truth = truth(truth.cpi == cpiIndex, :);
+        assert(~isempty(truth), 'truth has no row for cpi %d', cpiIndex);
+        handles(end+1) = plot(truth.bistaticRangeKm, truth.dopplerHz, 'wx', ...
+                              'MarkerSize', 14, 'LineWidth', 2);
+        labels{end+1}  = 'truth';
+    end
+    hold off;
+    if ~isempty(handles)
+        legend(handles, labels, 'TextColor','w', 'Color',[0 0 0 0.3]);
     end
 end
 

@@ -35,7 +35,8 @@
 // ---------------------------------------------------------------------------
 //
 // With bCglsPrime the weights buffer is simply not cleared between CPIs, so
-// window w starts from where window w finished last time. This is why priming
+// window w starts from where window w finished last time. resetState()
+// returns to a cold start for the next CPI. This is why priming
 // is defined same-window rather than previous-window: a chain through the
 // windows would serialise a loop that is otherwise embarrassingly parallel.
 //
@@ -245,6 +246,7 @@ public:
     bool init(const DSIParams& oParams) override;
     bool cancel(const ComplexF* pcRef, const ComplexF* pcSur,
                 ComplexF* pcOut, DSIStats& oStats) override;
+    bool resetState() override;
     const char* name() const override { return "CGLS (GPU)"; }
 
     const void* deviceReference() const override { return md_cRef; }
@@ -412,6 +414,16 @@ bool CglsGpu::iterate()
                                            md_bStopped, uTaps, muSegs, false);
         CUDA_CHECK(cudaGetLastError());
     }
+    return true;
+}
+
+// Return to a cold start: the next cancel() clears the weights before use.
+// pbr_run calls this after its warm-up pass, which would otherwise leave
+// primed weights fitted to the synthetic warm-up signal (2026-10-21).
+bool CglsGpu::resetState()
+{
+    CHECK(mbReady, "CglsGpu::resetState before a successful init");
+    mbHaveWeights = false;
     return true;
 }
 

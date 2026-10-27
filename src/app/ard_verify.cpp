@@ -53,6 +53,7 @@ struct Options {
     double      dTolerance  = 1e-4;
     bool        bToleranceGiven = false;
     double      dMarginDb   = 0.5;
+    std::string sDumpMapPath;      // write our map and detections here
 };
 
 void printUsage(const char* pProgram)
@@ -72,6 +73,8 @@ void printUsage(const char* pProgram)
     std::printf("  --margin X       a detection difference is only a failure if\n");
     std::printf("                   the cell cleared its threshold by more than\n");
     std::printf("                   this many dB (default 0.5)\n");
+    std::printf("  --dump-map FILE  also write our map and detections as an ARD\n");
+    std::printf("                   file (read_ard.m), e.g. to score its target SNR\n");
 }
 
 bool parseArgs(int argc, char* argv[], Options& oOptions)
@@ -101,6 +104,8 @@ bool parseArgs(int argc, char* argv[], Options& oOptions)
             oOptions.bToleranceGiven = true;
         } else if (sArg == "--margin" && bHasValue) {
             oOptions.dMarginDb = std::atof(argv[++i]);
+        } else if (sArg == "--dump-map" && bHasValue) {
+            oOptions.sDumpMapPath = argv[++i];
         } else {
             std::fprintf(stderr, "unrecognised or incomplete argument: %s\n", sArg.c_str());
             return false;
@@ -272,8 +277,11 @@ bool runChained(const PbrConfig& oCfg, const std::string& sRawCpiPath, ArdProces
         oStats = oStatsHost;
         sLabelOut = sChain + ", via host (no device to couple)";
     } else {
-        // Path B: device-coupled.
+        // Path B: device-coupled. A stateful canceller (CGLS primed, FBLMS)
+        // returns to a cold start first, so both paths see the same state.
         pDsi->setHostOutputEnabled(false);
+        if (!pDsi->resetState())
+            return false;
         if (!pDsi->cancel(vcRef.data(), vcSur.data(), nullptr, oDsiStats) ||
             !oArd.processDevice(pDsi->deviceReference(), pDsi->deviceOutput(),
                                 vcMap.data(), vDet.data(), kMaxArdDetections, oStats))
@@ -441,6 +449,16 @@ int main(int argc, char* argv[])
             !pArd->process(vcRef.data(), vcCleaned.data(), vcMap.data(),
                            vDet.data(), kMaxArdDetections, oStats))
             return 1;
+    }
+
+    if (!oOptions.sDumpMapPath.empty()) {
+        ArdFileHeader oOut = oGoldenHeader;
+        oOut.uDetections = oStats.uDetections;
+        oOut.uStatus     = kArdStatusOk;
+        if (!writeArdFile(oOptions.sDumpMapPath.c_str(), oOut, vcMap.data(), vDet.data()))
+            return 1;
+        std::printf("wrote our map and %llu detections to %s\n",
+                    (unsigned long long)oStats.uDetections, oOptions.sDumpMapPath.c_str());
     }
 
     // ---- compare -----------------------------------------------------------

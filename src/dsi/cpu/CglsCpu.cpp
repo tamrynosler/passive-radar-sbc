@@ -85,7 +85,7 @@
 // already close and the fixed iteration count buys more. Same-window rather
 // than previous-window because the GPU solves every window at once, and a
 // chain through the windows would serialise it. The first CPI starts from
-// zero either way.
+// zero either way, and so does the CPI after resetState().
 
 #include "pbr/DSICanceller.hpp"
 #include "pbr/check.hpp"
@@ -201,6 +201,7 @@ public:
     bool init(const DSIParams& oParams) override;
     bool cancel(const ComplexF* pcRef, const ComplexF* pcSur,
                 ComplexF* pcOut, DSIStats& oStats) override;
+    bool resetState() override;
     const char* name() const override
     {
         return moParams.bFloat32Math ? "CGLS (CPU FP32)" : "CGLS (CPU)";
@@ -250,6 +251,16 @@ bool CglsCpu::init(const DSIParams& oParams)
     mvcQ.assign(static_cast<size_t>(muWindowSamples), ComplexAcc());
 
     mbReady = true;
+    return true;
+}
+
+// Return to a cold start: the next cancel() clears the weights before use.
+// pbr_run calls this after its warm-up pass, which would otherwise leave
+// primed weights fitted to the synthetic warm-up signal (2026-10-21).
+bool CglsCpu::resetState()
+{
+    CHECK(mbReady, "CglsCpu::resetState before a successful init");
+    mbHaveWeights = false;
     return true;
 }
 

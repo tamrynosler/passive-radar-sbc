@@ -49,6 +49,9 @@ matlab -batch "addpath('matlab'); fers_truth('scenarios/S0_clean/scenario.fersxm
     'config/fers.conf', 'data/S0_clean/truth.csv')"
 ```
 
-The capture in `data/S0_clean/` on 2026-10-01 is the 2026-09-16 recording
-(`--vita49-fullscale 0.005`, a few seconds long), moved from
-`data/fers_capture.pbrcap`. The full-length capture is still to be recorded.
+`data/S0_clean/capture.pbrcap` is the 2026-09-16 recording
+(`--vita49-fullscale 0.005`, 3 CPIs), moved from `data/fers_capture.pbrcap`;
+`cpi_0000.bin` and the goldens come from it, so it stays. The full-length
+capture is `data/S0_clean/capture_180s.pbrcap`, recorded 2026-10-19 on the
+Mac as above (180 CPIs, 216364 datagrams, no gaps) with the capture config
+of `scenarios/S0_clean_wgn/README.md`; the level-2 runs replay it.

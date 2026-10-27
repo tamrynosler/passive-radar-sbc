@@ -1,0 +1,863 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<simulation name="Basic1TargetClutterWgn">
+    <parameters>
+        <starttime>0</starttime>
+        <endtime>600</endtime>
+        <rate>204800</rate>
+        <c>299792458</c>
+        <simSamplingRate>1000</simSamplingRate>
+        <adc_bits>16</adc_bits>
+        <oversample>1</oversample>
+    </parameters>
+    <waveform name="TxWaveform">
+        <power>16400</power>
+        <carrier_frequency>89e6</carrier_frequency>
+        <cw_from_file filename="../../data/waveforms/WGN_600s_204800Hz.h5" />
+    </waveform>
+    <timing name="TxClock" synconpulse="true">
+        <frequency>204800</frequency>
+    </timing>
+    <timing name="RxClock" synconpulse="true">
+        <frequency>204800</frequency>
+        <random_freq_offset_stdev>0.01</random_freq_offset_stdev>
+    </timing>
+    <timing name="JammerClock" synconpulse="true">
+        <frequency>204800</frequency>
+    </timing>
+    <antenna name="RxYagiAntenna" pattern="sinc">
+        <alpha>5.2481</alpha>
+        <beta>2</beta>
+        <gamma>3.6</gamma>
+        <efficiency>1</efficiency>
+    </antenna>
+    <antenna name="TxIsoAntenna" pattern="isotropic">
+        <efficiency>1</efficiency>
+    </antenna>
+    <antenna name="JammingIsoAntenna" pattern="isotropic">
+        <efficiency>1</efficiency>
+    </antenna>
+    <platform name="ContantiabergTxPlatform">
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>258804.41</x>
+                <y>6228720.84</y>
+                <altitude>397</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0</startazimuth>
+            <startelevation>0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <transmitter name="ConstantiabergTx" antenna="TxIsoAntenna" waveform="TxWaveform" timing="TxClock">
+            <cw_mode/>
+        </transmitter>
+    </platform>
+    <platform name="ArmasuisseRefRxPlatform">
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>287942.01</x>
+                <y>6297267.09</y>
+                <altitude>241</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>204.2</startazimuth>
+            <startelevation>0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <receiver name="ArmasuisseRefRxClean" antenna="RxYagiAntenna" timing="RxClock">
+            <cw_mode/>
+            <noise_temp>438.4</noise_temp>
+        </receiver>
+    </platform>
+    <platform name="ArmasuisseSurRxPlatform">
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>287946.01</x>
+                <y>6297267.09</y>
+                <altitude>241</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>125</startazimuth>
+            <startelevation>10</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <receiver name="ArmasuisseSurRxClean" antenna="RxYagiAntenna" timing="RxClock">
+            <cw_mode/>
+            <noise_temp>438.4</noise_temp>
+        </receiver>
+    </platform>
+    <platform name="target1Platform">
+        <!-- A straight fly-by, tangent at t = 300 s to the 40 km bistatic
+             range ellipse, so the Doppler passes smoothly through zero there.
+             150 m/s at 8000 m, laid near the surveillance antenna's boresight
+             so the target never fades. See README.md for range and Doppler. -->
+        <motionpath interpolation="linear">
+            <positionwaypoint>
+                <x>305136.05</x>
+                <y>6213168.07</y>
+                <altitude>8000.00</altitude>
+                <time>0</time>
+            </positionwaypoint>
+            <positionwaypoint>
+                <x>327484.66</x>
+                <y>6300349.14</y>
+                <altitude>8000.00</altitude>
+                <time>600</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="Target1">
+            <rcs type="isotropic">
+                <value>200</value>
+            </rcs>
+        </target>
+    </platform>
+    <!-- Stationary clutter: real peaks around Cape Town and Paarl as point
+         scatterers, one to three per crest, bistatic range bins 0 to 60.
+         Names begin with "Clutter" so fers_truth.m leaves them out of truth.csv.
+         Design, bins and azimuths: README.md. -->
+    <platform name="TableMountainPlatform">
+        <!-- bin 0.3, azimuth 206 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>260092.52</x>
+                <y>6238930.70</y>
+                <altitude>1085</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterTableMountain">
+            <rcs type="isotropic">
+                <value>30000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="Tygerberg1Platform">
+        <!-- bin 1.8, azimuth 192 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>277921.21</x>
+                <y>6249220.08</y>
+                <altitude>460</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterTygerberg1">
+            <rcs type="isotropic">
+                <value>20000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="Tygerberg2Platform">
+        <!-- bin 1.0, azimuth 193 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>277873.90</x>
+                <y>6255211.52</y>
+                <altitude>330</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterTygerberg2">
+            <rcs type="isotropic">
+                <value>20000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="MelkbosRidgePlatform">
+        <!-- bin 3.5, azimuth 225 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>261721.23</x>
+                <y>6271468.83</y>
+                <altitude>120</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterMelkbosRidge">
+            <rcs type="isotropic">
+                <value>10000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="Paardeberg1Platform">
+        <!-- bin 5.6, azimuth 159 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>295938.62</x>
+                <y>6276697.28</y>
+                <altitude>500</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterPaardeberg1">
+            <rcs type="isotropic">
+                <value>30000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="Paardeberg2Platform">
+        <!-- bin 7.4, azimuth 148 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>298652.00</x>
+                <y>6280083.16</y>
+                <altitude>615</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterPaardeberg2">
+            <rcs type="isotropic">
+                <value>30000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="Paardeberg3Platform">
+        <!-- bin 9.6, azimuth 136 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>301367.35</x>
+                <y>6283468.16</y>
+                <altitude>730</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterPaardeberg3">
+            <rcs type="isotropic">
+                <value>30000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="Bottelary1Platform">
+        <!-- bin 7.8, azimuth 179 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>289179.34</x>
+                <y>6246591.45</y>
+                <altitude>400</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterBottelary1">
+            <rcs type="isotropic">
+                <value>20000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="Bottelary2Platform">
+        <!-- bin 11.9, azimuth 170 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>296530.45</x>
+                <y>6248971.00</y>
+                <altitude>500</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterBottelary2">
+            <rcs type="isotropic">
+                <value>20000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="Porseleinberg1Platform">
+        <!-- bin 13.8, azimuth 100 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>302997.36</x>
+                <y>6294596.27</y>
+                <altitude>500</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterPorseleinberg1">
+            <rcs type="isotropic">
+                <value>20000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="Porseleinberg2Platform">
+        <!-- bin 22.8, azimuth 82 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>308463.95</x>
+                <y>6300253.32</y>
+                <altitude>600</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterPorseleinberg2">
+            <rcs type="isotropic">
+                <value>20000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="PaarlMountain1Platform">
+        <!-- bin 16.5, azimuth 150 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>307339.30</x>
+                <y>6263619.58</y>
+                <altitude>600</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterPaarlMountain1">
+            <rcs type="isotropic">
+                <value>50000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="PaarlMountain2Platform">
+        <!-- bin 17.4, azimuth 144 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>309103.52</x>
+                <y>6268092.82</y>
+                <altitude>730</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterPaarlMountain2">
+            <rcs type="isotropic">
+                <value>50000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="Simonsberg1Platform">
+        <!-- bin 17.2, azimuth 161 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>303907.78</x>
+                <y>6250235.65</y>
+                <altitude>1200</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterSimonsberg1">
+            <rcs type="isotropic">
+                <value>50000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="Simonsberg2Platform">
+        <!-- bin 19.6, azimuth 156 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>307563.37</x>
+                <y>6252529.34</y>
+                <altitude>1390</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterSimonsberg2">
+            <rcs type="isotropic">
+                <value>50000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="Kasteelberg1Platform">
+        <!-- bin 17.7, azimuth 59 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>300002.67</x>
+                <y>6304519.81</y>
+                <altitude>800</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterKasteelberg1">
+            <rcs type="isotropic">
+                <value>30000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="Kasteelberg2Platform">
+        <!-- bin 25.1, azimuth 57 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>304587.51</x>
+                <y>6307941.67</y>
+                <altitude>966</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterKasteelberg2">
+            <rcs type="isotropic">
+                <value>30000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="HelderbergPlatform">
+        <!-- bin 27.0, azimuth 167 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>303408.96</x>
+                <y>6229698.84</y>
+                <altitude>1137</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterHelderberg">
+            <rcs type="isotropic">
+                <value>50000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="JonkershoekPlatform">
+        <!-- bin 30.1, azimuth 157 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>312475.13</x>
+                <y>6238204.42</y>
+                <altitude>1500</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterJonkershoek">
+            <rcs type="isotropic">
+                <value>50000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="LimietbergPlatform">
+        <!-- bin 27.6, azimuth 118 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>319068.41</x>
+                <y>6280489.55</y>
+                <altitude>1200</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterLimietberg">
+            <rcs type="isotropic">
+                <value>50000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="DuToitskloof1Platform">
+        <!-- bin 35.0, azimuth 128 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>325806.42</x>
+                <y>6267302.33</y>
+                <altitude>1995</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterDuToitskloof1">
+            <rcs type="isotropic">
+                <value>100000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="DuToitskloof2Platform">
+        <!-- bin 33.9, azimuth 135 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>324075.67</x>
+                <y>6260614.56</y>
+                <altitude>1700</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterDuToitskloof2">
+            <rcs type="isotropic">
+                <value>100000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="DuToitskloof3Platform">
+        <!-- bin 34.3, azimuth 143 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>322389.11</x>
+                <y>6251708.33</y>
+                <altitude>1600</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterDuToitskloof3">
+            <rcs type="isotropic">
+                <value>100000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="HottentotsHolland1Platform">
+        <!-- bin 40.8, azimuth 159 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>315507.02</x>
+                <y>6224950.43</y>
+                <altitude>1590</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterHottentotsHolland1">
+            <rcs type="isotropic">
+                <value>100000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="HottentotsHolland2Platform">
+        <!-- bin 39.3, azimuth 165 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>309161.17</x>
+                <y>6219276.41</y>
+                <altitude>1100</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterHottentotsHolland2">
+            <rcs type="isotropic">
+                <value>100000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="Witzenberg1Platform">
+        <!-- bin 44.8, azimuth 104 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>332891.73</x>
+                <y>6286286.31</y>
+                <altitude>1500</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterWitzenberg1">
+            <rcs type="isotropic">
+                <value>100000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="Witzenberg2Platform">
+        <!-- bin 52.3, azimuth 96 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>337431.29</x>
+                <y>6292464.76</y>
+                <altitude>1750</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterWitzenberg2">
+            <rcs type="isotropic">
+                <value>100000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="Witzenberg3Platform">
+        <!-- bin 60.3, azimuth 89 deg from the receiver -->
+        <motionpath interpolation="static">
+            <positionwaypoint>
+                <x>341976.83</x>
+                <y>6298640.79</y>
+                <altitude>2000</altitude>
+                <time>0</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterWitzenberg3">
+            <rcs type="isotropic">
+                <value>100000</value>
+            </rcs>
+        </target>
+    </platform>
+    <!-- Slow-moving clutter, 1 to 2 Hz: straight paths at constant speed,
+         heading chosen for the bistatic Doppler in the comment (closing is positive). -->
+    <platform name="ShipMelkbosPlatform">
+        <!-- bin 4.3 at t = 300 s, 5.1 m/s on heading 145 deg, Doppler +1.0 Hz -->
+        <motionpath interpolation="linear">
+            <positionwaypoint>
+                <x>258108.82</x>
+                <y>6270428.17</y>
+                <altitude>0</altitude>
+                <time>0</time>
+            </positionwaypoint>
+            <positionwaypoint>
+                <x>259880.96</x>
+                <y>6267933.56</y>
+                <altitude>0</altitude>
+                <time>600</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterShipMelkbos">
+            <rcs type="isotropic">
+                <value>1000</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="BakkieSwartlandPlatform">
+        <!-- bin 7.1 at t = 300 s, 6.5 m/s on heading 327 deg, Doppler +1.3 Hz -->
+        <motionpath interpolation="linear">
+            <positionwaypoint>
+                <x>299273.95</x>
+                <y>6277104.56</y>
+                <altitude>150</altitude>
+                <time>0</time>
+            </positionwaypoint>
+            <positionwaypoint>
+                <x>297157.95</x>
+                <y>6280380.62</y>
+                <altitude>150</altitude>
+                <time>600</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterBakkieSwartland">
+            <rcs type="isotropic">
+                <value>20</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="TruckWellingtonPlatform">
+        <!-- bin 21.3 at t = 300 s, 5.5 m/s on heading 40 deg, Doppler -1.6 Hz -->
+        <motionpath interpolation="linear">
+            <positionwaypoint>
+                <x>312534.82</x>
+                <y>6274130.30</y>
+                <altitude>250</altitude>
+                <time>0</time>
+            </positionwaypoint>
+            <positionwaypoint>
+                <x>314659.95</x>
+                <y>6276654.95</y>
+                <altitude>250</altitude>
+                <time>600</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterTruckWellington">
+            <rcs type="isotropic">
+                <value>100</value>
+            </rcs>
+        </target>
+    </platform>
+    <platform name="TruckDuToitskloofPlatform">
+        <!-- bin 36.1 at t = 300 s, 6 m/s on heading 47 deg, Doppler -2.0 Hz -->
+        <motionpath interpolation="linear">
+            <positionwaypoint>
+                <x>325428.68</x>
+                <y>6264991.36</y>
+                <altitude>700</altitude>
+                <time>0</time>
+            </positionwaypoint>
+            <positionwaypoint>
+                <x>328077.75</x>
+                <y>6267429.07</y>
+                <altitude>700</altitude>
+                <time>600</time>
+            </positionwaypoint>
+        </motionpath>
+        <fixedrotation>
+            <startazimuth>0.0</startazimuth>
+            <startelevation>0.0</startelevation>
+            <azimuthrate>0</azimuthrate>
+            <elevationrate>0</elevationrate>
+        </fixedrotation>
+        <target name="ClutterTruckDuToitskloof">
+            <rcs type="isotropic">
+                <value>100</value>
+            </rcs>
+        </target>
+    </platform>
+</simulation>
