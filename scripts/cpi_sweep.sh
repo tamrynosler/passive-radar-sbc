@@ -17,10 +17,17 @@
 #       to RESULTS_ROOT/runs.log; ends it with ALL_DONE. A run whose run.log
 #       already holds a "pbr_run summary" is skipped, so a rerun resumes.
 #
+# Optional, in the environment (configs and run):
+#   SWEEP_ALGS="ECA-LD ..."   only these cancellers (default all seven)
+#   ECA_LD_BATCH=whole        ECA-LD solves the whole CPI in one batch, as
+#                             the chain does, instead of 0.1 s batches
+#   FRAMES_ALGS="ECA-CD ..."  cancellers whose maps are written (default ECA-CD)
+#
 # Plain bash 3.2 compatible (macOS) and bash 4.4 (Ubuntu 18.04).
 
 kLengths="0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0"
-kAlgs="ECA-CD ECA-B ECA-S ECA-LD FBLMS ECA-m CGLS"
+kAlgs="${SWEEP_ALGS:-ECA-CD ECA-B ECA-S ECA-LD FBLMS ECA-m CGLS}"
+kFramesAlgs="${FRAMES_ALGS:-ECA-CD}"
 kDefaultRoot="/data/results/cpi_sweeps"
 kProcDir="${PROC_DIR:-/proc}"    # overridable only so the sampler can be tested
 
@@ -74,10 +81,14 @@ makeConfigs() {
       if [ "$sAlg" = "ECA-B" ] || [ "$sAlg" = "ECA-m" ]; then
         setKey "$sConf" ECA_UPDATE_INTERVAL_s 0.025 || return 1
       fi
-      setKey "$sConf" ECA_LD_BATCH_s 0.1 || return 1
+      if [ "${ECA_LD_BATCH:-}" = "whole" ]; then
+        setKey "$sConf" ECA_LD_BATCH_s "$sLen" || return 1
+      else
+        setKey "$sConf" ECA_LD_BATCH_s 0.1 || return 1
+      fi
       setKey "$sConf" ARD_STREAM 0 || return 1
       sWrite=0
-      [ "$sAlg" = "ECA-CD" ] && sWrite=1
+      case " $kFramesAlgs " in *" $sAlg "*) sWrite=1 ;; esac
       setKey "$sConf" ARD_WRITE_FILES "$sWrite" || return 1
       setKey "$sConf" ARD_SNAPSHOT_EVERY 1 || return 1
     done
