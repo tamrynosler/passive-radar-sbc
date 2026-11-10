@@ -1,299 +1,230 @@
 # passive-radar-sbc
 
-FM-based passive bistatic radar (PBR) processing on embedded GPU hardware.
+FM-band passive bistatic radar (PBR) running in real time on an NVIDIA Jetson
+Nano (Tegra X1, sm_53, CUDA 10.2, 4 GB shared RAM).
 
-Real-time direct-signal-interference (DSI) cancellation, cross-ambiguity
-processing and CFAR detection, ported from a validated MATLAB reference to
-native C++/CUDA and benchmarked on an NVIDIA Jetson Nano (Tegra X1, sm_53,
-CUDA 10.2). The signal source is a USRP2 with a BasicRX, read over UHD by our
-own driver and streamed as VITA 49.2 over UDP multicast; the FERS radar
-simulator speaks the same profile and remains the test source. Range-Doppler
-frames are multicast to a small C++ viewer that serves a browser page, from
-which the chain's parameters can be changed while it runs.
+MSc thesis project, Electrical Engineering, University of Cape Town. The
+contribution is a comparison of seven direct-signal-interference (DSI)
+cancellers on embedded GPU hardware: suppression and detection quality
+against latency and memory.
 
+## Status: complete (November 2026)
 
-## Status (2026-10-06)
+Development has ended. This repository is the record of the code, scripts
+and scenarios behind the thesis results. The thesis itself is in a separate
+repository.
 
-- [x] Jetson Nano bring-up, CUDA 10.2, remote build workflow (edit on the
-      Mac, build and run on the Jetson over SSH; `make help`)
-- [x] MATLAB reference chain (FERS → ECA-B → CAF range–Doppler → 2D CA-CFAR)
-- [x] VITA 49.2 ingest, absolute-index circular buffer with packet-based
-      validity flags, CPI extraction, config file
-- [x] DSI cancellation, CPU and GPU: ECA-m, ECA-B, ECA-S, ECA-CD, CGLS, FBLMS, ECA-LD
-- [x] CAF range–Doppler map (Direct and Batches) and 2D CA-CFAR on the GPU
-- [x] `uhd_to_vita49`: USRP2/N210 → VITA 49.2 multicast, byte-identical to
-      FERS's profile, verified on the Nano and from the Mac
-- [x] ARD frames streamed over UDP multicast; `ard_view` (C++) serves the
-      browser page; nothing written to disk unless asked
-- [x] Blank frames with a status word on dead or unprocessable input;
-      no crash, no stop
-- [x] Live parameter changes over an HTTP control port, applied at CPI
-      boundaries, logged; sample-rate mismatch adapts automatically
-- [x] **Full chain in real time on the Jetson from the USRP2**: 25 ms per
-      1.024 s CPI with clocks pinned (ECA-CD), 80 to 230 ms unpinned
-- [ ] Code cleanup: simple, readable, behaviour-preserving  ← in progress
-- [ ] Tests redesigned around FERS streaming to MATLAB, the laptop or the Jetson
-- [ ] Algorithm benchmarking study (suppression vs latency), the thesis
-      contribution
-- [ ] Antennas connected, spectrum orientation checked, first aircraft
+What was built and works:
 
-> Timing figures with clocks pinned come from `make run`, which needs an
-> interactive sudo password; unpinned numbers are provisional.
+- The full chain on the Jetson: VITA 49.2 UDP ingest → DSI cancellation →
+  CAF range-Doppler map → CA-CFAR → grouping of detections into plots →
+  range-Doppler frames over UDP multicast → browser viewer.
+- Seven cancellers, each with a CPU and a GPU implementation behind one
+  interface: ECA-m, ECA-B, ECA-S, ECA-CD, ECA-LD, CGLS, FBLMS.
+- `uhd_to_vita49`: a USRP2 driver that streams VITA 49.2 in the same
+  profile as the FERS simulator, so the chain cannot tell the two apart.
+- A second surveillance channel (three streams) and an angle of arrival per
+  plot.
+- Live parameter changes from the viewer, applied at CPI boundaries and
+  logged.
+- A MATLAB reference chain and golden-file checks for every C++ stage.
 
-Design records: `docs/UHD_VITA49_Driver_design.md`, `docs/ard-stream-design.md`,
-`docs/live-parameters.md`, `docs/design_decisions.md`.
+What was not done:
 
+- No antennas were connected. The chain ran end to end from the USRP2 on the
+  bench, but no off-air target was seen, and the spectrum orientation of the
+  USRP path was never checked against a station.
+- No tracker. The output is plots per CPI.
+- Power and thermal behaviour under load were not measured. The board logs
+  over-current alarms under sustained GPU load.
+
+## Results
+
+All figures are from the Jetson with clocks pinned (`nvpmodel -m 0`,
+`jetson_clocks`). Full results, method and discussion are in the thesis.
+
+### Cancellation time per 1 s CPI, CPU against GPU
+
+Frozen CPI 0 of `S0_clean` (204800 samples, K = 120 taps), cancellation only,
+median of 20 GPU / 3 CPU runs. CPU in FP64, GPU in FP32.
+Source: `results/L3_bench/20261026_223906_backends/dsi_bench.csv` and
+`ard_bench.csv`.
+
+| Stage | CPU (Nano, FP64) | GPU (Nano) |
+|---|---|---|
+| ECA-CD | 122.3 ms | **5.3 ms** |
+| ECA-LD | 308.4 ms | 17.0 ms |
+| FBLMS | 95.0 ms | 34.6 ms |
+| ECA-B | 10 129 ms | 47.4 ms |
+| ECA-m | 10 307 ms | 52.3 ms |
+| ECA-S | 99 653 ms | 107.2 ms |
+| CGLS (30 iterations) | 10 240 ms | 208.7 ms |
+| Range-Doppler map + CFAR | 52 794 ms (FP32) | 9.0 ms |
+
+Every canceller runs well inside the 1 s budget on the GPU. On the CPU only
+ECA-CD, ECA-LD and FBLMS cancel within budget, and the map alone takes 53 s,
+so the chain needs the GPU.
+
+### Detection quality with clutter
+
+`S1_clutter`: a 600 s FERS scenario with one aircraft, 28 static scatterers
+and 4 slow movers, real FM waveform, two channels, 1 s CPI, 1-D CFAR
+(guard 4, train 6, Pfa 1e-5). Source:
+`results/L2_performance/quality.csv`, rows `S1_clutter`.
+
+| Canceller | Suppression | Pd (plots) | Target SNR | Chain time / CPI (median) | Peak memory |
+|---|---|---|---|---|---|
+| ECA-m | 38.3 dB | 0.97 | 31.3 dB | 66.6 ms | 772 MB |
+| ECA-B | 50.0 dB | 0.95 | 35.0 dB | 63.1 ms | 771 MB |
+| ECA-S | 50.3 dB | 0.97 | 35.2 dB | 125.0 ms | 771 MB |
+| ECA-CD | 25.3 dB | 0.34 | 17.2 dB | 12.8 ms | 454 MB |
+| ECA-LD | 46.1 dB | 0.99 | 36.7 dB | 25.2 ms | 457 MB |
+| CGLS | 47.5 dB | 0.97 | 38.3 dB | 219.8 ms | 455 MB |
+| FBLMS | 48.4 dB | 0.98 | 38.4 dB | 42.6 ms | 454 MB |
+
+The thesis recommends **ECA-LD** with a batch of 250 ms or longer: the best
+balance of speed and detection. ECA-CD is the fastest but breaks down on
+clutter, which its per-carrier model cannot follow. FBLMS gives the best
+target SNR; ECA-S suits one channel with few false plots.
+
+Note: `config/prb.conf` and `config/fers.conf` still select ECA-CD, the
+default during development. To run the recommended canceller set
+`DSI_ALGORITHM = ECA-LD` and `ECA_LD_BATCH_s` to 0.25 or more (the results
+above used 1.0, one solve per CPI).
+
+### Correctness
+
+ECA-m, ECA-B, ECA-LD, FBLMS, the range-Doppler map and the CFAR have MATLAB
+golden files; the CPU FP64 code matches them to between 4e-13 and 8e-7
+relative error. ECA-S, ECA-CD and CGLS are checked GPU against CPU; CGLS was
+also checked against an independent MATLAB CGLS. Every GPU FP32 canceller is
+within 1e-2 of FP64 with the same suppression to three decimals, and the
+FP32 chain gives the same CFAR cells as FP64. Logs in
+`results/L1_correctness/`.
 
 ## Repository layout
 
 ```
 passive-radar-sbc/
-├── CMakeLists.txt        top-level build (CMake >= 3.10; see Build)
-├── Makefile              laptop-side driver: sync + remote build/run over SSH
-│                         (`make help` lists every target)
-├── README.md
-├── .gitignore
-├── bench/                timing harnesses: dsi_bench, ard_bench, cufft_bench
-├── include/pbr/          public headers for the processing library (flat)
+├── CMakeLists.txt     Jetson build (CMake 3.10, nvcc 10.2)
+├── Makefile           Mac-side driver: sync + remote build/run over SSH (`make help`)
+├── include/pbr/       public headers, flat
 ├── src/
-│   ├── ingest/           VITA 49.2 UDP receiver, circular buffer, config
-│   ├── dsi/              DSI cancellation: ECA-m, ECA-B, ECA-S, ECA-CD, CGLS, FBLMS, ECA-LD
-│   ├── ard/              CAF / range–Doppler map, 2D CA-CFAR, map output
-│   ├── display/          HttpServer + ard_viewer.html, served by ard_view
-│   └── app/              pbr_run, uhd_to_vita49, ard_view, dsi_verify, ard_verify
-├── tests/                unit tests, one executable per file
-├── matlab/               the reference implementation (validation ground truth)
-├── config/               prb.conf (USRP, 200 kHz) and fers.conf (FERS, 204800 Hz)
-├── third_party/          approved external headers (currently none)
-├── scripts/              Jetson run scripts, clock pinning, CGLS tuning tools
-├── scenarios/            FERS scenarios (.fersxml) and how each capture was made
-└── docs/                 architecture notes, benchmarking methodology, results
+│   ├── ingest/        VITA 49.2 decode and write, UDP, circular buffer, config,
+│   │                  capture/replay, CPI extraction
+│   ├── dsi/           the seven cancellers, cpu/ and gpu/
+│   ├── ard/           range-Doppler map, CFAR, plot grouping, bearing, frame stream
+│   ├── gpu/           GpuCommon.cuh: helpers shared by the GPU stages
+│   ├── display/       HttpServer + ard_viewer.html, served by ard_view
+│   └── app/           pbr_run, uhd_to_vita49, ard_view, dsi_verify, ard_verify
+├── bench/             dsi_bench, ard_bench, cufft_bench
+├── tests/             17 unit tests, one executable per file
+├── matlab/            reference chain, golden generators, scoring, thesis figures
+├── scenarios/         FERS scenarios (.fersxml) and how each capture was made
+├── scripts/           results campaign, CPI sweep, backend bench, clock pinning
+├── config/            prb.conf (USRP, 200 kHz), fers.conf (FERS, 204800 Hz)
+├── docs/              design records, methodology, findings
+└── third_party/       approved external headers (none)
 ```
 
-`src/` is grouped by pipeline stage, not by library: cuFFT and cuBLAS calls
-live in the stage that uses them rather than behind a wrapper layer. Public
-headers stay flat in `include/pbr/` regardless of which subdirectory
-implements them, so every include reads `#include "pbr/<Name>.hpp"`.
-
-Large data (captured IQ, FERS output, `.mat` files, benchmark CSVs, tegrastats
-logs) is **not** version-controlled — it lives on the microSD card at `/data`
-and is regenerated from the FERS scenarios in `scenarios/`. See `.gitignore`.
+`data/` and `results/` are gitignored. Captures and golden files are
+regenerated from `scenarios/` (see `scenarios/README.md`); results come from
+the scripts in `scripts/`.
 
 ## Requirements
 
-- Jetson Nano, L4T R32.7.x, CUDA 10.2 (cuFFT, cuBLAS, cuSOLVER)
-- CMake 3.10, the stock version from L4T apt. The CMakeLists passes
-  `-gencode arch=compute_53,code=sm_53` explicitly.
-- A C++14-capable host compiler (g++ 7.5 shipped with L4T is fine). CUDA 10.2
-  device code is limited to C++14; do not use C++17 features in `.cu` files.
+- Jetson Nano, L4T R32.7, CUDA 10.2 with cuFFT, cuBLAS and cuSOLVER.
+- CMake 3.10 and GCC 7 (stock L4T). C++14 throughout.
+- UHD 3.10 on the Nano (`libuhd-dev uhd-host`) for the USRP driver.
+- For development: a Mac (or Linux host) with SSH access to the board as
+  `Host jetson`, MATLAB for the reference chain, FERS for test signals.
 
-## Build
+## Build and run
 
-Development happens on a laptop; the Jetson is the build/run target. Editing is
-done on the laptop and synced to the board over SSH — the top-level `Makefile`
-drives a remote CMake build, so you never edit on the Jetson directly (an rsync
-with `--delete` mirrors the tree and will clobber on-board edits).
-
-### Everyday workflow (from the laptop)
-
-Requires a `Host jetson` entry in `~/.ssh/config` with key-based auth.
+Edit on the host; the Jetson is a build and run target only. `make sync` uses
+`rsync --delete`, so edits made on the board are lost.
 
 ```bash
-make sync      # edited config/*.conf only — 2 s, no compile
-make build     # edited any C++/CUDA — sync then compile on the Jetson
+make build     # sync, then compile on the Jetson
 make test      # unit tests on the Jetson
-make run       # live run, clocks pinned, tegrastats logged
-make drive     # the USRP driver on the Jetson
+make run       # the chain, live, clocks pinned (ARGS='--group 239.192.0.1')
+make drive     # the USRP driver on the Jetson (ARGS='--synth' without hardware)
 make view      # the viewer, forwarded to http://localhost:8080
-make stop      # end every radar process left on the Jetson
-make replay    # replay a recorded capture through the whole chain
-make pull      # copy results back to ./results
+make replay    # a recorded FERS capture through the chain
+make stop      # end every radar process on the Jetson
+make pull      # results back to ./results
+make host      # local build without CUDA, into ./bin
+make host-test # unit tests locally
 ```
 
-`make help` lists them all. Everything about a run — algorithm, backend,
-CFAR and ECA settings — lives in `config/prb.conf`, which is read at **run**
-time. So the tuning loop is just `make sync && make run`: no rebuild, and no
-command-line flags to remember.
+A live session is three terminals: `make view`, then `make run ARGS='--group
+239.192.0.1'` (wait for "Listening now"), then `make drive`. Open
+http://localhost:8080.
 
-Local builds, for fast iteration without the board (no CUDA, so the GPU
-backends are absent and asking for them fails loudly):
+The config is read at run time: after editing `config/*.conf`, `make sync`
+is enough.
 
-```bash
-make host        # every tool into ./bin
-make host-test   # unit tests locally
-```
-
-### Directly on the Jetson
-
-Stock CMake 3.10 is sufficient. nvcc is pinned by absolute path so the build
-does not depend on the shell PATH (a non-interactive SSH shell does not source
-the interactive part of `~/.bashrc`):
+Directly on the Jetson:
 
 ```bash
 mkdir -p build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_CUDA_COMPILER=/usr/local/cuda-10.2/bin/nvcc ..
 make -j2
-# -> build/cufft_bench
 ```
 
-`-j2` (not `-j4`) is deliberate: the 4 GB is shared with the GPU, so a
-lower job count avoids OOM on heavier template-heavy translation units later.
+### From FERS
 
-No-CMake fallback for the harness alone:
-
-```bash
-nvcc -O3 -arch=sm_53 bench/cufft_bench.cu -lcufft -o cufft_bench
-```
-
-## Ingest and CPI extraction
-
-The ingest layer is plain C++14 and POSIX sockets with no CUDA in it, so it
-builds and runs on the laptop as well as the Jetson. Local runs prove
-function; all timing numbers must come from the Jetson.
+Start the chain first, then FERS (it takes about 3 s to send its first
+packet):
 
 ```bash
-make host          # every tool into ./bin
-make host-test     # build and run every unit test locally
-```
-
-`pbr_run` records what it receives, so a live stream can be replayed later
-through the identical path. Start it **before** `fers-cli`, since it binds
-the UDP port:
-
-```bash
-./bin/pbr_run --live --config config/fers.conf --seconds 30 \
-    --capture data/S0_clean/capture.pbrcap --dump-cpi data/S0_clean/cpi_0000.bin
-# then, in another terminal:
+./bin/pbr_run --live --config config/fers.conf --out results/run1 \
+              --capture data/S0_clean/capture.pbrcap
 fers-cli <scenario>.fersxml --out-dir=/tmp/out \
-         --vita49 127.0.0.1:4991 --vita49-fullscale 0.005 -n=6
+         --vita49 <chain-ip>:4991 --vita49-fullscale 0.005 -n=6
 ```
 
-`--capture` writes every datagram to a `.pbrcap` file for `--file` replay;
-`--dump-cpi` writes the first CPI's input, both channels, as the fixed input
-of `dsi_verify`, `dsi_bench` and `matlab/eca_golden.m`.
-`--out DIR` writes `telemetry.csv` (its last two columns, `refBwHz` and
-`refCentreHz`, are the reference channel's RMS bandwidth and centroid),
-`detections.csv` (every CFAR cell, for
-checking the detector), `plots.csv` (one plot per group of touching
-detections, at its power-weighted centroid; the frames and the viewer show
-these) and `changes.log`. `--save-config` keeps a copy of the config beside
-them. The Mac build has no GPU, so there set
-`DSI_BACKEND = CPU`; a live run on the CPU starts with a warning, and the
-summary's budget and lag checks say whether it kept up (on the MacBook,
-CPU range-Doppler takes about 1.25 s per 1 s CPI, so it does not).
+`--capture` records the stream for replay with `--file`; `--dump-cpi` freezes
+one CPI for the verification and bench tools; `--out DIR` writes
+`telemetry.csv`, `detections.csv`, `plots.csv` and `changes.log`.
 
-## DSI cancellation
-
-Two steps. First freeze one CPI from a recorded capture, then run the
-canceller against it. Nothing here needs FERS or a network.
+### Verification and benchmarks
 
 ```bash
-./bin/pbr_run --file data/S0_clean/capture.pbrcap --config config/fers.conf \
-              --dump-cpi data/S0_clean/cpi_0000.bin
-
-./bin/dsi_bench --cpi data/S0_clean/cpi_0000.bin --algorithm ECA-B --iters 10 \
-                --csv results/L3_bench/dsi_bench.csv
-```
-
-`--algorithm` and `--backend` override `config/prb.conf` when given; with
-neither, the run is fully described by the tracked config file. The harness
-loads the CPI once, calls `init()` once, discards a warm-up iteration, and
-times only the cancellation — so every algorithm sees byte-identical input and
-no allocation lands inside the timed region.
-
-Measured on the **Jetson**, first CPI of the shipped capture, one session,
-clocks not pinned (provisional):
-
-| Algorithm | Backend | Suppression | Time per CPI | vs real time |
-|---|---|---|---|---|
-| ECA-m | GPU | 40.18 dB | 151.8 ms | 0.15× |
-| ECA-B | GPU | 51.62 dB | **142.1 ms** | **0.14×** |
-| ECA-m | CPU | 40.18 dB | 9719.9 ms | 9.72× |
-| ECA-B | CPU | 51.62 dB | 9632.1 ms | 9.63× |
-
-The GPU is **68× faster than the CPU** and runs at 7× real time; the CPU
-cannot keep up at all.
-
-The 11.4 dB gain is why ECA-B exists: one set of weights for a whole second
-cannot follow clutter that changes within it. ECA-m and ECA-B taking the same
-time is not a mistake — batching costs the same arithmetic and buys
-adaptivity, not speed.
-
-**Host timings are order-of-magnitude only.** Citable figures come from the
-Jetson with clocks pinned; see the measurement note below.
-
-### Validation against MATLAB
-
-`matlab/eca_golden.m` reads the same frozen CPI, cancels in double precision,
-and writes golden outputs; `dsi_verify` compares the C++ canceller against
-them and exits non-zero on failure:
-
-```bash
+# MATLAB goldens (read the config; point them at fers.conf for FERS data)
 /Applications/MATLAB_R2025a.app/bin/matlab -batch "addpath('matlab'); eca_golden"
-./bin/dsi_verify --cpi data/S0_clean/cpi_0000.bin --golden data/S0_clean/golden/golden_ecam.bin --algorithm ECA-m
-./bin/dsi_verify --cpi data/S0_clean/cpi_0000.bin --golden data/S0_clean/golden/golden_ecab.bin --algorithm ECA-B
+
+./bin/dsi_verify --cpi data/S0_clean/cpi_0000.bin \
+                 --golden data/S0_clean/golden/golden_ecab.bin --algorithm ECA-B
+./bin/dsi_bench  --cpi data/S0_clean/cpi_0000.bin --algorithm ECA-LD --iters 20 \
+                 --csv results/dsi_bench.csv
 ```
 
-The golden file records the parameters it was generated with, and
-`dsi_verify` refuses to compare if they disagree with the loaded config, so a
-stale golden file fails loudly. Re-run this pair of checks after any change
-to `src/dsi/`.
+The results campaign is scripted: `scripts/results_run.sh` (full-scenario
+runs), `scripts/level1_verify.sh` (golden checks), `scripts/cpi_sweep.sh`,
+`scripts/backend_bench.sh`. `matlab/quality_table.m` gathers the runs into
+`results/L2_performance/quality.csv`; `matlab/results_plotting/` makes the
+thesis figures. Timing figures need pinned clocks and a 5 V / 4 A barrel-jack
+supply; see `docs/benchmarking-methodology.md`.
 
-## Running the benchmark
+## Documentation
 
-Find the memory ceiling (single long transform, doubling N until allocation fails):
-
-```bash
-./build/cufft_bench --sweep-size --min-size 1024 --max-size 268435456 --batch 1 --csv > size_sweep.csv
-```
-
-Find the batch ceiling at a fixed Doppler length:
-
-```bash
-./build/cufft_bench --sweep-batch --size 128 --max-batch 4194304 --csv > batch_sweep.csv
-```
-
-Characterise the two plan configs against a real-time budget:
-
-```bash
-./build/cufft_bench --size 204800 --batch 1    --iters 200 --budget-ms 1000   # full 1 s CPI
-./build/cufft_bench --size 128    --batch 1600 --iters 200 --budget-ms 5      # batched Doppler
-```
-
-Under controlled clocks/fan with a tegrastats trace (for the methodology chapter):
-
-```bash
-bash scripts/run_cufft_bench.sh -- --sweep-size --min-size 1024 --max-size 33554432 --batch 1 --csv
-# results + tegrastats.log land in /data/results/cufft_bench/<timestamp>/
-```
-
-> **Measurement note.** Latency figures are only meaningful on a stable 5 V/4 A
-> barrel-jack supply (J48 jumper fitted) with the desktop stopped
-> (`sudo systemctl set-default multi-user.target`) and clocks pinned
-> (`sudo nvpmodel -m 0 && sudo jetson_clocks`). On Micro-USB power or with DVFS
-> active, per-run *means* vary several-fold and can even be misleadingly
-> *consistent* while the GPU sits throttled; the per-run *minimum* tracks the
-> true kernel time but is not citable on its own. Always record the nvpmodel
-> mode alongside results. The sweeps push allocation/compute to the ceiling and
-> should only be run on the barrel jack — rail sag under load corrupts the
-> microSD rather than failing cleanly.
-
-### Reading the output
-
-Each row reports mean/min/std execution time, effective GFLOP/s, sample
-throughput, workspace and data footprint, and free memory after allocation.
-Two design signals to watch:
-
-- **Memory ceiling** — the N or batch at which a row reports `FAILED`, and which
-  allocation (`plan_alloc`, `workspace_malloc`, `input_malloc`) hit the wall
-  first. On Tegra the 4 GB is shared with CPU/OS, so run headless for the true
-  ceiling.
-- **7-smoothness** — the tool warns when N has a prime factor above 7. cuFFT is
-  fastest on sizes factoring into {2,3,5,7}; a CPI length that lands on a large
-  prime can cost an order of magnitude. Pick FFT lengths accordingly
-  (204800 = 2¹³·5² is fine).
+| File | Contents |
+|---|---|
+| `docs/design_decisions.md` | every design decision, with reasons |
+| `docs/dsi-cancellation-explained.md` | the cancellers in plain terms |
+| `docs/canceller-findings-2026-10.md` | canceller comparison findings |
+| `docs/benchmarking-methodology.md` | how timing runs are made |
+| `docs/results-rerun-plan.md` | the final results campaign |
+| `docs/cpi-sweep-plan.md` | the CPI length sweep |
+| `docs/third-channel-aoa-design.md` | second surveillance channel and AoA |
+| `docs/UHD_VITA49_Driver_design.md` | the USRP driver |
+| `docs/ard-stream-design.md`, `docs/ard-viewer.md` | frame stream and viewer |
+| `docs/live-parameters.md` | live parameter changes |
+| `docs/legacy-audit.md` | the legacy code reviewed at the start |
+| `RESULTS.md` | early results log (to 2026-10-02); superseded by the thesis |
 
 ## Licence
 
-TODO: Confirm UCT's IP policy for thesis code before choosing a licence.
+None. UCT's IP policy for thesis code is unresolved.
